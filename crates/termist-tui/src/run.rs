@@ -9,6 +9,7 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::Rect;
 use std::io::stdout;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use termist_core::{ClientRequest, ServerEvent};
@@ -45,6 +46,7 @@ fn spawn_daemon(paths: &Paths) -> anyhow::Result<()> {
         .open(paths.daemon_log_path())?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("daemon")
+        .current_dir(daemon_cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
@@ -69,6 +71,23 @@ fn spawn_daemon(paths: &Paths) -> anyhow::Result<()> {
     }
     cmd.spawn()?;
     Ok(())
+}
+
+/// The autostarted daemon outlives this TUI, so it must not keep the TUI's cwd (a
+/// project or worktree the user may delete or unmount): it runs from the home dir.
+fn daemon_cwd() -> PathBuf {
+    std::env::home_dir()
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| {
+            #[cfg(unix)]
+            {
+                PathBuf::from("/")
+            }
+            #[cfg(windows)]
+            {
+                std::env::temp_dir()
+            }
+        })
 }
 
 pub async fn run(paths: Paths) -> anyhow::Result<()> {
@@ -183,6 +202,15 @@ mod tests {
     use super::*;
     use termist_platform::framed::FramedReader;
     use termist_platform::ipc;
+
+    #[test]
+    fn the_daemon_runs_from_an_existing_dir_outside_the_project() {
+        let dir = daemon_cwd();
+        assert!(dir.is_dir(), "{dir:?}");
+        if let Some(home) = std::env::home_dir().filter(|d| d.is_dir()) {
+            assert_eq!(dir, home);
+        }
+    }
 
     // A daemon that speaks another protocol refuses the handshake; starting a second
     // daemon can't help (it would lose the lock race), so that error must surface as is.
