@@ -32,7 +32,15 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // An agent CLI treats exit 2 from a hook as "block": a malformed
+        // `termist hook …` line must exit 0 silently, like every other hook failure.
+        Err(_) if std::env::args().nth(1).as_deref() == Some("hook") => {
+            return ExitCode::SUCCESS;
+        }
+        Err(err) => err.exit(),
+    };
     // A hook must never fail the agent, even if paths can't be resolved (e.g. etcetera
     // can't find a base dir and TERMIST_HOME is unset): check this before any Paths::from_env
     // error can return FAILURE.
