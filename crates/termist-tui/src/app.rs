@@ -12,6 +12,8 @@ pub enum Mode {
     Focus,
     FocusPrefix,
     ConfirmQuit,
+    /// `d` was pressed on this session; `y` / Enter kills it, any other key cancels.
+    ConfirmKill(SessionId),
 }
 
 #[derive(Debug, PartialEq)]
@@ -100,6 +102,9 @@ impl App {
                         self.mode = Mode::Grid;
                     }
                 }
+                if self.mode == Mode::ConfirmKill(id) {
+                    self.mode = Mode::Grid;
+                }
                 self.repair_selection();
             }
             ServerEvent::Screen { session, update } => {
@@ -125,6 +130,13 @@ impl App {
                     return vec![Action::Quit];
                 }
                 self.mode = Mode::Grid;
+                return vec![];
+            }
+            Mode::ConfirmKill(id) => {
+                self.mode = Mode::Grid;
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                    return vec![Action::Send(ClientRequest::KillSession { session: id })];
+                }
                 return vec![];
             }
             Mode::Focus => {
@@ -166,7 +178,7 @@ impl App {
                 KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
                 KeyCode::Char('d') => {
                     if let Some(id) = self.selected {
-                        actions.push(Action::Send(ClientRequest::KillSession { session: id }));
+                        self.mode = Mode::ConfirmKill(id);
                     }
                 }
                 KeyCode::Char(']') => self.switch_project(1),
@@ -535,6 +547,36 @@ mod tests {
         assert_eq!(app.mode, Mode::Grid);
         app.on_key(ctrl('c'));
         assert_eq!(app.on_key(ctrl('c')), vec![Action::Quit]);
+    }
+
+    #[test]
+    fn killing_a_session_asks_first_and_any_other_key_cancels() {
+        let (mut app, _) = app();
+        assert!(sent(&app.on_key(k(K::Char('d')))).is_empty());
+        assert!(matches!(app.mode, Mode::ConfirmKill(_)));
+        assert!(sent(&app.on_key(k(K::Char('n')))).is_empty());
+        assert_eq!(app.mode, Mode::Grid);
+        let (mut app, s) = self::app();
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::SessionRemoved(s[0].id));
+        assert_eq!(app.mode, Mode::Grid, "the session to kill went away");
+    }
+
+    #[test]
+    fn killing_a_session_is_confirmed_with_y_or_enter() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('d')));
+        assert_eq!(app.mode, Mode::ConfirmKill(s[0].id));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('y')))),
+            vec![&ClientRequest::KillSession { session: s[0].id }]
+        );
+        assert_eq!(app.mode, Mode::Grid);
+        app.on_key(k(K::Char('d')));
+        assert_eq!(
+            sent(&app.on_key(k(K::Enter))),
+            vec![&ClientRequest::KillSession { session: s[0].id }]
+        );
     }
 
     #[test]

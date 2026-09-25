@@ -259,6 +259,19 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .into(),
             Style::default().fg(Color::Yellow),
         ),
+        (_, Mode::ConfirmKill(id)) => {
+            let name = app
+                .state
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.name.as_str())
+                .unwrap_or("this session");
+            (
+                format!("Kill {name}? It stops the process.  y / Enter: kill · any key: cancel"),
+                Style::default().fg(Color::Yellow),
+            )
+        }
         (_, Mode::Grid) => (
             "n claude · t shell · Enter focus · . next● · hjkl move · d kill · q quit".into(),
             Style::default().fg(Color::DarkGray),
@@ -397,6 +410,22 @@ mod tests {
             status_style(AgentStatus::Disconnected),
             ('○', Color::Gray, "disconnected")
         );
+    }
+
+    #[test]
+    fn confirm_kill_names_the_session_in_yellow() {
+        let mut app = fixture();
+        app.on_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Char('d'),
+        ));
+        let t = render(&mut app, 80, 16);
+        let buf = t.backend().buffer();
+        let footer: String = (0..80).map(|x| buf[(x, 15)].symbol()).collect();
+        assert_eq!(
+            footer.trim_end(),
+            "Kill claude-1? It stops the process.  y / Enter: kill · any key: cancel"
+        );
+        assert_eq!(buf[(0, 15)].fg, Color::Yellow);
     }
 
     // Review Focus 5
