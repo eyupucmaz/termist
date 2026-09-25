@@ -155,6 +155,7 @@ impl App {
             Mode::FocusPrefix => {
                 self.mode = Mode::Focus;
                 match key.code {
+                    // Esc, q, and C-q (PRD §7: C-q always escapes, prefix or not).
                     KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Grid,
                     KeyCode::Char('a') if ctrl => {
                         if let Some(id) = self.selected {
@@ -581,6 +582,16 @@ mod tests {
             sent(&app.on_key(k(K::Enter))),
             vec![&ClientRequest::KillSession { session: s[0].id }]
         );
+    }
+
+    #[test]
+    fn ctrl_q_after_the_prefix_still_escapes_to_the_grid() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        assert_eq!(app.mode, Mode::FocusPrefix);
+        assert!(sent(&app.on_key(ctrl('q'))).is_empty());
+        assert_eq!(app.mode, Mode::Grid, "C-q always escapes (PRD §7)");
     }
 
     #[test]
