@@ -1,0 +1,14 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 60, 10).backend()"
+---
+" termist   web                                              "
+"No sessions yet.  n: new claude  ·  t: new shell            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"n claude · t shell · Enter focus · . next● · hjkl move · d k"

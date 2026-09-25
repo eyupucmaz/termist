@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 60, 16).backend()"
+---
+" termist   orbit-api ◆1✓1                                   "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮            "
+"┃◆ claude-1            ┃│✓ shell-2             │            "
+"┃claude · waiting      ┃│shell · done          │            "
+"┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯            "
+"┌ claude-1 — claude ───────────────────────────────────────┐"
+"│hello                                                     │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+"n claude · t shell · Enter focus · . next● · hjkl move · d k"
