@@ -837,6 +837,7 @@ name = "termist-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "interprocess",
  "portable-pty",
  "serde_json",
  "tempfile",
