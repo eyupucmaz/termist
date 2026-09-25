@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 use termist_core::{ClientRequest, ServerEvent};
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
     // can't find a base dir and TERMIST_HOME is unset): check this before any Paths::from_env
     // error can return FAILURE.
     if let Some(Cmd::Hook { harness, event }) = &cli.cmd {
-        if let Ok(paths) = Paths::from_env() {
+        if let Some(paths) = hook_paths() {
             hook(&paths, harness, event);
         }
         return ExitCode::SUCCESS; // a hook never fails the agent
@@ -64,6 +65,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where a hook sends its event: the daemon that spawned the agent exports its
+/// runtime dir as `TERMIST_RUNTIME_DIR` (PRD §11.4), which picks the socket path and
+/// the pipe name; without it, the usual `Paths::from_env()`.
+fn hook_paths() -> Option<Paths> {
+    let Some(dir) = std::env::var_os("TERMIST_RUNTIME_DIR").filter(|d| !d.is_empty()) else {
+        return Paths::from_env().ok();
+    };
+    let runtime_dir = PathBuf::from(dir);
+    // Only runtime_dir matters to a hook; the other dirs are never touched.
+    let mut paths = Paths::from_env().unwrap_or_else(|_| Paths::under(runtime_dir.clone()));
+    paths.runtime_dir = runtime_dir;
+    Some(paths)
 }
 
 /// Reads the hook payload (at most 1 MiB, at most 1 s) and forwards it within 2 s.

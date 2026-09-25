@@ -5,6 +5,7 @@ use crate::session::ClientId;
 use anyhow::bail;
 use interprocess::local_socket::tokio::prelude::*;
 use std::fs::{File, TryLockError};
+use std::path::PathBuf;
 use std::time::Duration;
 use termist_core::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 use termist_platform::framed::{FramedReader, write_frame};
@@ -49,6 +50,8 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
         config,
         exe,
         claude_settings,
+        runtime_dir: paths.runtime_dir.clone(),
+        termist_home: std::env::var_os("TERMIST_HOME").map(PathBuf::from),
     };
     tokio::spawn(registry::run(
         Registry::new(launcher, notes_tx, stop_tx),

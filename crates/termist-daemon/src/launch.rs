@@ -38,14 +38,26 @@ pub struct Launcher {
     pub config: DaemonConfig,
     pub exe: PathBuf,
     pub claude_settings: PathBuf,
+    /// The daemon's runtime dir, exported as `TERMIST_RUNTIME_DIR` so `termist hook`
+    /// reaches this daemon's socket or pipe whatever the agent's environment says.
+    pub runtime_dir: PathBuf,
+    /// The daemon's own `TERMIST_HOME`, when it had one; passed on to sessions.
+    pub termist_home: Option<PathBuf>,
 }
 
 impl Launcher {
     pub fn launch(&self, req: LaunchRequest<'_>) -> Launch {
-        let env = vec![
+        let mut env = vec![
             ("TERMIST_SESSION_ID".to_string(), req.id.to_string()),
             ("TERMIST_BIN".to_string(), self.exe.display().to_string()),
+            (
+                "TERMIST_RUNTIME_DIR".to_string(),
+                self.runtime_dir.display().to_string(),
+            ),
         ];
+        if let Some(home) = &self.termist_home {
+            env.push(("TERMIST_HOME".to_string(), home.display().to_string()));
+        }
         let (program, args, agent_session_id) = match req.kind {
             SessionKind::Shell => (
                 self.config.shell.clone().unwrap_or_else(default_shell),
@@ -113,6 +125,8 @@ mod tests {
             },
             exe: PathBuf::from("/usr/local/bin/termist"),
             claude_settings: PathBuf::from("/data/claude-hooks.json"),
+            runtime_dir: PathBuf::from("/run/termist"),
+            termist_home: None,
         }
     }
 
@@ -145,6 +159,27 @@ mod tests {
             env(&l, "TERMIST_BIN").as_deref(),
             Some("/usr/local/bin/termist")
         );
+        assert_eq!(
+            env(&l, "TERMIST_RUNTIME_DIR").as_deref(),
+            Some("/run/termist"),
+            "hooks must reach the daemon that spawned them (PRD §11.4)"
+        );
+        assert_eq!(env(&l, "TERMIST_HOME"), None);
+    }
+
+    #[test]
+    fn termist_home_is_passed_on_when_the_daemon_has_one() {
+        let mut l = launcher();
+        l.termist_home = Some(PathBuf::from("/tmp/th"));
+        let launch = l.launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &SessionKind::Shell,
+            prompt: None,
+            cwd: Path::new("/p"),
+            cols: 80,
+            rows: 24,
+        });
+        assert_eq!(env(&launch, "TERMIST_HOME").as_deref(), Some("/tmp/th"));
     }
 
     #[test]
