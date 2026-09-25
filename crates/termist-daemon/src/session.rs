@@ -97,6 +97,21 @@ pub fn spawn(
             }
         }
     });
+    // All PTY writes (query replies and user input, in the order they were produced)
+    // go through one blocking writer thread: a child that stops reading fills the
+    // PTY buffer, and that must never stall the session task (it still has to Kill).
+    let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        for data in write_rx {
+            if writer
+                .write_all(&data)
+                .and_then(|()| writer.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     let id = spec.id;
     let exit_notes = notes.clone();
     std::thread::spawn(move || {
@@ -120,10 +135,7 @@ pub fn spawn(
                     Some(bytes) => {
                         for event in term.feed(&bytes) {
                             match event {
-                                TermEvent::Reply(reply) => {
-                                    let _ = writer.write_all(&reply);
-                                    let _ = writer.flush();
-                                }
+                                TermEvent::Reply(reply) => { let _ = write_tx.send(reply); }
                                 TermEvent::Title(t) => { let _ = notes.send(SessionNote::Title(id, t)); }
                                 TermEvent::Bell => {}
                             }
@@ -142,10 +154,7 @@ pub fn spawn(
                         break;
                     }
                     Some(SessionCmd::Kill) => { let _ = killer.kill(); }
-                    Some(SessionCmd::Input(data)) => {
-                        let _ = writer.write_all(&data);
-                        let _ = writer.flush();
-                    }
+                    Some(SessionCmd::Input(data)) => { let _ = write_tx.send(data); }
                     Some(SessionCmd::Resize { cols, rows }) => {
                         if cols > 0 && rows > 0 && (cols, rows) != term.size() {
                             let _ = master.resize(pty_size(cols, rows));
@@ -273,6 +282,40 @@ mod tests {
         .unwrap();
         assert_eq!(exited, (id, Some(3)));
         wait_for_text(&cmd, "bye").await;
+    }
+
+    // Final review F3: a child that never reads its input fills the PTY buffer, so a
+    // write blocks. That must not block the session task: Kill still has to work.
+    // Raw mode matters: in canonical mode macOS discards input past MAX_CANON
+    // (IMAXBEL) instead of blocking the writer, so the test would prove nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kill_works_while_a_write_is_stuck_on_a_full_pty() {
+        let (notes, mut notes_rx) = unbounded_channel();
+        let s = spec("stty raw -echo; echo ready; sleep 30");
+        let id = s.id;
+        let cmd = spawn(s, notes).unwrap();
+        wait_for_text(&cmd, "ready").await;
+        for _ in 0..64 {
+            cmd.send(SessionCmd::Input(vec![b'x'; 1024])).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        cmd.send(SessionCmd::Kill).unwrap();
+        let exited = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(SessionNote::Exited(sid, _)) = notes_rx.recv().await {
+                    return sid;
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            exited.ok(),
+            Some(id),
+            "no Exited note {:?} after Kill: the session task is blocked on a PTY write",
+            started.elapsed()
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[tokio::test]
