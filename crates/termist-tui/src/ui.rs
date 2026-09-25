@@ -364,6 +364,41 @@ mod tests {
         assert_eq!(status_style(AgentStatus::Running).2, "running");
     }
 
+    // Review Focus: TestBackend's Display is text-only, so no snapshot would
+    // catch a swapped or wrong colour. Pin the full (glyph, Color, word) tuple
+    // for every status against the Global Constraints table.
+    #[test]
+    fn status_style_matches_the_global_table() {
+        assert_eq!(
+            status_style(AgentStatus::Fresh),
+            ('●', Color::DarkGray, "fresh")
+        );
+        assert_eq!(
+            status_style(AgentStatus::Running),
+            ('●', Color::Yellow, "running")
+        );
+        assert_eq!(
+            status_style(AgentStatus::Unseen),
+            ('✓', Color::Blue, "done")
+        );
+        assert_eq!(
+            status_style(AgentStatus::Finished),
+            ('●', Color::Green, "ready")
+        );
+        assert_eq!(
+            status_style(AgentStatus::NeedsFeedback),
+            ('◆', Color::Red, "waiting")
+        );
+        assert_eq!(
+            status_style(AgentStatus::Exited { code: Some(1) }),
+            ('✗', Color::Magenta, "exited")
+        );
+        assert_eq!(
+            status_style(AgentStatus::Disconnected),
+            ('○', Color::Gray, "disconnected")
+        );
+    }
+
     // Review Focus 5
     #[test]
     fn tiny_terminals_do_not_panic() {
