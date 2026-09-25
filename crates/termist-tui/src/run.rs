@@ -18,8 +18,11 @@ use termist_platform::{Client, Paths};
 use tokio::sync::mpsc::unbounded_channel;
 
 pub async fn connect_or_spawn(paths: &Paths) -> anyhow::Result<Client> {
-    if let Ok(client) = Client::connect(paths).await {
-        return Ok(client);
+    match Client::connect(paths).await {
+        Ok(client) => return Ok(client),
+        // A live daemon that speaks another protocol: spawning one more can't help.
+        Err(e) if format!("{e:#}").contains("refused the connection") => return Err(e),
+        Err(_) => {}
     }
     spawn_daemon(paths)?;
     for _ in 0..150 {
@@ -173,4 +176,42 @@ async fn perform(actions: Vec<Action>, writer: &mut SendHalf) -> anyhow::Result<
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use termist_platform::framed::FramedReader;
+    use termist_platform::ipc;
+
+    // A daemon that speaks another protocol refuses the handshake; starting a second
+    // daemon can't help (it would lose the lock race), so that error must surface as is.
+    #[tokio::test]
+    async fn a_protocol_mismatch_is_reported_instead_of_spawning_another() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        paths.ensure().unwrap();
+        let listener = ipc::listen(&paths).unwrap();
+        tokio::spawn(async move {
+            use interprocess::local_socket::tokio::prelude::*;
+            while let Ok(conn) = listener.accept().await {
+                let (r, mut w) = conn.split();
+                let _ = FramedReader::new(r).read::<ClientRequest>().await;
+                let message = "protocol 1 is not supported (daemon speaks 99)".to_string();
+                let _ = write_frame(&mut w, &ServerEvent::Error { message }).await;
+            }
+        });
+        let err = connect_or_spawn(&paths)
+            .await
+            .err()
+            .expect("a refused handshake must be an error");
+        assert!(
+            format!("{err:#}").contains("refused the connection"),
+            "{err:#}"
+        );
+        assert!(
+            !paths.daemon_log_path().exists(),
+            "no daemon may be spawned for a protocol mismatch"
+        );
+    }
 }

@@ -1848,8 +1848,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "insta",
+ "interprocess",
  "libc",
  "ratatui",
+ "tempfile",
  "termist-core",
  "termist-platform",
  "tokio",
