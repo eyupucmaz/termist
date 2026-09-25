@@ -1784,6 +1784,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "portable-pty",
  "tempfile",
  "termist-core",
  "termist-daemon",

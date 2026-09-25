@@ -88,16 +88,9 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             }
         }
     });
-    let (input_tx, mut input_rx) = unbounded_channel::<Event>();
-    std::thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if input_tx.send(ev).is_err() {
-                break;
-            }
-        }
-    });
-
     let mut terminal = ratatui::try_init().context("termist needs an interactive terminal")?;
+    // Query before the input thread exists: `event::read()` holds crossterm's global
+    // event-reader lock, and a query that can't take it times out after 2 s.
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     let _ = execute!(stdout(), EnableBracketedPaste);
     if enhanced {
@@ -106,6 +99,16 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
+    set_panic_hook(enhanced);
+
+    let (input_tx, mut input_rx) = unbounded_channel::<Event>();
+    std::thread::spawn(move || {
+        while let Ok(ev) = event::read() {
+            if input_tx.send(ev).is_err() {
+                break;
+            }
+        }
+    });
 
     let mut app = App::new();
     let result: anyhow::Result<()> = async {
@@ -137,12 +140,28 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     }
     .await;
 
+    undo_terminal_modes(enhanced);
+    ratatui::restore();
+    result
+}
+
+/// Undoes what `run` turns on beyond ratatui's raw mode and alternate screen.
+fn undo_terminal_modes(enhanced: bool) {
     if enhanced {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(stdout(), DisableBracketedPaste);
-    ratatui::restore();
-    result
+}
+
+/// On a panic, pops the keyboard flags and disables bracketed paste, then runs the
+/// previous hook: ratatui's (installed by `try_init`) restores raw mode and the
+/// alternate screen, and then the default hook prints the panic.
+fn set_panic_hook(enhanced: bool) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        undo_terminal_modes(enhanced);
+        previous(info);
+    }));
 }
 
 /// Sends requests; returns `true` when the user asked to quit.

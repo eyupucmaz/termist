@@ -304,3 +304,116 @@ async fn a_fake_claude_turn_end_to_end() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// Kills the TUI running in the test PTY when dropped.
+struct KillOnDrop(Box<dyn portable_pty::Child + Send + Sync>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+// Final review F1: the input thread used to start before the keyboard-enhancement
+// query and hold crossterm's event-reader lock, so the query timed out after 2 s: the
+// first frame came 2 s late and DISAMBIGUATE_ESCAPE_CODES was never pushed.
+#[test]
+fn the_tui_draws_its_first_frame_at_once_and_enables_keyboard_enhancement() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::Read;
+    use std::sync::mpsc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let _daemon = DaemonGuard {
+        home: home.clone(),
+        child: None,
+    };
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = CommandBuilder::new(BIN);
+    cmd.cwd(&project_dir);
+    cmd.env("TERMIST_HOME", &home);
+    cmd.env("TERM", "xterm-256color");
+    let spawned = Instant::now();
+    let _tui = KillOnDrop(pair.slave.spawn_command(cmd).unwrap());
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut writer = pair.master.take_writer().unwrap();
+
+    // Plays a terminal that supports the kitty keyboard protocol: answers the flags
+    // query (ESC[?u) and the primary device attributes query (ESC[c), and reports
+    // when the first frame and the keyboard-enhancement push show up.
+    let (seen_tx, seen_rx) = mpsc::channel::<(&'static str, Instant)>();
+    std::thread::spawn(move || {
+        let mut out: Vec<u8> = Vec::new();
+        let mut scanned = 0;
+        let mut buf = [0u8; 4096];
+        let (mut frame, mut pushed) = (false, false);
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+            const QUERIES: [(&[u8], &[u8]); 2] =
+                [(b"\x1b[?u", b"\x1b[?0u"), (b"\x1b[c", b"\x1b[?62;22c")];
+            let mut i = scanned;
+            while i < out.len() {
+                let rest = &out[i..];
+                // a query split across reads: wait for the rest of it
+                if QUERIES
+                    .iter()
+                    .any(|(q, _)| rest.len() < q.len() && q.starts_with(rest))
+                {
+                    break;
+                }
+                for (query, answer) in QUERIES {
+                    if rest.starts_with(query) {
+                        let _ = writer.write_all(answer);
+                    }
+                }
+                i += 1;
+            }
+            let _ = writer.flush();
+            scanned = i;
+            let text = String::from_utf8_lossy(&out);
+            if !frame && text.contains(" termist ") {
+                frame = true;
+                let _ = seen_tx.send(("frame", Instant::now()));
+            }
+            if !pushed && text.contains("\x1b[>1u") {
+                pushed = true;
+                let _ = seen_tx.send(("push", Instant::now()));
+            }
+        }
+    });
+
+    let mut seen = std::collections::HashMap::new();
+    while seen.len() < 2 {
+        match seen_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok((what, at)) => {
+                seen.insert(what, at - spawned);
+            }
+            Err(_) => break,
+        }
+    }
+    let frame = seen.get("frame").copied();
+    assert!(
+        frame.is_some_and(|d| d < Duration::from_secs(1)),
+        "first frame after {frame:?} (want < 1 s)"
+    );
+    assert!(
+        seen.contains_key("push"),
+        "DISAMBIGUATE_ESCAPE_CODES (ESC[>1u) was never pushed; saw {seen:?}"
+    );
+}
