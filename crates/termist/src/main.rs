@@ -89,7 +89,8 @@ fn hook_paths() -> Option<Paths> {
     Some(paths)
 }
 
-/// Reads the hook payload (at most 1 MiB, at most 1 s) and forwards it within 2 s.
+/// Reads the hook payload (at most 1 MiB, at most 500 ms) and forwards it within
+/// 1500 ms: the whole hook stays inside its 2 s budget.
 fn hook(paths: &Paths, harness: &str, event: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -97,7 +98,9 @@ fn hook(paths: &Paths, harness: &str, event: &str) {
         let _ = std::io::stdin().take(1 << 20).read_to_string(&mut buf);
         let _ = tx.send(buf);
     });
-    let payload = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    let payload = rx
+        .recv_timeout(Duration::from_millis(500))
+        .unwrap_or_default();
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -110,7 +113,7 @@ fn hook(paths: &Paths, harness: &str, event: &str) {
         event,
         payload,
         std::env::var("TERMIST_SESSION_ID").ok(),
-        Duration::from_secs(2),
+        Duration::from_millis(1500),
     ));
 }
 

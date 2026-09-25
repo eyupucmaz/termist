@@ -67,7 +67,7 @@ fn a_hook_whose_stdin_never_closes_still_returns() {
     let _keep_open = child.stdin.take();
     assert!(child.wait().unwrap().success());
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(3),
         "took {:?}",
         started.elapsed()
     );
