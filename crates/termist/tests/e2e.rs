@@ -1,13 +1,36 @@
 #![cfg(unix)]
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use termist_core::*;
 use termist_platform::{Client, Paths};
 use tokio::time::timeout;
 
 const BIN: &str = env!("CARGO_BIN_EXE_termist");
+
+/// Stops the test's daemon when dropped, so a failed assertion never leaks one:
+/// runs `termist kill` for the test's `TERMIST_HOME`, then kills `child` if any.
+struct DaemonGuard {
+    home: PathBuf,
+    child: Option<Child>,
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = Command::new(BIN)
+            .arg("kill")
+            .env("TERMIST_HOME", &self.home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 // Review Focus 2
 #[test]
@@ -56,6 +79,10 @@ async fn bare_termist_autostarts_a_detached_daemon() {
     let home = tmp.path().join("home");
     let project_dir = tmp.path().join("project");
     std::fs::create_dir_all(&project_dir).unwrap();
+    let _guard = DaemonGuard {
+        home: home.clone(),
+        child: None,
+    };
 
     // No TTY: bare `termist` must fail fast rather than panic, but the daemon it
     // autostarted along the way must keep running after this parent exits.
@@ -152,13 +179,18 @@ async fn a_fake_claude_turn_end_to_end() {
     .unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = tmp.path().join("home");
-    let mut daemon = Command::new(BIN)
-        .arg("daemon")
-        .env("TERMIST_HOME", &home)
-        .env("TERMIST_CLAUDE_BIN", &agent)
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut guard = DaemonGuard {
+        home: home.clone(),
+        child: Some(
+            Command::new(BIN)
+                .arg("daemon")
+                .env("TERMIST_HOME", &home)
+                .env("TERMIST_CLAUDE_BIN", &agent)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        ),
+    };
     let paths = Paths::under(home.clone());
     let mut c = None;
     for _ in 0..150 {
@@ -266,6 +298,7 @@ async fn a_fake_claude_turn_end_to_end() {
         .unwrap();
     assert!(out.status.success());
     let deadline = Instant::now() + Duration::from_secs(5);
+    let daemon = guard.child.as_mut().unwrap();
     while daemon.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "daemon did not exit after kill");
         tokio::time::sleep(Duration::from_millis(50)).await;
