@@ -114,11 +114,11 @@ impl TermCore {
 
     /// Drives the DEC 2026 synchronized-update timeout. `true` means the screen may have changed.
     pub fn tick(&mut self, now: Instant) -> bool {
-        if let Some(deadline) = self.parser.sync_timeout().sync_timeout() {
-            if now >= deadline {
-                self.parser.stop_sync(&mut self.term);
-                return true;
-            }
+        if let Some(deadline) = self.parser.sync_timeout().sync_timeout()
+            && now >= deadline
+        {
+            self.parser.stop_sync(&mut self.term);
+            return true;
         }
         false
     }

@@ -213,13 +213,13 @@ impl Registry {
                 payload_json,
             } => {
                 let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-                if event == "SessionStart" {
-                    if let (Some(s), Some(sid)) = (
+                if event == "SessionStart"
+                    && let (Some(s), Some(sid)) = (
                         self.session_mut(session),
                         payload.get("session_id").and_then(Value::as_str),
-                    ) {
-                        s.info.agent_session_id = Some(sid.to_string());
-                    }
+                    )
+                {
+                    s.info.agent_session_id = Some(sid.to_string());
                 }
                 let signal = match harness {
                     Harness::Claude => claude::signal_for(&event, &payload),

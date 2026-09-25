@@ -103,12 +103,12 @@ async fn wait_screen_text(c: &mut Client, id: SessionId, needle: &str) -> Screen
     let mut screen = Snapshot::default();
     timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(ServerEvent::Screen { session, update }) = c.recv().await.unwrap() {
-                if session == id {
-                    screen.apply(&update);
-                    if (0..screen.rows as usize).any(|r| screen.line_text(r).contains(needle)) {
-                        return update;
-                    }
+            if let Some(ServerEvent::Screen { session, update }) = c.recv().await.unwrap()
+                && session == id
+            {
+                screen.apply(&update);
+                if (0..screen.rows as usize).any(|r| screen.line_text(r).contains(needle)) {
+                    return update;
                 }
             }
         }
@@ -328,6 +328,48 @@ async fn a_second_daemon_refuses_and_a_stale_socket_is_ignored() {
     c.send(&ClientRequest::Shutdown).await.unwrap();
     next_event(&mut c, |e| *e == ServerEvent::Ack).await;
     timeout(Duration::from_secs(3), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+// Review fix round 1: two daemons racing to start on the same runtime dir must not
+// both bind; exactly one wins and the other bails cleanly.
+#[tokio::test]
+async fn two_daemons_started_together_leave_exactly_one() {
+    enum Loser {
+        First,
+        Second,
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path().to_path_buf());
+    let mut t1 = tokio::spawn(server::run(paths.clone(), shell_config()));
+    let mut t2 = tokio::spawn(server::run(paths.clone(), shell_config()));
+
+    // Whichever of the two resolves within 3s must be the loser: the winner keeps
+    // running (accepting connections) until it is told to shut down.
+    let (loser, result) = timeout(Duration::from_secs(3), async {
+        tokio::select! {
+            r = &mut t1 => (Loser::First, r.unwrap()),
+            r = &mut t2 => (Loser::Second, r.unwrap()),
+        }
+    })
+    .await
+    .expect("one of the two daemons should have failed within 3s");
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("already running"), "{err}");
+
+    let mut c = Client::connect(&paths).await.unwrap();
+    c.send(&ClientRequest::Shutdown).await.unwrap();
+    next_event(&mut c, |e| *e == ServerEvent::Ack).await;
+
+    let survivor = match loser {
+        Loser::First => t2,
+        Loser::Second => t1,
+    };
+    timeout(Duration::from_secs(3), survivor)
         .await
         .unwrap()
         .unwrap()

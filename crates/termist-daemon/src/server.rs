@@ -4,6 +4,7 @@ use crate::registry::{self, Msg, Registry};
 use crate::session::ClientId;
 use anyhow::bail;
 use interprocess::local_socket::tokio::prelude::*;
+use std::fs::{File, TryLockError};
 use termist_core::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 use termist_platform::framed::{FramedReader, write_frame};
 use termist_platform::ipc::{self, Stream};
@@ -13,6 +14,24 @@ use tokio::sync::oneshot;
 
 pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     paths.ensure()?;
+
+    // An exclusive lock closes the race where two daemons both probe the socket, see
+    // nobody home, and then both try to bind: only one of them can hold this lock, so
+    // the loser bails out before it can unlink the winner's socket out from under it.
+    // The `File` is bound to `lock` (not `_`) so the lock is held for all of `run`.
+    let lock_path = paths.runtime_dir.join("daemon.lock");
+    let lock = File::create(&lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            bail!(
+                "a termist daemon is already running for {}",
+                paths.runtime_dir.display()
+            );
+        }
+        Err(TryLockError::Error(e)) => return Err(e.into()),
+    }
+
     if Client::connect(&paths).await.is_ok() {
         bail!(
             "a termist daemon is already running for {}",

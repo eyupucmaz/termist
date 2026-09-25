@@ -64,10 +64,10 @@ pub fn spawn(
     cmd.args(&spec.args);
     cmd.cwd(&spec.cwd);
     for (key, _) in std::env::vars_os() {
-        if let Some(k) = key.to_str() {
-            if should_scrub(k) {
-                cmd.env_remove(k);
-            }
+        if let Some(k) = key.to_str()
+            && should_scrub(k)
+        {
+            cmd.env_remove(k);
         }
     }
     cmd.env("TERM", "xterm-256color");
