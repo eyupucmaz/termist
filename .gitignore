@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Private product docs (PRD, decisions, notes) — local only, never pushed.
+# Agents still read them: see AGENTS.md and .ignore.
+/.docs/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

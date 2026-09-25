@@ -1,0 +1,3 @@
+# ripgrep-based tools (Claude Code Grep/Glob, rg, fd) skip gitignored paths.
+# Re-include the private docs so agents can search them.
+!.docs/
