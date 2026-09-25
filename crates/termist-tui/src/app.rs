@@ -71,6 +71,7 @@ impl App {
     }
 
     pub fn on_event(&mut self, event: ServerEvent) -> Vec<Action> {
+        let mut actions = Vec::new();
         match event {
             ServerEvent::State(state) => {
                 self.state = state;
@@ -78,6 +79,11 @@ impl App {
             }
             ServerEvent::SessionUpdated(info) => {
                 let id = info.id;
+                // You are looking at it (PRD §8): a focused session that finishes is seen.
+                let seen_now = info.status == AgentStatus::Unseen
+                    && self.selected == Some(id)
+                    && self.attached == Some(id)
+                    && matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
                 let known = self.state.sessions.iter().any(|s| s.id == id);
                 match self.state.sessions.iter_mut().find(|s| s.id == id) {
                     Some(s) => *s = info,
@@ -89,6 +95,9 @@ impl App {
                     self.mode = Mode::Focus;
                 }
                 self.repair_selection();
+                if seen_now {
+                    actions.push(Action::Send(ClientRequest::MarkSeen { session: id }));
+                }
             }
             ServerEvent::SessionRemoved(id) => {
                 self.state.sessions.retain(|s| s.id != id);
@@ -116,7 +125,8 @@ impl App {
             }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
-        self.sync_attachment()
+        actions.extend(self.sync_attachment());
+        actions
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -582,6 +592,42 @@ mod tests {
             sent(&app.on_key(k(K::Enter))),
             vec![&ClientRequest::KillSession { session: s[0].id }]
         );
+    }
+
+    #[test]
+    fn a_focused_session_that_finishes_is_marked_seen_at_once() {
+        let (mut app, s) = app();
+        let mut running = s[2].clone();
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Enter));
+        assert_eq!((app.mode, app.attached), (Mode::Focus, Some(running.id)));
+        running.status = AgentStatus::Unseen;
+        let actions = app.on_event(ServerEvent::SessionUpdated(running.clone()));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::MarkSeen {
+                session: running.id
+            }]
+        );
+        app.on_key(ctrl('a'));
+        assert_eq!(app.mode, Mode::FocusPrefix);
+        let actions = app.on_event(ServerEvent::SessionUpdated(running.clone()));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::MarkSeen {
+                session: running.id
+            }],
+            "also while the prefix is pending"
+        );
+    }
+
+    #[test]
+    fn a_selected_session_that_finishes_in_the_grid_stays_unseen() {
+        let (mut app, s) = app();
+        let mut first = s[0].clone();
+        first.status = AgentStatus::Unseen;
+        assert!(sent(&app.on_event(ServerEvent::SessionUpdated(first))).is_empty());
     }
 
     #[test]
