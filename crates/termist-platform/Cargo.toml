@@ -7,3 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+termist-core.workspace = true
+anyhow.workspace = true
+etcetera.workspace = true
+interprocess.workspace = true
+serde.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
