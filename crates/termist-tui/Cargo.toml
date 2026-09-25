@@ -7,3 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+termist-core.workspace = true
+termist-platform.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
