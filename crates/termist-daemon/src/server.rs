@@ -5,6 +5,7 @@ use crate::session::ClientId;
 use anyhow::bail;
 use interprocess::local_socket::tokio::prelude::*;
 use std::fs::{File, TryLockError};
+use std::time::Duration;
 use termist_core::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 use termist_platform::framed::{FramedReader, write_frame};
 use termist_platform::ipc::{self, Stream};
@@ -58,10 +59,19 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     let mut next = 0u64;
     loop {
         tokio::select! {
-            conn = listener.accept() => {
-                next += 1;
-                tokio::spawn(connection(ClientId(next), conn?, tx.clone()));
-            }
+            conn = listener.accept() => match conn {
+                Ok(conn) => {
+                    next += 1;
+                    tokio::spawn(connection(ClientId(next), conn, tx.clone()));
+                }
+                // One failed accept (EMFILE, ECONNABORTED, a broken pipe instance on
+                // Windows, …) must not take every session down with the daemon: log it
+                // (stderr is the daemon log), back off briefly and keep serving.
+                Err(e) => {
+                    eprintln!("termist daemon: accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
             _ = &mut stop_rx => break,
         }
     }
