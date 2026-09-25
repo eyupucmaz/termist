@@ -1784,6 +1784,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tempfile",
+ "termist-core",
+ "termist-daemon",
+ "termist-platform",
+ "termist-tui",
+ "tokio",
 ]
 
 [[package]]

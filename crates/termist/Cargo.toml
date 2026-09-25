@@ -12,5 +12,13 @@ name = "termist"
 path = "src/main.rs"
 
 [dependencies]
+termist-core.workspace = true
+termist-platform.workspace = true
+termist-daemon.workspace = true
+termist-tui.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
