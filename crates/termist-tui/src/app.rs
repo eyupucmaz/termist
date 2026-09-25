@@ -168,31 +168,35 @@ impl App {
                     _ => {}
                 }
             }
-            Mode::Grid => match key.code {
-                KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
-                KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
-                KeyCode::Enter if self.selected.is_some() => self.mode = Mode::Focus,
-                KeyCode::Char('n') => actions.extend(self.create(SessionKind::Agent {
-                    harness: Harness::Claude,
-                })),
-                KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
-                KeyCode::Char('d') => {
-                    if let Some(id) = self.selected {
-                        self.mode = Mode::ConfirmKill(id);
+            Mode::Grid => {
+                // An error message stays up only until the next key.
+                self.message = None;
+                match key.code {
+                    KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
+                    KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
+                    KeyCode::Enter if self.selected.is_some() => self.mode = Mode::Focus,
+                    KeyCode::Char('n') => actions.extend(self.create(SessionKind::Agent {
+                        harness: Harness::Claude,
+                    })),
+                    KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
+                    KeyCode::Char('d') => {
+                        if let Some(id) = self.selected {
+                            self.mode = Mode::ConfirmKill(id);
+                        }
                     }
-                }
-                KeyCode::Char(']') => self.switch_project(1),
-                KeyCode::Char('[') => self.switch_project(-1),
-                KeyCode::Char(c @ '1'..='9') => {
-                    if let Some(p) = self.state.projects.get(c as usize - '1' as usize) {
-                        self.project = Some(p.id);
-                        self.selected = None;
-                        self.repair_selection();
+                    KeyCode::Char(']') => self.switch_project(1),
+                    KeyCode::Char('[') => self.switch_project(-1),
+                    KeyCode::Char(c @ '1'..='9') => {
+                        if let Some(p) = self.state.projects.get(c as usize - '1' as usize) {
+                            self.project = Some(p.id);
+                            self.selected = None;
+                            self.repair_selection();
+                        }
                     }
+                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
+                    _ => {}
                 }
-                KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
-                _ => {}
-            },
+            }
         }
         actions.extend(self.sync_attachment());
         actions
@@ -577,6 +581,17 @@ mod tests {
             sent(&app.on_key(k(K::Enter))),
             vec![&ClientRequest::KillSession { session: s[0].id }]
         );
+    }
+
+    #[test]
+    fn an_error_message_clears_on_the_next_grid_key() {
+        let (mut app, _) = app();
+        app.on_event(ServerEvent::Error {
+            message: "boom".into(),
+        });
+        assert_eq!(app.message.as_deref(), Some("boom"));
+        app.on_key(k(K::Char('l')));
+        assert_eq!(app.message, None);
     }
 
     #[test]
