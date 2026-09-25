@@ -7,3 +7,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+termist-core.workspace = true
+alacritty_terminal.workspace = true
