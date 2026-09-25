@@ -32,6 +32,8 @@ pub struct App {
     pub pane: (u16, u16),
     pub cards_per_row: usize,
     pub message: Option<String>,
+    /// Set by the first `State` from the daemon; until then the body says "Connecting…".
+    pub connected: bool,
     focus_next_created: bool,
 }
 
@@ -53,6 +55,7 @@ impl App {
             pane: (0, 0),
             cards_per_row: 1,
             message: None,
+            connected: false,
             focus_next_created: false,
         }
     }
@@ -75,6 +78,7 @@ impl App {
         match event {
             ServerEvent::State(state) => {
                 self.state = state;
+                self.connected = true;
                 self.repair_selection();
             }
             ServerEvent::SessionUpdated(info) => {

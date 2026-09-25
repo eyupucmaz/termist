@@ -80,7 +80,9 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     draw_header(f, app, areas.header);
     let sessions = app.project_sessions();
     if sessions.is_empty() {
-        let text = if app.state.projects.is_empty() {
+        let text = if !app.connected {
+            "Connecting to the termist daemon…"
+        } else if app.state.projects.is_empty() {
             "No project yet: run termist inside a project folder."
         } else {
             "No sessions yet.  n: new claude  ·  t: new shell"
@@ -409,6 +411,28 @@ mod tests {
         assert_eq!(
             status_style(AgentStatus::Disconnected),
             ('○', Color::Gray, "disconnected")
+        );
+    }
+
+    fn row(t: &Terminal<TestBackend>, y: u16) -> String {
+        let buf = t.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn before_the_first_state_it_says_it_is_connecting() {
+        let mut app = App::new();
+        let t = render(&mut app, 60, 10);
+        assert_eq!(row(&t, 1), "Connecting to the termist daemon…");
+        app.on_event(ServerEvent::State(StateSnapshot::default()));
+        let t = render(&mut app, 60, 10);
+        assert_eq!(
+            row(&t, 1),
+            "No project yet: run termist inside a project folder."
         );
     }
 
