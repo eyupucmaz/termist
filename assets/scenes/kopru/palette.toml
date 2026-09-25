@@ -1,0 +1,93 @@
+# Bogazici Koprusu (seen from Ortakoy): colours for this scene's own keys, merged over palettes.toml.
+#   C main cable + backstays    c hangers          B deck (road lamps at night)
+#   P European tower            O Asian tower (a touch hazier, it is farther away)
+#   Q / q Ortakoy Mosque marble outline / fill  (floodlit at night)
+#   Y / y European hill         A / a Asian hill (Beylerbeyi)    Z / z far shore up the strait
+#   e trees on the Asian hill   N cable anchorage                u ferry cabin (sprite), portholes lit at night
+#   X gilded alems (crescent finials) on the minarets and the dome
+#   L / l house lights on the far shore / on the Asian hill (lit from sunset, twinkle)
+# At night the C / c colours are replaced by the LED colour cycle (see scene.toml).
+
+[sabah]
+C = { fg = "#4e5b6b" }
+c = { fg = "#7a889a" }
+B = { fg = "#4a5563", bg = "#b9c0c7" }
+P = { fg = "#46515e", bg = "#8793a0" }
+O = { fg = "#56616e", bg = "#98a3ae" }
+Q = { fg = "#8a7f6f" }
+q = { fg = "#8a7f6f", bg = "#f1e9da" }
+Y = { fg = "#4d6a43" }
+y = { fg = "#4d6a43", bg = "#86a172" }
+A = { fg = "#5d7a5a" }
+a = { fg = "#5d7a5a", bg = "#9bb294" }
+Z = { fg = "#8098a6" }
+z = { fg = "#8098a6", bg = "#b2c3c9" }
+e = { fg = "#3c5a37", bg = "#9bb294" }
+N = { fg = "#5a544b", bg = "#a79f92" }
+u = { fg = "#3a3a3a", bg = "#f4f1ea" }
+L = { fg = "#6f8591", bg = "#b2c3c9" }
+l = { fg = "#4d6a4a", bg = "#9bb294" }
+X = { fg = "#c08a1e" }
+
+[gunduz]
+C = { fg = "#34404e" }
+c = { fg = "#5f6e80" }
+B = { fg = "#3c4652", bg = "#c3cad1" }
+P = { fg = "#39434f", bg = "#9aa5b0" }
+O = { fg = "#4a5561", bg = "#a8b2bc" }
+Q = { fg = "#7a6f60" }
+q = { fg = "#7a6f60", bg = "#f7f1e4" }
+Y = { fg = "#3f6a35" }
+y = { fg = "#3f6a35", bg = "#6f9a58" }
+A = { fg = "#4f7a4a" }
+a = { fg = "#4f7a4a", bg = "#86aa7c" }
+Z = { fg = "#5f86a0" }
+z = { fg = "#5f86a0", bg = "#93b6c6" }
+e = { fg = "#2e5a2a", bg = "#86aa7c" }
+N = { fg = "#4a453d", bg = "#a8a092" }
+u = { fg = "#2b2b2b", bg = "#ffffff" }
+L = { fg = "#4f7288", bg = "#93b6c6" }
+l = { fg = "#3f6a3a", bg = "#86aa7c" }
+X = { fg = "#b8860b" }
+
+[aksam] # the bridge and the hills turn to silhouettes, the mosque catches the last light
+C = { fg = "#1e1428" }
+c = { fg = "#3e2a40" }
+B = { fg = "#2a1f33", bg = "#5a3a50" }
+P = { fg = "#23172b", bg = "#4a3148" }
+O = { fg = "#2e2036", bg = "#573a52" }
+Q = { fg = "#3a2226" }
+q = { fg = "#3a2226", bg = "#e0a383" }
+Y = { fg = "#3a2c3a" }
+y = { fg = "#3a2c3a", bg = "#5a3f4c" }
+A = { fg = "#4a3444" }
+a = { fg = "#4a3444", bg = "#6e4a58" }
+Z = { fg = "#8e5066" }
+z = { fg = "#8e5066", bg = "#b2656c" }
+e = { fg = "#2e2230", bg = "#6e4a58" }
+N = { fg = "#2a1f2a", bg = "#5a4048" }
+u = { fg = "#5c3a36", bg = "#e6bfa6" }
+L = { fg = "#ffcf6b", bg = "#b2656c" }
+l = { fg = "#ffcf6b", bg = "#6e4a58" }
+X = { fg = "#ffcf5a" }
+
+[gece] # floodlit mosque and towers, lamp-lit deck; cable and hangers cycle through LED colours
+C = { fg = "#6c7aa8" }
+c = { fg = "#4c5780" }
+B = { fg = "#ffcf70", bg = "#1a2040" }
+P = { fg = "#aab4d4", bg = "#2c3454" }
+O = { fg = "#9aa3c2", bg = "#262d4a" }
+Q = { fg = "#e6dcc4" }
+q = { fg = "#e6dcc4", bg = "#5a5068" }
+Y = { fg = "#4a5a7a" }
+y = { fg = "#4a5a7a", bg = "#080c1a" }
+A = { fg = "#4a5876" }
+a = { fg = "#4a5876", bg = "#0b1122" }
+Z = { fg = "#3a4870" }
+z = { fg = "#3a4870", bg = "#0e1530" }
+e = { fg = "#2c3c52", bg = "#0b1122" }
+N = { fg = "#6c7390", bg = "#232840" }
+u = { fg = "#ffc857", bg = "#2a3050" }
+L = { fg = "#ffc857", bg = "#0e1530" }
+l = { fg = "#ffc857", bg = "#0b1122" }
+X = { fg = "#c9a24a" }

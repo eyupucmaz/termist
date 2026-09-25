@@ -1,0 +1,71 @@
+# Bogazici Koprusu, seen from Ortakoy: the mosque on its quay, the bridge spanning the strait behind it.
+title = "Boğaziçi Köprüsü"
+horizon_key = "w"          # sky gradient ends where the open water begins
+
+[[effects]]
+type = "waves"             # Bogaz
+key = "w"
+every = 2
+
+[[effects]]
+type = "blink"             # LED lights on the main cable: a slow rainbow drifting along the span
+key = "C"
+colors = ["#ff5fa2", "#c86bff", "#6f8bff", "#3fd0ff", "#3ff0b0", "#ffd84f", "#ff9a4f"]
+period = 36
+wave = 3
+times = ["gece"]
+
+[[effects]]
+type = "blink"             # the hangers take the same colour as the cable above them
+key = "c"
+colors = ["#ff5fa2", "#c86bff", "#6f8bff", "#3fd0ff", "#3ff0b0", "#ffd84f", "#ff9a4f"]
+period = 36
+wave = 3
+times = ["gece"]
+
+[[effects]]
+type = "twinkle"           # windows (mosque, yalis, houses) go dark now and then after sunset
+key = "W"
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "twinkle"           # house lights on the far shore and the Asian hill
+key = "L"
+threshold = 0.6
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "twinkle"
+key = "l"
+threshold = 0.6
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "stars"
+count = 30
+times = ["gece"]
+
+[[effects]]
+type = "gulls"
+rows = [3, 7, 5]
+times = ["sabah", "gunduz", "aksam"]
+
+[[effects]]
+type = "sprite"            # a Sehir Hatlari vapur sails south under the bridge, behind the Ortakoy quay
+art  = [
+  "      _||_       ",
+  " ____|____|_____ ",
+  "/  o  o  o  o  o|",
+  "\\______________/",
+]
+mask = [
+  "......FFFF.......",
+  ".VVVVVVVVVVVVVVV.",
+  "Vuuuuuuuuuuuuuuuu",
+  "KKKKKKKKKKKKKKKK.",
+]
+row = 17
+speed = 0.3
+direction = -1
+over = " wzZaAOHhWTeLl"
+smoke_key = "F"

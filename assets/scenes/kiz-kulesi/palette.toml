@@ -1,0 +1,64 @@
+# Kiz Kulesi: the scene's own keys, merged over the shared palettes.toml.
+#
+#   B / b  far historic peninsula: outline on the sky / hazy fill
+#   Y      far city lights on the peninsula (texture by day, lit after sunset)
+#   Q      the flag on the finial
+#   L      lantern glass (blinks after sunset, see scene.toml)
+#   U      stone outline below the horizon, drawn on the stone fill instead of the sky
+#   P / p  rock islet: edge drawn on the water / rock fill
+#   J      the wooden landing stage
+#   N / O  sandal (rowing boat) hull / rower and oars (sprite)
+#
+# P and J sit in the water, so their bg is the `water` gradient's middle (rows 20-21).
+
+[sabah]
+B = { fg = "#959ab0" }
+b = { fg = "#959ab0", bg = "#c4c5d1" }
+Y = { fg = "#aeb0c0", bg = "#c4c5d1" }
+Q = { fg = "#d8323f" }
+L = { fg = "#e6eef0", bg = "#56677a" }
+U = { fg = "#8a7862", bg = "#c9b393" }
+P = { fg = "#4f4943", bg = "#5282a7" }
+p = { fg = "#7a7064", bg = "#a69c8e" }
+J = { fg = "#5a4a3a", bg = "#5282a7" }
+N = { fg = "#f4f1ea" }
+O = { fg = "#3a2e24" }
+
+[gunduz]
+B = { fg = "#7a93ab" }
+b = { fg = "#7a93ab", bg = "#9db6cc" }
+Y = { fg = "#89a2b9", bg = "#9db6cc" }
+Q = { fg = "#e30a17" }
+L = { fg = "#f2f8fa", bg = "#4b5d71" }
+U = { fg = "#7d6a53", bg = "#d2bc9a" }
+P = { fg = "#3f3a34", bg = "#246fa3" }
+p = { fg = "#6e665b", bg = "#9a9083" }
+J = { fg = "#4e3e2e", bg = "#246fa3" }
+N = { fg = "#ffffff" }
+O = { fg = "#2a2019" }
+
+[aksam]
+B = { fg = "#6e3352" }
+b = { fg = "#6e3352", bg = "#7a3a58" }
+Y = { fg = "#ffc27a", bg = "#7a3a58" }
+Q = { fg = "#c8283a" }
+L = { fg = "#ffcf6b", bg = "#4a3448" }
+U = { fg = "#6e4a3c", bg = "#b07a5e" }
+P = { fg = "#22141b", bg = "#5b334f" }
+p = { fg = "#1a0f15", bg = "#2e1d26" }
+J = { fg = "#1c1016", bg = "#5b334f" }
+N = { fg = "#f7d9c4" }
+O = { fg = "#23151c" }
+
+[gece]
+B = { fg = "#2f3a63" }
+b = { fg = "#2f3a63", bg = "#0e132b" }
+Y = { fg = "#e0b060", bg = "#0e132b" }
+Q = { fg = "#b23a46" }
+L = { fg = "#ffe7a0", bg = "#1e2440" }
+U = { fg = "#7a8199", bg = "#2a2f45" }
+P = { fg = "#4a5068", bg = "#0a1228" }
+p = { fg = "#3a3f55", bg = "#22283c" }
+J = { fg = "#4a5068", bg = "#0a1228" }
+N = { fg = "#9aa4c2" }
+O = { fg = "#6a7390" }

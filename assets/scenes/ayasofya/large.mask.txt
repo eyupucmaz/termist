@@ -1,0 +1,26 @@
+
+   A                                                                       A
+   A                                                                       A        MMMMMM
+  RRR                                                                     RRR       MMMMMM
+ RrrrR L L                                                           L L RrrrR      MMMMMM
+BBBBBBB    L L L L L L L L L L L L L L L L L L L L L L L L L L L L L    BBBBBBB
+ IiiiI     A                                                       A     IiiiI
+ IiiiI     A                           A                           A     IiiiI
+ IiiiI    RRR                  UUUUUUUUAUUUUUUUU                  RRR    IiiiI
+ IiiiI   RrrrR              UUUUuuuuuuuuuuuuuuuUUUU              RrrrR   IiiiI
+ IiiiI  BBBBBBB          UUUuuuuuuuuuuuuuuuuuuuuuuuUUU          BBBBBBB  IiiiI
+ IiiiI   IiiiI         UUuuuuuuuuuuuuuuuuuuuuuuuuuuuuuUU         IiiiI   IiiiI
+ IiiiI   IiiiI        UuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuU        IiiiI   IiiiI
+ IiiiI   IiiiI   RRR UuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuU RRR   IiiiI   IiiiI
+BBBBBBB  IiiiI  XXXXXPpWpWpWpWpWpWpWpWpWpWpWpWpWpWpWpWpWpPXXXXX  IiiiI  BBBBBBB
+ IiiiI   IiiUUUUXxxxXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXxxxXUUUUiiI   IiiiI
+ IiiiI  UUUUuuuuXxxxXPppXXXXWpWpWpWpWpWpWpWpWpWpWpWXXXXppPXxxxXuuuuUUUU  IiiiI
+ IiiiI PpWpWpWpWXxxxXPXpXWXpXWXpXWXpXWXpXWXpXWXpXWXpXWXpXPXxxxXWpWpWpWpP IiiiI
+ IiiiI XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX IiiiI
+ IiiiI PpXYYYYpXWXXWXpXpXWXpXWXpXppppXXXXXppppXpXWXpXWXpXpXWXXWXpYYYYXpP IiiiI   YYYY     YYYY
+ IiiiI PpYyyyyYpppppppXpppppppppXpppXdjjjdXpppXpppppppppXpppppppYyyyyYpP IiiiI  YyyyyY   YyyyyY
+ IiiiI PYyyyyyyYppppppXpppppppppXpppXddjddXpppXpppppppppXppppppYyyyyyyYP IiiiI YyyyyyyY YyyyyyyY
+GiiiiiGPPYYYYYYPPPPPPPPPPPPPQQQQQQQQQQQjQQQQQQQQQQQPPPPPPPPPPPPPYYYYYYPPGiiiiiGGYYYYYYGGGYYYYYYG
+gggggggggggttggggggggggggggQfffffffffffffffffffffffQggggggggggggggttggggggggggggggttgggggggttggg
+QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee

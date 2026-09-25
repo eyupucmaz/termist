@@ -11,3 +11,10 @@
 .idea/
 .vscode/
 *.swp
+
+# Local technical spikes (recordings contain session ids / account info)
+/spikes/
+
+# Python bytecode (tools/)
+__pycache__/
+*.pyc

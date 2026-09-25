@@ -1,0 +1,47 @@
+# Kiz Kulesi (Maiden's Tower) on its rock off Uskudar, the historic peninsula faint across the water.
+title = "Kız Kulesi"
+horizon_key = "w"          # sky gradient ends where the Bosphorus begins
+
+[[effects]]
+type = "waves"             # Bogaz: the water scene, so glints stay on
+key = "w"
+every = 2
+glints = true
+
+[[effects]]
+type = "twinkle"           # tower and building windows go dark now and then after sunset
+key = "W"
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "twinkle"           # far city lights across the water
+key = "Y"
+threshold = 0.6
+off = "#0e132b"
+times = ["gece"]
+
+[[effects]]
+type = "blink"             # the lantern: a slow warm pulse, about 3 s per cycle
+key = "L"
+colors = ["#5a4a2a", "#a07830", "#e8b040", "#fff0b0", "#e8b040", "#a07830"]
+period = 5
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "sprite"            # a sandal rowing past the islet
+art  = ["    o", "--\\_Y_/--"]
+mask = ["....O", "OONNONNOO"]
+row = 23
+speed = 0.25
+direction = 1
+over = "w"
+
+[[effects]]
+type = "stars"
+count = 28
+times = ["gece"]
+
+[[effects]]
+type = "gulls"
+rows = [4, 6, 3]
+times = ["sabah", "gunduz", "aksam"]

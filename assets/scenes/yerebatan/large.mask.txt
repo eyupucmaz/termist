@@ -1,0 +1,26 @@
+BBBBBBBbbbbb          bbbbBBBBBBBBBBBbbbb          bbbbbBBBBBBBBBBbbbb           bbbbBBBBBBBBBBb
+       BBBBbb       bbbBBB           BBBbbb       bbBBBB          BBBBbb       bbBBBB          B
+           BBb      bBB                 BBb      bBB                  BBb      bB
+             B      B                     B      B                      B      B
+             BbbbbbB       bbb             BbbbbbB        bbb           BbbbbbB
+             AAAAAAA    bBBBBBBBbb     bbBAAAAAAA      bBBBBBBBbb     bbAAAAAAAb
+              AAAAA    BB       BB    bBB  AAAAABN    BB  NNN  BBb    BB AAAAA BB
+              CcccC   B           B   B    CcccC B   B NNN   NNN B   B  NCcccC   B
+              CcccCIIII          IIIII     CcccCNIIIIIN NNNNNNN NIIIIIN  CcccC  IIIII
+              CcccCIII            III     YCcccC  IIIYYN      NYY III  N CcccC   III
+              CcccCIiI            IiI     YCcccC  IiIYYZ     ZYYY IiI Y  CcccC   IiI
+ kkkkkkkkkkkkkCcccCkkkkkkkkkkkkk  IiI     YCcccC  IiIYYZ     ZYYY IiI Y  CcccC   IiI
+ kkkkkkkjjjjQQQQQQQQQjjjjkkkkkkk  IiI     YCcccC  IiIYYZ     ZYYY IiI Y  CcccC   IiI
+vkkkjjjjjjQQqqQQQQQqqQQjjjjjjkkkvvIiIvvvvvYCcccCvvIiIYYZvvvvvZYYYvIiIvYvvCcccCvvvIiIvvvvvvvvvvvv
+vkkjjjjjjQqqqnnnnnnnqqqQjjjjjjkkvvIiIvvvvvYCcccCvvIiIYYOvvvvvOOYYvIiIvvvvCcccCvvvIiIvvvvvvvvvvvv
+vkjjjjjjQqqqqqqQQQqqqqqqQjjjjjjkvvUeUvvvvvOCcccCvvUeUOlvvvvvvvlOvvUeUvzvvCcccCvvvIiIvvvvvvvvvvvv
+vkjjjjjjQqqqqqqqQqqqqqqqQjjjjjjkvvUuUvvvvvlCcccCvvUuUllvvvvvvvllvvUuUvzvvCcccCvvvIiIvvvvvvvvvvvv
+vkjjjjjjQqqEEEEEqEEEEEqqQjjjjjjkvvULUvvvvvlUeeeUvvULUlvvvvvvvvzlvvULUvvvvUeeeUvvvIIIvvvvvvvvvvvv
+vkjjjjjjQqqqQQQqqqQQQqqqQjjjjjjkvvxlxvvvvvzUeeeUvvxlxzvvvvvvvvvzvvvlvvvvvUeeeUvvvvvvvvvvvvvvvvvv
+vkkjjjjjjQqQQQQqqqQQQQqQjjjjjjkkvvvlvvvvvvzUuuuUvxxlvvvvvvvvvvvvvxxlvvvvvUuuuUvvxxxvvvvvvvvvvvvv
+wkkkkkjjjjQQQQQQQQQQQQQjjjjkkkkkwwxlxwwwwwwUuuuUwwxlxzwwwwwwwwwzwwxlxwwwwUuuuUwwwxxxwwwwwwwwwwww
+wkkkkkkkkkkkkkkkLkkkkkkkkkkkkkkkwwwxxxwwwwwUULUUwwwwwwwwwwwwwwwwwwwxxxwwwUULUUwwwwxxxwwwwwwwwwww
+wwwwwwzzwwxxxwxxxxxxxxwzwwwwwwwwwwwwwwwwwwwwwlwwwwxxxwwwwwwwwwwwwwxxxwwwwxxlxxwwwxxxwwwwwwwwwwww
+wwwwwwwzwwwwwxxxxxwxwxxwxwwwwwzwwxxxwwwwwwxxxlxwwwwwwwwwwwwwwwwwwxxxwwwwwwwlwwwwwwwwwwwwwwwwwwww
+wwwwwwwwxwwwxxxxxxxwxwwwxzwwzwwwwwxxxwwwwwwwwlwwwwxxxwwwwwwwwwwwwwxxxwwwwwwlwwwwwwwwwwwwwwwwwwww
+wwwwwwzwwxwwxxwxxxxxxxxwwxzwwwwwwwwwwwwwwwwwxxxxxwwwwwwwwwwwwwwwwwwwwwwwwwxxxxxwwwwwwwwwwwwwwwww

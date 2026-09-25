@@ -1,0 +1,111 @@
+# Ayasofya: scene keys merged over the shared palettes.toml.
+#
+# Mask keys added by this scene
+#   U/u main dome and semi-domes, lead outline / fill (glows at sunset)
+#   P/p plaster wall, outline / fill (warm pinkish ochre)
+#   X/x buttresses, pilasters and cornices: shaded plaster
+#   I/i minaret shaft, outline / fill      B  şerefe (minaret balcony)
+#   A   alem: gilded crescent and rod on every minaret and on the dome
+#   d   gate interior                       L  mahya lights between the front minarets
+#   Y/y tree canopy, outline / fill         t  tree trunk
+#   g   lawn of Sultanahmet Park            e  gravel path
+#   Q   fountain rim and park wall          f  fountain basin water   j  fountain jet
+# W (shared) is overridden only to give windows the plaster fill behind them; R (shared) at sunset only;
+# G (shared) gets the lawn behind it so the ground line never shows the water gradient.
+
+[sabah] # 06-11
+G = { fg = "#4f6e3e", bg = "#6c9a58" }     # ground line on the lawn (not on water)
+A = { fg = "#e3b04b" }
+U = { fg = "#3d4b5c" }
+u = { fg = "#3d4b5c", bg = "#7c8a9b" }
+P = { fg = "#7d4f3f", bg = "#dba082" }
+p = { fg = "#7d4f3f", bg = "#dba082" }
+X = { fg = "#6e4436", bg = "#c48a6e" }
+x = { fg = "#6e4436", bg = "#c48a6e" }
+W = { fg = "#4e3228", bg = "#dba082" }
+d = { fg = "#3a2a24", bg = "#4a3530" }
+I = { fg = "#6a6056" }
+i = { fg = "#6a6056", bg = "#e8dcc8" }
+B = { fg = "#6f665a" }
+L = { fg = "#b7d2ea" }
+Y = { fg = "#3f6a34", bg = "#5f8f4c" }
+y = { fg = "#3f6a34", bg = "#5f8f4c" }
+t = { fg = "#6b4a30", bg = "#6c9a58" }
+g = { fg = "#a9c98a", bg = "#6c9a58" }
+e = { fg = "#a8977a", bg = "#d9c9a9" }
+Q = { fg = "#6f6458", bg = "#c8bba4" }
+f = { fg = "#e6f5ff", bg = "#5f97c2" }
+j = { fg = "#e6f5ff", bg = "#4a3530" }
+
+[gunduz] # 11-17
+G = { fg = "#3f6e30", bg = "#5a9644" }     # ground line on the lawn (not on water)
+A = { fg = "#d9a02e" }
+U = { fg = "#2f3c4b" }
+u = { fg = "#2f3c4b", bg = "#6f8193" }
+P = { fg = "#74432f", bg = "#df9d78" }
+p = { fg = "#74432f", bg = "#df9d78" }
+X = { fg = "#633a2a", bg = "#c9876a" }
+x = { fg = "#633a2a", bg = "#c9876a" }
+W = { fg = "#442a20", bg = "#df9d78" }
+d = { fg = "#2e2320", bg = "#3e2c27" }
+I = { fg = "#6b6258" }
+i = { fg = "#6b6258", bg = "#ece2cf" }
+B = { fg = "#5e564c" }
+L = { fg = "#6fb0e6" }
+Y = { fg = "#2f5e2a", bg = "#4f8a3e" }
+y = { fg = "#2f5e2a", bg = "#4f8a3e" }
+t = { fg = "#5e3f26", bg = "#5a9644" }
+g = { fg = "#9fd07a", bg = "#5a9644" }
+e = { fg = "#a8977a", bg = "#e0d0ae" }
+Q = { fg = "#6a5f52", bg = "#cdbfa5" }
+f = { fg = "#ffffff", bg = "#3d8cc4" }
+j = { fg = "#ffffff", bg = "#3e2c27" }
+
+[aksam] # 17-20: the lead dome catches the last light, the walls go dusky rose
+G = { fg = "#34301f", bg = "#4d4a34" }     # ground line on the lawn (not on water)
+A = { fg = "#ffd35c" }
+U = { fg = "#ffd08a" }
+u = { fg = "#ffd08a", bg = "#f0a45e" }
+P = { fg = "#3f2030", bg = "#a45a5c" }
+p = { fg = "#3f2030", bg = "#a45a5c" }
+X = { fg = "#3a1c2a", bg = "#8a4852" }
+x = { fg = "#3a1c2a", bg = "#8a4852" }
+W = { fg = "#ffcf6b", bg = "#a45a5c" }
+d = { fg = "#2a1420", bg = "#3a1c28" }
+I = { fg = "#4a2a30" }
+i = { fg = "#4a2a30", bg = "#e0a58a" }
+B = { fg = "#4a2a30" }
+R = { fg = "#d88a6a" }     # shared lead-cap outline, lifted so the caps read against the dusk sky
+L = { fg = "#ffd9a0" }
+Y = { fg = "#2e2a1c", bg = "#4a4a2e" }
+y = { fg = "#2e2a1c", bg = "#4a4a2e" }
+t = { fg = "#3a2418", bg = "#4d4a34" }
+g = { fg = "#8a8a50", bg = "#4d4a34" }
+e = { fg = "#7a5a50", bg = "#b08070" }
+Q = { fg = "#4a3238", bg = "#9a7066" }
+f = { fg = "#ffd0a0", bg = "#8a4a5e" }
+j = { fg = "#ffd0a0", bg = "#3a1c28" }
+
+[gece] # 20-06: softly floodlit minarets, lit windows, the mahya
+G = { fg = "#24382a", bg = "#111c16" }     # ground line on the lawn (not on water)
+A = { fg = "#b8963e" }
+U = { fg = "#8a94b3" }
+u = { fg = "#8a94b3", bg = "#2f3858" }
+P = { fg = "#9a8494", bg = "#4e3844" }
+p = { fg = "#9a8494", bg = "#4e3844" }
+X = { fg = "#8a7488", bg = "#402d3a" }
+x = { fg = "#8a7488", bg = "#402d3a" }
+W = { fg = "#ffc857", bg = "#4e3844" }
+d = { fg = "#1a1420", bg = "#1c1622" }
+I = { fg = "#b8b4cc" }
+i = { fg = "#b8b4cc", bg = "#6e6a86" }
+B = { fg = "#b8b4cc" }
+L = { fg = "#ffc857" }
+Y = { fg = "#3f6a4c", bg = "#1f3a2a" }
+y = { fg = "#3f6a4c", bg = "#1f3a2a" }
+t = { fg = "#3a2a22", bg = "#111c16" }
+g = { fg = "#2f4a35", bg = "#111c16" }
+e = { fg = "#3a3644", bg = "#1a1a24" }
+Q = { fg = "#4a4a5e", bg = "#262838" }
+f = { fg = "#9ab8e8", bg = "#1a2f55" }
+j = { fg = "#9ab8e8", bg = "#1c1622" }

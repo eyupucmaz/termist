@@ -1,0 +1,91 @@
+# Vapur ve martı: keys of its own, merged over the shared palettes.toml.
+#
+# Static canvas
+#   A/a far shore outline / fill (distant, low contrast)   L house lights on the shores
+# Ferry and escort sprites (see scene.toml)
+#   V   white deck lines (shared)        v white superstructure   O ferry windows
+#   J   mast, rails, flag staff (steel, so they read against a pale sky)
+#   f   chimney black cap                c chimney yellow         x hull edge
+#   k   hull fill                        B hull stripe            P portholes
+#   Q   flag                             U lifebuoy               I masthead light
+#   E   foam (bow wave, wake)            N escorting gulls
+
+[sabah] # 06-11: hazy, soft
+A = { fg = "#9690a8" }
+a = { fg = "#9690a8", bg = "#bdb6c6" }
+L = { fg = "#a49db2" }
+Z = { fg = "#9690a8" }
+v = { fg = "#8b909a", bg = "#f3efe6" }
+O = { fg = "#2e4052", bg = "#4d6a85" }
+f = { fg = "#1d1d20", bg = "#1d1d20" }
+c = { fg = "#9c7a12", bg = "#e8b923" }
+x = { fg = "#232a34" }
+k = { fg = "#232a34", bg = "#232a34" }
+B = { fg = "#d8452f", bg = "#232a34" }
+P = { fg = "#9aa5b3", bg = "#232a34" }
+Q = { fg = "#ffffff", bg = "#e30a17" }
+U = { fg = "#ff6b2b", bg = "#f3efe6" }
+J = { fg = "#56606e" }
+I = { fg = "#f4f1ea" }
+E = { fg = "#f4fbff" }
+N = { fg = "#5d6776" }
+
+[gunduz] # 11-17: clear, crisp
+A = { fg = "#7d93a8" }
+a = { fg = "#7d93a8", bg = "#9fb3c5" }
+L = { fg = "#8ba0b3" }
+Z = { fg = "#7d93a8" }
+v = { fg = "#7a8492", bg = "#fbfbf8" }
+O = { fg = "#27425e", bg = "#35587a" }
+f = { fg = "#18181a", bg = "#18181a" }
+c = { fg = "#a88410", bg = "#f0c21b" }
+x = { fg = "#1b2129" }
+k = { fg = "#1b2129", bg = "#1b2129" }
+B = { fg = "#e0392b", bg = "#1b2129" }
+P = { fg = "#8e99a6", bg = "#1b2129" }
+Q = { fg = "#ffffff", bg = "#e30a17" }
+U = { fg = "#ff5a1f", bg = "#fbfbf8" }
+J = { fg = "#4a5664" }
+I = { fg = "#ffffff" }
+E = { fg = "#ffffff" }
+N = { fg = "#ffffff" }
+
+[aksam] # 17-20: silhouettes against the glow, windows coming on
+A = { fg = "#6c3d5c" }
+a = { fg = "#6c3d5c", bg = "#8c5570" }
+L = { fg = "#ffcf6b" }
+Z = { fg = "#ffe3a3" }
+v = { fg = "#9a6f6a", bg = "#f5dccb" }
+O = { fg = "#ffcf8a", bg = "#d8742f" }
+f = { fg = "#1a1016", bg = "#1a1016" }
+c = { fg = "#a86a1c", bg = "#f2b03a" }
+x = { fg = "#24161f" }
+k = { fg = "#24161f", bg = "#24161f" }
+B = { fg = "#e8603f", bg = "#24161f" }
+P = { fg = "#ffc46b", bg = "#24161f" }
+Q = { fg = "#ffe6d6", bg = "#d8141f" }
+U = { fg = "#ff6b35", bg = "#f5dccb" }
+J = { fg = "#3a2434" }
+I = { fg = "#fff0c0" }
+E = { fg = "#ffc9a3" }
+N = { fg = "#43283d" }
+
+[gece] # 20-06: dark shores, lit ferry
+A = { fg = "#3a4570" }
+a = { fg = "#3a4570", bg = "#0c1026" }
+L = { fg = "#ffc857" }
+Z = { fg = "#fff1c2" }
+v = { fg = "#8590b0", bg = "#434c72" }
+O = { fg = "#fff0b8", bg = "#f5bd4f" }
+f = { fg = "#07080e", bg = "#07080e" }
+c = { fg = "#5e4c16", bg = "#8a7020" }
+x = { fg = "#3a4468" }
+k = { fg = "#1d2238", bg = "#1d2238" }
+B = { fg = "#b04a3e", bg = "#1d2238" }
+P = { fg = "#ffd27a", bg = "#1d2238" }
+Q = { fg = "#e6d9d9", bg = "#9c1a22" }
+U = { fg = "#c8643a", bg = "#434c72" }
+J = { fg = "#aab4d0" }
+I = { fg = "#fff6d0" }
+E = { fg = "#5a78aa" }
+N = { fg = "#c9d2e8" }

@@ -1,0 +1,68 @@
+# Ayasofya from Sultanahmet Park: the wide shallow dome on its ring of windows, buttress towers and
+# semi-domes stepping down, Sinan's two thick minarets on the west (left) and the slender pair on the
+# east (right), with a mahya strung between the front pair. The fountain and trees of the park in front.
+title = "Ayasofya"
+horizon_key = "G"          # sky gradient ends at the ground line of the park
+
+[[effects]]
+type = "blink"             # mahya: warm bulbs, a slow wave of brightness travelling along the string
+key = "L"
+colors = ["#ffd27a", "#fff3d0", "#ffd27a", "#e8a850"]
+period = 12
+wave = 3
+times = ["aksam", "gece"]
+
+[[effects]]
+type = "twinkle"           # windows go dark now and then after sunset
+key = "W"
+off = "#6a3a44"
+times = ["aksam"]
+
+[[effects]]
+type = "twinkle"
+key = "W"
+off = "#4a3a48"
+times = ["gece"]
+
+[[effects]]
+type = "blink"             # fountain basin shimmers
+key = "f"
+colors = ["#f2fbff", "#a9d8f5", "#d4ecff"]
+period = 4
+wave = 1
+
+[[effects]]
+type = "blink"             # the jet itself
+key = "j"
+colors = ["#f2fbff", "#a9d8f5", "#d4ecff"]
+period = 5
+
+[[effects]]
+type = "drip"              # spray falling back into the basin, left of the jet
+col = 37
+top = 20
+bottom = 23
+period = 24
+phase = 0
+over = "dQ"
+color = "#cfeaff"
+
+[[effects]]
+type = "drip"              # and right of it
+col = 41
+top = 20
+bottom = 23
+period = 24
+phase = 12
+over = "dQ"
+color = "#cfeaff"
+
+[[effects]]
+type = "stars"
+count = 30
+times = ["gece"]
+
+[[effects]]
+type = "gulls"
+rows = [2, 8, 11]
+times = ["sabah", "gunduz", "aksam"]

@@ -1,0 +1,98 @@
+# Yerebatan Sarnici (Basilica Cistern). The one interior scene: no sky, no gulls, no stars.
+# The sky gradient is the darkness of the vault; the time of day is the lighting mood.
+title = "Yerebatan Sarnıcı"
+horizon_key = "v"          # the vault's darkness ends at eye level, where the still water begins
+
+[[effects]]
+type = "waves"             # near water only; slow, with sparse glints
+key = "w"
+every = 6
+glint_density = 0.5
+
+# lamps at the column feet flicker softly between close warm tones (per-lamp phase via `wave`)
+[[effects]]
+type = "blink"
+key = "L"
+colors = ["#ffb760", "#ffab52", "#ffbf6c", "#ffb058"]
+period = 4
+wave = 7
+times = ["sabah", "gunduz"]
+
+[[effects]]
+type = "blink"
+key = "L"
+colors = ["#ffa845", "#ff9c38", "#ffb252", "#ffa240"]
+period = 4
+wave = 7
+times = ["aksam"]
+
+[[effects]]
+type = "blink"
+key = "L"
+colors = ["#ffcc70", "#ffc060", "#ffd682", "#ffc466"]
+period = 4
+wave = 7
+times = ["gece"]
+
+[[effects]]
+type = "twinkle"           # far lamps dim now and then
+key = "O"
+threshold = 0.8
+off = "#5a3a22"
+
+[[effects]]
+type = "blink"             # the lamps' light streaks shimmer on the water
+key = "l"
+colors = ["#c8843e", "#9a6030", "#d8904a", "#a8683a"]
+period = 5
+wave = 3
+
+# water drips from the vault; rings spread on the water
+[[effects]]
+type = "drip"
+col = 58                   # down the middle of the aisle, in front of the far arches
+top = 1
+bottom = 24
+period = 70
+phase = 0
+over = " vwNB"
+color = "#e6d2b0"
+
+[[effects]]
+type = "drip"
+col = 31
+top = 1
+bottom = 22
+period = 95
+phase = 40
+over = " vw"
+color = "#e6d2b0"
+
+[[effects]]
+type = "drip"
+col = 89
+top = 1
+bottom = 23
+period = 120
+phase = 85
+over = " vw"
+color = "#e6d2b0"
+
+# carp in the near water
+[[effects]]
+type = "sprite"
+art = ["><>"]
+mask = ["fff"]
+row = 22
+speed = 0.12
+direction = 1
+over = "w"
+
+[[effects]]
+type = "sprite"
+art = ["<><"]
+mask = ["fff"]
+row = 24
+speed = 0.08
+direction = -1
+over = "w"

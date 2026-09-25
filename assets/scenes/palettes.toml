@@ -1,0 +1,85 @@
+# Scene palettes by time of day. Keys match the characters used in each scene's mask file.
+#   fg = glyph colour, bg = cell fill (omit bg to let the sky show through)
+# sky / water are vertical gradients (top -> bottom); water cells animate.
+#
+# Mask keys
+#   ' ' sky            R/r tower cone edge / fill   D dark stone trim
+#   S/s stone wall / fill                          W window (lit at dusk & night)
+#   H/h house wall / fill   T roof tiles   G quay   w water
+#   M sun or moon      V vapur cabin   K vapur hull   F vapur chimney
+
+[sabah] # 06-11
+sky   = ["#8fbfe6", "#cfe1ee", "#f7dcc0"]
+water = ["#6e9dc0", "#3f6f95"]
+wave  = "#d8ecf7"
+R = { fg = "#3d4b5c" }
+r = { fg = "#3d4b5c", bg = "#56677a" }
+D = { fg = "#7a6a58" }
+S = { fg = "#8a7862" }
+s = { fg = "#8a7862", bg = "#c9b393" }
+W = { fg = "#4a3b2e" }
+H = { fg = "#8c7a66" }
+h = { fg = "#8c7a66", bg = "#e6d3b8" }
+T = { fg = "#b3553b" }
+G = { fg = "#6f6a63" }
+M = { fg = "#ffd27a" }
+V = { fg = "#f4f1ea" }
+K = { fg = "#2b2b2b" }
+F = { fg = "#e8b923" }
+
+[gunduz] # 11-17
+sky   = ["#3f97db", "#7fbde9", "#c4e4f6"]
+water = ["#2f86c0", "#1d5f8f"]
+wave  = "#e6f5ff"
+R = { fg = "#2f3c4b" }
+r = { fg = "#2f3c4b", bg = "#4b5d71" }
+D = { fg = "#6b5b49" }
+S = { fg = "#7d6a53" }
+s = { fg = "#7d6a53", bg = "#d2bc9a" }
+W = { fg = "#3a2e24" }
+H = { fg = "#7f6c58" }
+h = { fg = "#7f6c58", bg = "#efdcc1" }
+T = { fg = "#c4583a" }
+G = { fg = "#5f5a52" }
+M = { fg = "#fff4b8" }
+V = { fg = "#ffffff" }
+K = { fg = "#1f1f1f" }
+F = { fg = "#f0c21b" }
+
+[aksam] # 17-20, gün batımı
+sky   = ["#2a1d4f", "#8c3b6b", "#f0784a", "#ffc178"]
+water = ["#8a4a5e", "#3b2344"]
+wave  = "#ffb07a"
+R = { fg = "#2a1f33" }
+r = { fg = "#2a1f33", bg = "#4a3448" }
+D = { fg = "#5c3d3a" }
+S = { fg = "#6e4a3c" }
+s = { fg = "#6e4a3c", bg = "#b07a5e" }
+W = { fg = "#ffcf6b" }
+H = { fg = "#6b4a3e" }
+h = { fg = "#6b4a3e", bg = "#c98f6c" }
+T = { fg = "#8e3a2c" }
+G = { fg = "#4a3238" }
+M = { fg = "#ff6b35" }
+V = { fg = "#f7d9c4" }
+K = { fg = "#23151c" }
+F = { fg = "#ffb347" }
+
+[gece] # 20-06
+sky   = ["#050816", "#0d1433", "#1c2550"]
+water = ["#0f1d3a", "#060b1c"]
+wave  = "#3d5a8c"
+R = { fg = "#8a94b3" }
+r = { fg = "#8a94b3", bg = "#1e2440" }
+D = { fg = "#6c7390" }
+S = { fg = "#7a8199" }
+s = { fg = "#7a8199", bg = "#2a2f45" }
+W = { fg = "#ffc857" }
+H = { fg = "#6a7088" }
+h = { fg = "#6a7088", bg = "#232840" }
+T = { fg = "#5a4e6e" }
+G = { fg = "#3a3f55" }
+M = { fg = "#f2efd6" }
+V = { fg = "#d6dcea" }
+K = { fg = "#0a0d18" }
+F = { fg = "#ffc857" }

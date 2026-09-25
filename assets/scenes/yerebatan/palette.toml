@@ -1,0 +1,141 @@
+# Yerebatan Sarnici (Basilica Cistern): colours for this scene's own keys, merged over palettes.toml.
+# The one interior scene. There is no sky: `sky` is the darkness of the brick vault, and the time
+# of day becomes the lighting mood (sabah cool and dim, gunduz neutral, aksam amber, gece darkest
+# with the lamps glowing strongest). The last `sky` stop equals `v`'s bg, so line-art cells below
+# eye level sit on the still water seamlessly.
+#
+#   C / c  nearest marble columns, outline / fill     A  their capitals
+#   I / i  second rank of columns                      Y  third and fourth ranks   Z  farthest
+#   U / u / e  column foot lit by its lamp: outline / brightest fill / fading fill above
+#   B / b  brick arches, line / band fill              N  far brick arches
+#   L      lamp at a column foot (flickers)            O  far lamps (dots)
+#   l      a lamp's light streak on the water          x / z  column reflections, near / far
+#   v      still far water                             w  near water (waves)
+#   k      the Medusa block (marble in shadow)         j  her ring of coiling snakes (algae-green)
+#   q / Q  her face, spotlit from the lamp at her foot / its carved features
+#   E      her eyes in dark sockets                    n  her full lips (in shadow)
+#   f      carp (sprites)
+
+[sabah] # cool, dim: the lamps are on but the vault is blue-grey
+sky   = ["#05070a", "#0b1117", "#141d26"]
+water = ["#121b24", "#070b10"]
+wave  = "#3e5566"
+v = { fg = "#2a3a48", bg = "#141d26" }
+C = { fg = "#29333c", bg = "#6b757d" }
+c = { fg = "#29333c", bg = "#626c75" }
+A = { fg = "#1f272e", bg = "#7d878e" }
+I = { fg = "#1c242b", bg = "#434d56" }
+i = { fg = "#1c242b", bg = "#3e4851" }
+Y = { fg = "#5e6e7c" }
+Z = { fg = "#2e3a45" }
+U = { fg = "#3a2a1e", bg = "#9a6a44" }
+u = { fg = "#3a2a1e", bg = "#a8744a" }
+e = { fg = "#3a2a1e", bg = "#7c6450" }
+B = { fg = "#8a6250", bg = "#3a2822" }
+b = { fg = "#5a4034", bg = "#2a1f1c" }
+N = { fg = "#6a5044" }
+L = { fg = "#ffb760" }
+O = { fg = "#d08a4c" }
+l = { fg = "#b07a48" }
+x = { fg = "#4a5a68" }
+z = { fg = "#2c3843" }
+k = { fg = "#24221f", bg = "#4a4640" }
+Q = { fg = "#1e1a16", bg = "#9a8c78" }
+q = { fg = "#24201c", bg = "#9a8c78" }
+E = { fg = "#e8dcc4", bg = "#3e362c" }
+n = { fg = "#d8ccb4", bg = "#4a3e32" }
+j = { fg = "#7c9478", bg = "#33373a" }
+f = { fg = "#d9894a" }
+
+[gunduz] # a little brighter, neutral: daylight tourists, the lamps a touch paler
+sky   = ["#08080a", "#121214", "#201e1c"]
+water = ["#1d1b19", "#0c0b0a"]
+wave  = "#5c554c"
+v = { fg = "#3e3a34", bg = "#201e1c" }
+C = { fg = "#34302c", bg = "#8a837a" }
+c = { fg = "#34302c", bg = "#7f786f" }
+A = { fg = "#2a2622", bg = "#9c958b" }
+I = { fg = "#26231f", bg = "#5a544d" }
+i = { fg = "#26231f", bg = "#544e47" }
+Y = { fg = "#80786c" }
+Z = { fg = "#443f39" }
+U = { fg = "#40301f", bg = "#b07c4c" }
+u = { fg = "#40301f", bg = "#bd8652" }
+e = { fg = "#40301f", bg = "#9a7a5c" }
+B = { fg = "#a27458", bg = "#44302a" }
+b = { fg = "#6e4c3a", bg = "#35261f" }
+N = { fg = "#7a5a46" }
+L = { fg = "#ffc278" }
+O = { fg = "#d9985a" }
+l = { fg = "#c08850" }
+x = { fg = "#6a645b" }
+z = { fg = "#3c3833" }
+k = { fg = "#2a2621", bg = "#5a534a" }
+Q = { fg = "#221c16", bg = "#b4a48c" }
+q = { fg = "#2a241e", bg = "#b4a48c" }
+E = { fg = "#f4e8d0", bg = "#4a4034" }
+n = { fg = "#eadcc2", bg = "#56483a" }
+j = { fg = "#8c9a7a", bg = "#3c3a33" }
+f = { fg = "#e8964a" }
+
+[aksam] # warm amber: everything is honey and rust
+sky   = ["#0a0503", "#1a0e07", "#2c180b"]
+water = ["#2a170b", "#0e0704"]
+wave  = "#8a5428"
+v = { fg = "#5a3418", bg = "#2c180b" }
+C = { fg = "#3a2414", bg = "#9a7050" }
+c = { fg = "#3a2414", bg = "#8e6647" }
+A = { fg = "#2e1c10", bg = "#ab8058" }
+I = { fg = "#2a190e", bg = "#664430" }
+i = { fg = "#2a190e", bg = "#5f3f2c" }
+Y = { fg = "#946848" }
+Z = { fg = "#4e3220" }
+U = { fg = "#4a2610", bg = "#c47a38" }
+u = { fg = "#4a2610", bg = "#d2843c" }
+e = { fg = "#4a2610", bg = "#a8683c" }
+B = { fg = "#c07044", bg = "#4a2616" }
+b = { fg = "#7a4028", bg = "#3e1e12" }
+N = { fg = "#8a4e2e" }
+L = { fg = "#ffa845" }
+O = { fg = "#e58a3a" }
+l = { fg = "#d08040" }
+x = { fg = "#7a5638" }
+z = { fg = "#4a3020" }
+k = { fg = "#2a180c", bg = "#4e321e" }
+Q = { fg = "#2a1608", bg = "#c89260" }
+q = { fg = "#2e1a0a", bg = "#c89260" }
+E = { fg = "#ffe0b0", bg = "#4a2a12" }
+n = { fg = "#ffd8a0", bg = "#5a3418" }
+j = { fg = "#a88a52", bg = "#33220f" }
+f = { fg = "#ff9a40" }
+
+[gece] # darkest: the vault disappears, the lamps glow strongest and warm the column feet
+sky   = ["#020101", "#070403", "#110a06"]
+water = ["#150c06", "#050302"]
+wave  = "#6a3e1c"
+v = { fg = "#3e2412", bg = "#110a06" }
+C = { fg = "#1e140c", bg = "#56463a" }
+c = { fg = "#1e140c", bg = "#4e3f34" }
+A = { fg = "#1a120a", bg = "#665446" }
+I = { fg = "#180f08", bg = "#35291f" }
+i = { fg = "#180f08", bg = "#30251c" }
+Y = { fg = "#664a34" }
+Z = { fg = "#2e2016" }
+U = { fg = "#4a2208", bg = "#d07a2c" }
+u = { fg = "#4a2208", bg = "#e08a34" }
+e = { fg = "#4a2208", bg = "#8a5228" }
+B = { fg = "#8e5030", bg = "#2c170c" }
+b = { fg = "#52301c", bg = "#23130a" }
+N = { fg = "#6a3c22" }
+L = { fg = "#ffcc70" }
+O = { fg = "#ffa24a" }
+l = { fg = "#e08a3a" }
+x = { fg = "#5a4230" }
+z = { fg = "#34241a" }
+k = { fg = "#1e1208", bg = "#3a2616" }
+Q = { fg = "#241206", bg = "#d0924e" }
+q = { fg = "#2a1608", bg = "#d0924e" }
+E = { fg = "#ffdca6", bg = "#44240c" }
+n = { fg = "#ffd49a", bg = "#522c12" }
+j = { fg = "#9a8048", bg = "#24170c" }
+f = { fg = "#ffa84a" }
