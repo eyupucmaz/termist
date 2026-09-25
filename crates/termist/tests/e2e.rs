@@ -50,6 +50,80 @@ fn a_hook_whose_stdin_never_closes_still_returns() {
     );
 }
 
+#[tokio::test]
+async fn bare_termist_autostarts_a_detached_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    // No TTY: bare `termist` must fail fast rather than panic, but the daemon it
+    // autostarted along the way must keep running after this parent exits.
+    let started = Instant::now();
+    let output = Command::new(BIN)
+        .env("TERMIST_HOME", &home)
+        .current_dir(&project_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("interactive terminal"),
+        "stderr was: {stderr}"
+    );
+
+    let paths = Paths::under(home.clone());
+    let mut c = None;
+    for _ in 0..250 {
+        if let Ok(client) = Client::connect(&paths).await {
+            c = Some(client);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut c = c.expect("the autostarted daemon never came up; see <home>/data/daemon.log");
+
+    c.send(&ClientRequest::ListState).await.unwrap();
+    let ServerEvent::State(state) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    else {
+        unreachable!()
+    };
+    let want = std::fs::canonicalize(&project_dir).unwrap();
+    assert!(
+        state.projects.iter().any(|p| p.path == want),
+        "expected a project at {want:?}, got {:?}",
+        state.projects
+    );
+    drop(c);
+
+    let out = Command::new(BIN)
+        .arg("kill")
+        .env("TERMIST_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if Client::connect(&paths).await.is_err() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon still accepted connections after kill"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn recv_until(c: &mut Client, mut pred: impl FnMut(&ServerEvent) -> bool) -> ServerEvent {
     timeout(Duration::from_secs(10), async {
         loop {

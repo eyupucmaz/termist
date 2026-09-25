@@ -32,6 +32,15 @@ enum Cmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A hook must never fail the agent, even if paths can't be resolved (e.g. etcetera
+    // can't find a base dir and TERMIST_HOME is unset): check this before any Paths::from_env
+    // error can return FAILURE.
+    if let Some(Cmd::Hook { harness, event }) = &cli.cmd {
+        if let Ok(paths) = Paths::from_env() {
+            hook(&paths, harness, event);
+        }
+        return ExitCode::SUCCESS; // a hook never fails the agent
+    }
     let paths = match Paths::from_env() {
         Ok(p) => p,
         Err(e) => {
@@ -39,10 +48,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Some(Cmd::Hook { harness, event }) = &cli.cmd {
-        hook(&paths, harness, event);
-        return ExitCode::SUCCESS; // a hook never fails the agent
-    }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = runtime.block_on(async move {
         match cli.cmd {

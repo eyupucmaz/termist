@@ -1,6 +1,6 @@
 use crate::app::{Action, App};
 use crate::ui;
-use anyhow::bail;
+use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -97,7 +97,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         }
     });
 
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().context("termist needs an interactive terminal")?;
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     let _ = execute!(stdout(), EnableBracketedPaste);
     if enhanced {
