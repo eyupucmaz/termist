@@ -93,8 +93,9 @@ pub fn config_env(config_dir: &Path, users_dir: Option<&OsStr>) -> Vec<(String, 
     }
 }
 
-/// `opencode [--session <id>] [-m <provider/model>] [--prompt <text>]`. OpenCode has
-/// no effort flag; a resumed session gets no prompt.
+/// `opencode [--session <id>] [-m <provider/model>] [--prompt=<text>]`. OpenCode has
+/// no effort flag; a resumed session gets no prompt. The prompt rides in the same
+/// argument as its flag, so a text starting with `-` is never read as a flag.
 pub fn args(resume: Option<&str>, model: Option<&str>, prompt: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(id) = resume {
@@ -106,7 +107,7 @@ pub fn args(resume: Option<&str>, model: Option<&str>, prompt: Option<&str>) -> 
     if resume.is_none()
         && let Some(p) = prompt.filter(|p| !p.trim().is_empty())
     {
-        args.extend(["--prompt".to_string(), p.to_string()]);
+        args.push(format!("--prompt={p}"));
     }
     args
 }
@@ -209,7 +210,7 @@ mod tests {
     fn the_model_and_the_prompt_are_flags() {
         assert_eq!(
             args(None, Some("anthropic/claude-sonnet-4-5"), Some("fix it")),
-            ["-m", "anthropic/claude-sonnet-4-5", "--prompt", "fix it"]
+            ["-m", "anthropic/claude-sonnet-4-5", "--prompt=fix it"]
         );
         assert_eq!(
             args(Some("ses_1"), Some("openai/gpt-5"), None),

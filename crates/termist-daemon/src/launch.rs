@@ -187,7 +187,7 @@ impl Launcher {
                         let sid = uuid::Uuid::new_v4().to_string();
                         args.extend(["--session-id".to_string(), sid.clone()]);
                         if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
-                            args.push(p.to_string());
+                            args.extend(["--".to_string(), claude_prompt(p)]);
                         }
                         sid
                     }
@@ -231,6 +231,18 @@ impl Launcher {
             },
             agent_session_id,
         }
+    }
+}
+
+/// The prompt as Claude's positional argument, after `--` so a leading `-` is not read
+/// as a flag. Claude still runs a command whose name is the first operand, even after
+/// `--`, so a one-word prompt (`update`, `doctor`) gets a trailing space that keeps it
+/// from matching one.
+fn claude_prompt(prompt: &str) -> String {
+    if prompt.contains(char::is_whitespace) {
+        prompt.to_string()
+    } else {
+        format!("{prompt} ")
     }
 }
 
@@ -349,7 +361,7 @@ mod tests {
         let sid = l.agent_session_id.clone().unwrap();
         assert_eq!(a[3], sid);
         assert!(uuid::Uuid::parse_str(&sid).is_ok());
-        assert_eq!(a.last().unwrap(), "fix the login redirect");
+        assert_eq!(&a[a.len() - 2..], ["--", "fix the login redirect"]);
     }
 
     #[test]
@@ -454,7 +466,7 @@ mod tests {
             resume: None,
         });
         assert_eq!(l.spec.program, "/fake/opencode");
-        assert_eq!(l.spec.args, ["--prompt", "fix it"]);
+        assert_eq!(l.spec.args, ["--prompt=fix it"]);
         let dir = env(&l, "OPENCODE_CONFIG_DIR").or_else(|| env(&l, "OPENCODE_CONFIG_CONTENT"));
         assert!(dir.is_some_and(|d| d.contains("/data/opencode")));
     }
@@ -578,6 +590,53 @@ mod tests {
         );
         let o = with_model(Harness::OpenCode, "openai/gpt-5", None, Some("ses_1"));
         assert_eq!(o.spec.args, ["--session", "ses_1", "-m", "openai/gpt-5"]);
+    }
+
+    fn prompted(harness: Harness, prompt: &str) -> Vec<String> {
+        launcher()
+            .launch(LaunchRequest {
+                id: SessionId::new(),
+                kind: &SessionKind::Agent { harness },
+                prompt: Some(prompt),
+                model: None,
+                effort: None,
+                cwd: Path::new("/p"),
+                cols: 80,
+                rows: 24,
+                resume: None,
+            })
+            .spec
+            .args
+    }
+
+    // A pasted bullet list or a prompt about a flag is still the prompt, and a one-word
+    // prompt that names one of the CLI's commands does not run that command.
+    #[test]
+    fn a_prompt_that_looks_like_a_flag_or_a_command_stays_the_prompt() {
+        let tail = |args: &[String]| args[args.len() - 2..].to_vec();
+        for harness in [Harness::Claude, Harness::Codex] {
+            assert_eq!(
+                tail(&prompted(harness, "-v flag is broken")),
+                ["--", "-v flag is broken"],
+                "{harness:?}"
+            );
+            assert_eq!(
+                tail(&prompted(harness, "- fix the login\n- add a test")),
+                ["--", "- fix the login\n- add a test"],
+                "{harness:?}"
+            );
+        }
+        assert_eq!(
+            tail(&prompted(Harness::Claude, "update")),
+            ["--", "update "],
+            "Claude runs a command named by its first word even after --"
+        );
+        assert_eq!(tail(&prompted(Harness::Codex, "update")), ["--", "update"]);
+        assert_eq!(
+            prompted(Harness::OpenCode, "-v flag is broken"),
+            ["--prompt=-v flag is broken"]
+        );
+        assert_eq!(prompted(Harness::OpenCode, "update"), ["--prompt=update"]);
     }
 
     // A model name typed by the user goes to the CLI as one argument, exactly as

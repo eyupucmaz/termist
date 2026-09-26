@@ -70,7 +70,7 @@ pub fn toml_string(s: &str) -> String {
 }
 
 /// `codex [resume <id>] [-m <model>] [-c model_reasoning_effort="<level>"]
-/// -c hooks.… -c hooks.state=… [prompt]`. The effort flag is not a hook, so it does
+/// -c hooks.… -c hooks.state=… [-- prompt]`. The effort flag is not a hook, so it does
 /// not change the trust hashes.
 pub fn args(
     exe: &Path,
@@ -116,10 +116,12 @@ pub fn args(
     // review screen. This form leaves the user's own trust entries untouched.
     args.push("-c".into());
     args.push(format!("hooks.state={{{}}}", state_entries.join(", ")));
+    // After `--` the prompt is never read as a flag or a command, even when it starts
+    // with `-` or is one word like `login`.
     if resume.is_none()
         && let Some(p) = prompt.filter(|p| !p.trim().is_empty())
     {
-        args.push(p.to_string());
+        args.extend(["--".to_string(), p.to_string()]);
     }
     args
 }

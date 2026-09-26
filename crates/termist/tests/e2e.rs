@@ -747,6 +747,61 @@ async fn quick_prompt_and_follow_up_through_the_real_tui() {
     );
 }
 
+// A prompt that starts with `-` (a pasted bullet list, a question about a flag) reaches
+// every agent CLI as the prompt, never as a flag.
+#[tokio::test]
+async fn a_prompt_starting_with_a_dash_reaches_each_cli_as_the_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = fixture(tmp.path(), "fake-argv.sh");
+    let home = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let (_paths, mut c, _guard) = daemon(
+        &home,
+        &[
+            ("TERMIST_CLAUDE_BIN", &agent),
+            ("TERMIST_CODEX_BIN", &agent),
+            ("TERMIST_OPENCODE_BIN", &agent),
+        ],
+    )
+    .await;
+    c.send(&ClientRequest::AddProject { path: project_dir })
+        .await
+        .unwrap();
+    let ServerEvent::State(state) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    else {
+        unreachable!()
+    };
+    let prompt = "-v flag is broken";
+    for (harness, shown) in [
+        (Harness::Claude, "[--]\n[-v flag is broken]"),
+        (Harness::Codex, "[--]\n[-v flag is broken]"),
+        (Harness::OpenCode, "[--prompt=-v flag is broken]"),
+    ] {
+        c.send(&ClientRequest::CreateSession {
+            project: state.projects[0].id,
+            kind: SessionKind::Agent { harness },
+            prompt: Some(prompt.into()),
+            model: None,
+            effort: None,
+            cols: 110,
+            rows: 30,
+        })
+        .await
+        .unwrap();
+        let ServerEvent::SessionUpdated(info) = recv_until(&mut c, |e| {
+            matches!(e, ServerEvent::SessionUpdated(u)
+                if u.kind == SessionKind::Agent { harness })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        screen_shows(&mut c, info.id, &[shown]).await;
+    }
+}
+
 #[tokio::test]
 async fn an_archived_session_survives_a_restart_and_resumes_when_restored() {
     let tmp = tempfile::tempdir().unwrap();
