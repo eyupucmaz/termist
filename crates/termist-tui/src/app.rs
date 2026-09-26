@@ -74,7 +74,11 @@ pub struct App {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProjectPending {
     Known(ProjectId),
-    Path(PathBuf),
+    /// A folder added as shown, and the projects that were open when it was asked for.
+    Path {
+        path: PathBuf,
+        open_before: Vec<ProjectId>,
+    },
 }
 
 impl Default for App {
@@ -885,11 +889,16 @@ impl App {
                 open.enter(d.path.clone());
                 return vec![Action::ListDir(d.path)];
             }
+            // The daemon resolves links in the path; the project it opens may show
+            // another path, so one that was not open before counts too.
             (KeyCode::Tab, Some(BrowseEntry::Dir(d))) => {
                 self.overlays.pop();
-                let path = std::fs::canonicalize(&d.path).unwrap_or(d.path);
-                self.project_pending = Some(ProjectPending::Path(path.clone()));
-                return vec![Action::Send(ClientRequest::AddProject { path })];
+                let open_before = self.open_projects().map(|p| p.id).collect();
+                self.project_pending = Some(ProjectPending::Path {
+                    path: d.path.clone(),
+                    open_before,
+                });
+                return vec![Action::Send(ClientRequest::AddProject { path: d.path })];
             }
             (KeyCode::Enter | KeyCode::Tab, Some(BrowseEntry::Project(p))) => {
                 self.overlays.pop();
@@ -1095,11 +1104,12 @@ impl App {
             Some(ProjectPending::Known(id)) => {
                 self.state.projects.iter().find(|p| p.id == *id && p.open)
             }
-            Some(ProjectPending::Path(path)) => self
-                .state
-                .projects
-                .iter()
-                .find(|p| p.path == *path && p.open),
+            Some(ProjectPending::Path { path, open_before }) => {
+                let open = || self.open_projects();
+                open()
+                    .find(|p| p.path == *path)
+                    .or_else(|| open().find(|p| !open_before.contains(&p.id)))
+            }
             None => None,
         };
         if let Some(id) = found.map(|p| p.id) {
@@ -2310,6 +2320,38 @@ mod tests {
             id: ProjectId::new(),
             name: "orbit".into(),
             path,
+            open: true,
+        };
+        state.projects.push(added.clone());
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.project, Some(added.id));
+    }
+
+    // The path goes to the daemon as shown (it resolves links itself, off the UI
+    // thread); the project it adds under its real path still comes to the front.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_reached_through_a_link_is_added_as_shown_and_still_comes_to_the_front() {
+        let (mut app, _) = app();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        app.on_key(k(K::Char('o')));
+        app.listed(Path::new("/"), listing(&[("link", false)], &root));
+        type_text(&mut app, "link");
+        let actions = app.on_key(k(K::Tab));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::AddProject {
+                path: root.join("link")
+            }]
+        );
+        let mut state = app.state.clone();
+        let added = ProjectInfo {
+            id: ProjectId::new(),
+            name: "real".into(),
+            path: root.join("real"),
             open: true,
         };
         state.projects.push(added.clone());
