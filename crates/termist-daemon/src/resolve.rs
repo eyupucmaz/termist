@@ -79,12 +79,24 @@ fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
 #[cfg(windows)]
 fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
     let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    std::iter::once(dir.join(name))
-        .chain(
-            exts.split(';')
-                .filter(|e| !e.is_empty())
-                .map(|e| dir.join(format!("{name}{e}"))),
-        )
+    windows_names(name, &exts)
+        .into_iter()
+        .map(|n| dir.join(n))
+        .collect()
+}
+
+/// The file names Windows can start for `name`: its PATHEXT variants only, unless it
+/// already has an extension. npm puts an extensionless sh script (`codex`) next to
+/// `codex.cmd`, and a console can't run the script.
+#[cfg(any(windows, test))]
+fn windows_names(name: &str, pathext: &str) -> Vec<String> {
+    if Path::new(name).extension().is_some() {
+        return vec![name.to_string()];
+    }
+    pathext
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| format!("{name}{e}"))
         .collect()
 }
 
@@ -132,5 +144,19 @@ mod tests {
             via_login_shell("sh; rm -rf /", std::time::Duration::from_secs(3)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod windows_tests {
+    use super::windows_names;
+
+    #[test]
+    fn windows_tries_only_pathext_variants_of_a_bare_name() {
+        assert_eq!(
+            windows_names("codex", ".COM;.EXE;;.CMD"),
+            ["codex.COM", "codex.EXE", "codex.CMD"]
+        );
+        assert_eq!(windows_names("codex.cmd", ".EXE;.CMD"), ["codex.cmd"]);
     }
 }
