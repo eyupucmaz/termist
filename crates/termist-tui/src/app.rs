@@ -348,17 +348,17 @@ impl App {
                     KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
                     KeyCode::Enter if self.selected.is_some() => actions.extend(self.enter()),
                     KeyCode::Char('n') => actions.extend(self.open_picker()),
-                    KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
+                    KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
-                    KeyCode::Char(' ') => self.open_follow_up(),
-                    KeyCode::Char('r') => self.open_rename(),
-                    KeyCode::Char('a') => {
+                    KeyCode::Char(' ') if !ctrl => self.open_follow_up(),
+                    KeyCode::Char('r') if !ctrl => self.open_rename(),
+                    KeyCode::Char('a') if !ctrl => {
                         if let Some(id) = self.selected {
                             self.mode = Mode::ConfirmArchive(id);
                         }
                     }
-                    KeyCode::Char('A') => self.set_archive_view(true),
-                    KeyCode::Char('/') => self.open_palette(),
+                    KeyCode::Char('A') if !ctrl => self.set_archive_view(true),
+                    KeyCode::Char('/') if !ctrl => self.open_palette(),
                     KeyCode::Char('d') if ctrl => self.half_page(1),
                     KeyCode::Char('u') if ctrl => self.half_page(-1),
                     KeyCode::Char('d') => {
@@ -379,8 +379,8 @@ impl App {
                             self.repair_selection();
                         }
                     }
-                    KeyCode::Char('o') => actions.extend(self.open_project_browser()),
-                    KeyCode::Char('x') => {
+                    KeyCode::Char('o') if !ctrl => actions.extend(self.open_project_browser()),
+                    KeyCode::Char('x') if !ctrl => {
                         if let Some(project) = self.project {
                             self.mode = Mode::ConfirmClose(project);
                         }
@@ -1009,7 +1009,8 @@ impl App {
     fn archive_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('A') => self.set_archive_view(false),
+            KeyCode::Esc => self.set_archive_view(false),
+            KeyCode::Char('A') if !ctrl => self.set_archive_view(false),
             KeyCode::Enter => return self.restore(),
             KeyCode::Char('d') if ctrl => self.half_page(1),
             KeyCode::Char('u') if ctrl => self.half_page(-1),
@@ -2546,6 +2547,23 @@ mod tests {
         back.status = AgentStatus::Fresh;
         app.on_event(ServerEvent::SessionUpdated(back));
         assert_eq!((app.selected, app.mode), (Some(s[1].id), Mode::Focus));
+    }
+
+    // Ctrl+A is a prefix habit; with Ctrl held, the letter keys of the grid do nothing.
+    #[test]
+    fn ctrl_with_a_grid_letter_does_nothing() {
+        let (mut app, _) = app();
+        for c in ['a', 'p', 'r', 'o', 'x', '/', ' '] {
+            assert!(sent(&app.on_key(ctrl(c))).is_empty(), "{c:?}");
+            assert!(app.overlays.is_empty(), "{c:?}");
+            assert_eq!(app.mode, Mode::Grid, "{c:?}");
+        }
+        let ctrl_shift_a = KeyEvent::new(K::Char('A'), M::CONTROL | M::SHIFT);
+        app.on_key(ctrl_shift_a);
+        assert!(!app.archive_view);
+        app.on_key(k(K::Char('A')));
+        app.on_key(ctrl_shift_a);
+        assert!(app.archive_view, "and it does not leave the archive view");
     }
 
     #[test]
