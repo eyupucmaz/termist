@@ -127,6 +127,7 @@ impl App {
                 self.focus_next_created = false;
                 self.message = Some(message);
             }
+            ServerEvent::Harnesses(_) => {}
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());

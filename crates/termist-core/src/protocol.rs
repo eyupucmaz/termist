@@ -1,11 +1,11 @@
-use crate::model::{Harness, SessionInfo, SessionKind, StateSnapshot};
+use crate::model::{Harness, HarnessInfo, SessionInfo, SessionKind, StateSnapshot};
 use crate::screen::ScreenUpdate;
 use crate::{ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -48,6 +48,13 @@ pub enum ClientRequest {
     KillSession {
         session: SessionId,
     },
+    /// Relaunch a stopped (Exited or Disconnected) session in place, resuming the
+    /// agent's own conversation when its id is known.
+    Resume {
+        session: SessionId,
+        cols: u16,
+        rows: u16,
+    },
     /// Sent by `termist hook`; `payload_json` is the agent's hook stdin, verbatim.
     Hook {
         session: SessionId,
@@ -65,6 +72,8 @@ pub enum ServerEvent {
         pid: u32,
     },
     State(StateSnapshot),
+    /// Which agent CLIs the daemon can launch; sent after each `State` reply.
+    Harnesses(Vec<HarnessInfo>),
     SessionUpdated(SessionInfo),
     SessionRemoved(SessionId),
     /// Pushed to attached clients; the first one after Attach carries every row.

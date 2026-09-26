@@ -86,6 +86,9 @@ impl Launcher {
                     Some(sid),
                 )
             }
+            SessionKind::Agent {
+                harness: harness @ (Harness::Codex | Harness::OpenCode),
+            } => (harness.program().to_string(), vec![], None),
         };
         Launch {
             spec: SpawnSpec {

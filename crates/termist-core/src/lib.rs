@@ -8,7 +8,7 @@ pub mod screen;
 pub mod status;
 
 pub use ids::{ProjectId, SessionId};
-pub use model::{Harness, ProjectInfo, SessionInfo, SessionKind, StateSnapshot};
+pub use model::{Harness, HarnessInfo, ProjectInfo, SessionInfo, SessionKind, StateSnapshot};
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 pub use screen::{Cell, Color, Cursor, Modes, ScreenUpdate, Snapshot, cell_flags};
 pub use status::{AgentStatus, Signal, attention_order, next_in_attention, now_ms};

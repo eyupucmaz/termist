@@ -6,21 +6,36 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Harness {
     Claude,
+    Codex,
+    OpenCode,
 }
 
 impl Harness {
+    pub const ALL: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::OpenCode];
+
     pub fn id(self) -> &'static str {
         match self {
             Harness::Claude => "claude",
+            Harness::Codex => "codex",
+            Harness::OpenCode => "opencode",
         }
     }
 
-    pub fn from_id(s: &str) -> Option<Harness> {
-        match s {
-            "claude" => Some(Harness::Claude),
-            _ => None,
-        }
+    /// The executable name looked up on PATH.
+    pub fn program(self) -> &'static str {
+        self.id()
     }
+
+    pub fn from_id(s: &str) -> Option<Harness> {
+        Harness::ALL.into_iter().find(|h| h.id() == s)
+    }
+}
+
+/// Whether the daemon found a harness's CLI when it started.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessInfo {
+    pub harness: Harness,
+    pub available: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,4 +79,30 @@ pub struct SessionInfo {
 pub struct StateSnapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_ids_round_trip_and_all_is_ordered() {
+        assert_eq!(
+            Harness::ALL,
+            [Harness::Claude, Harness::Codex, Harness::OpenCode]
+        );
+        for h in Harness::ALL {
+            assert_eq!(Harness::from_id(h.id()), Some(h));
+        }
+        assert_eq!(Harness::OpenCode.id(), "opencode");
+        assert_eq!(Harness::Codex.program(), "codex");
+        assert_eq!(Harness::from_id("cursor"), None);
+        assert_eq!(
+            SessionKind::Agent {
+                harness: Harness::Codex
+            }
+            .label(),
+            "codex"
+        );
+    }
 }

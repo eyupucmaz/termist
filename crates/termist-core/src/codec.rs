@@ -121,4 +121,23 @@ mod tests {
             "Vec<u8> must be encoded as a msgpack bin, not an int array"
         );
     }
+
+    #[test]
+    fn the_new_messages_round_trip() {
+        use crate::model::{Harness, HarnessInfo};
+        let ev = ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::OpenCode,
+            available: false,
+        }]);
+        let mut dec = FrameDecoder::default();
+        dec.push(&encode_frame(&ev).unwrap());
+        assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        let req = ClientRequest::Resume {
+            session: SessionId::new(),
+            cols: 80,
+            rows: 24,
+        };
+        dec.push(&encode_frame(&req).unwrap());
+        assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+    }
 }

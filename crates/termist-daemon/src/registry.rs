@@ -223,12 +223,19 @@ impl Registry {
                 }
                 let signal = match harness {
                     Harness::Claude => claude::signal_for(&event, &payload),
+                    Harness::Codex | Harness::OpenCode => None,
                 };
                 if let Some(signal) = signal {
                     self.signal(session, signal);
                 }
                 self.send(client, ServerEvent::Ack);
             }
+            ClientRequest::Resume { .. } => self.send(
+                client,
+                ServerEvent::Error {
+                    message: "resume is not supported yet".into(),
+                },
+            ),
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     let _ = s.cmd.send(SessionCmd::Kill);
