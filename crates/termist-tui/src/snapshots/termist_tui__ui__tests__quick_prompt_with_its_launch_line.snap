@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 60, 16).backend()"
+---
+" termist   orbit-api ◆1✓1                                   "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮            "
+"┃◆ claude-1            ┃│✓ shell-2             │            "
+"┃claude · waiting      ┃│shell · done          │            "
+"┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯            "
+"┌ new task ────────────────────────────────────────────────┐"
+"│fix the login redirect                                    │"
+"│                                                          │"
+"│                                                          │"
+"│orbit-api ^P · claude Tab · opus · high ^O                │"
+"└──────────────────────────────────────────────────────────┘"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+"Enter start · Shift+Enter newline · ↑ history · Tab CLI · ^O"

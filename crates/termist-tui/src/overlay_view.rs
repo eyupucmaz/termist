@@ -1,7 +1,8 @@
 //! Drawing the overlay stack: each overlay is a box centred over the body, drawn
 //! bottom to top, so a picker opened from the quick prompt sits on top of it.
 use crate::app::App;
-use crate::overlay::Overlay;
+use crate::overlay::{Overlay, QuickPrompt};
+use crate::text_input::TextInput;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -70,7 +71,65 @@ fn draw_list(f: &mut Frame, body: Rect, list: ListBox) {
     boxed(f, area, &list.title, lines);
 }
 
-pub fn draw(f: &mut Frame, _app: &App, overlay: &Overlay, body: Rect) {
+/// The lines of `input` that fit `width` × `height`, scrolled to keep the cursor in
+/// view, and the cursor's position inside that window.
+fn input_view(input: &TextInput, width: u16, height: usize) -> (Vec<Line<'static>>, (u16, u16)) {
+    let (line, col) = input.cursor_line_col();
+    let first = line.saturating_sub(height.saturating_sub(1));
+    let skip = (col + 1).saturating_sub(width.max(1) as usize);
+    let lines = input
+        .text()
+        .split('\n')
+        .skip(first)
+        .take(height)
+        .map(|l| Line::from(l.chars().skip(skip).collect::<String>()))
+        .collect();
+    (lines, ((col - skip) as u16, (line - first) as u16))
+}
+
+/// A one-line text box; the cursor shows when it is the top overlay.
+fn text_box(f: &mut Frame, body: Rect, title: &str, width: u16, input: &TextInput, top: bool) {
+    let area = centered(body, width, 3);
+    let (lines, (cx, _)) = input_view(input, area.width.saturating_sub(2), 1);
+    boxed(f, area, title, lines);
+    if top && area.height == 3 {
+        f.set_cursor_position((area.x + 1 + cx, area.y + 1));
+    }
+}
+
+/// `orbit-api ^P · claude Tab · opus · high ^O`
+pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
+    let project = app
+        .state
+        .projects
+        .iter()
+        .find(|p| p.id == q.project)
+        .map_or("?", |p| p.name.as_str());
+    let harness = q.launch.harness;
+    let missing = if app
+        .harnesses
+        .iter()
+        .any(|h| h.harness == harness && h.available)
+    {
+        ""
+    } else {
+        " (not installed)"
+    };
+    let model = q.launch.model.as_deref().unwrap_or("default");
+    let effort = q
+        .launch
+        .effort
+        .as_deref()
+        .map(|e| format!(" · {e}"))
+        .unwrap_or_default();
+    format!(
+        "{project} ^P · {}{missing} Tab · {model}{effort} ^O",
+        harness.id()
+    )
+}
+
+/// Draws one overlay; `top` is the one that gets the keys (and the cursor).
+pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) {
     match overlay {
         Overlay::Harness(picker) => {
             let rows = picker
@@ -97,6 +156,79 @@ pub fn draw(f: &mut Frame, _app: &App, overlay: &Overlay, body: Rect) {
                 },
             );
         }
+        Overlay::QuickPrompt(q) => {
+            let height = q.input.text().split('\n').count().clamp(3, 8);
+            let area = centered(body, 72, height as u16 + 3);
+            let inner_w = area.width.saturating_sub(2);
+            let rows = area.height.saturating_sub(3) as usize;
+            let (mut lines, (cx, cy)) = input_view(&q.input, inner_w, rows);
+            lines.resize(rows, Line::default());
+            lines.push(Line::from(Span::styled(launch_line(app, q), dim())));
+            boxed(f, area, "new task", lines);
+            if top && area.height > 3 {
+                f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
+            }
+        }
+        Overlay::Model(m) => {
+            let rows = m
+                .models
+                .visible()
+                .map(|(_, c, on)| {
+                    Line::from(Span::styled(
+                        format!(" {}", c.label()),
+                        highlighted(Style::default(), on),
+                    ))
+                })
+                .collect();
+            let mut extra = vec![];
+            if !m.harness.efforts().is_empty() {
+                let mut spans = vec![Span::raw(" effort ")];
+                let levels = std::iter::once("default").chain(m.harness.efforts().iter().copied());
+                for (i, level) in levels.enumerate() {
+                    spans.push(Span::styled(
+                        format!(" {level} "),
+                        highlighted(Style::default(), i == m.effort),
+                    ));
+                }
+                extra = vec![Line::default(), Line::from(spans)];
+            }
+            draw_list(
+                f,
+                body,
+                ListBox {
+                    title: format!("model · {}", m.harness.id()),
+                    width: 56,
+                    query: None,
+                    rows,
+                    highlight: m.models.highlight(),
+                    extra,
+                },
+            );
+        }
+        Overlay::ModelName(input) => text_box(f, body, "model name", 48, input, top),
+        Overlay::Project(picker) => {
+            let rows = picker
+                .visible()
+                .map(|(_, p, on)| {
+                    Line::from(vec![
+                        Span::styled(format!(" {}", p.name), highlighted(Style::default(), on)),
+                        Span::styled(format!("  {}", p.path.display()), dim()),
+                    ])
+                })
+                .collect();
+            draw_list(
+                f,
+                body,
+                ListBox {
+                    title: "project".into(),
+                    width: 56,
+                    query: picker.query().map(str::to_string),
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
     }
 }
 
@@ -104,5 +236,14 @@ pub fn draw(f: &mut Frame, _app: &App, overlay: &Overlay, body: Rect) {
 pub fn hint(overlay: &Overlay) -> &'static str {
     match overlay {
         Overlay::Harness(_) => "j/k choose · Enter start · 1-3 pick · Esc cancel",
+        Overlay::QuickPrompt(_) => {
+            "Enter start · Shift+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"
+        }
+        Overlay::Model(m) if m.harness.efforts().is_empty() => {
+            "j/k model · Enter choose · Esc back"
+        }
+        Overlay::Model(_) => "j/k model · h/l effort · Enter choose · Esc back",
+        Overlay::ModelName(_) => "Enter use this model · Esc back",
+        Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
     }
 }

@@ -1,12 +1,16 @@
 use crate::encode::{encode_key, encode_paste};
 use crate::list_picker::Pick;
-use crate::overlay::{self, Overlay};
+use crate::overlay::{self, ModelChoice, ModelPicker, Overlay, QuickPrompt};
+use crate::text_input::{Edit, TextInput};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, HarnessInfo, ProjectId, ServerEvent, SessionId,
-    SessionInfo, SessionKind, Snapshot, StateSnapshot, next_in_attention,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
+    ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, next_in_attention,
 };
+
+/// How many earlier prompts the quick prompt asks for.
+const PROMPT_HISTORY: u32 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -41,6 +45,10 @@ pub struct App {
     pub harnesses: Vec<HarnessInfo>,
     /// Pickers and text boxes on top of the grid or pane; the last one gets the keys.
     pub overlays: Vec<Overlay>,
+    /// Earlier prompts, newest first, as the daemon last sent them.
+    prompt_history: Vec<String>,
+    /// Recently used models per harness, as the daemon last sent them.
+    recent_models: HashMap<Harness, Vec<String>>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
 }
@@ -72,6 +80,8 @@ impl App {
                 })
                 .collect(),
             overlays: Vec::new(),
+            prompt_history: Vec::new(),
+            recent_models: HashMap::new(),
             focus_next_created: false,
             resume_pending: None,
         }
@@ -83,6 +93,11 @@ impl App {
             .iter()
             .filter(|s| Some(s.project) == self.project)
             .collect()
+    }
+
+    /// The projects shown as tabs.
+    pub fn open_projects(&self) -> impl Iterator<Item = &ProjectInfo> {
+        self.state.projects.iter().filter(|p| p.open)
     }
 
     pub fn selected_info(&self) -> Option<&SessionInfo> {
@@ -161,7 +176,26 @@ impl App {
                 }
                 self.harnesses = list;
             }
-            ServerEvent::PromptHistory(_) | ServerEvent::Models { .. } => {}
+            ServerEvent::PromptHistory(history) => {
+                for o in &mut self.overlays {
+                    if let Overlay::QuickPrompt(q) = o
+                        && q.input.is_empty()
+                    {
+                        q.input.set_history(history.clone());
+                    }
+                }
+                self.prompt_history = history;
+            }
+            ServerEvent::Models { harness, recent } => {
+                for o in &mut self.overlays {
+                    if let Overlay::Model(m) = o
+                        && m.harness == harness
+                    {
+                        m.set_recent(recent.clone(), None);
+                    }
+                }
+                self.recent_models.insert(harness, recent);
+            }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
@@ -222,6 +256,7 @@ impl App {
                             }));
                         }
                     }
+                    KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
                     KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
                     _ => {}
                 }
@@ -233,7 +268,8 @@ impl App {
                     KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
                     KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
                     KeyCode::Enter if self.selected.is_some() => actions.extend(self.enter()),
-                    KeyCode::Char('n') => self.open_picker(),
+                    KeyCode::Char('n') => actions.extend(self.open_picker()),
+                    KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
                     KeyCode::Char('d') => {
                         if let Some(id) = self.selected {
@@ -259,6 +295,12 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        if let Some(top) = self.overlays.last_mut() {
+            if let Some(input) = top.text_input_mut() {
+                input.insert_str(text);
+            }
+            return vec![];
+        }
         match (self.mode, self.selected) {
             (Mode::Focus, Some(id)) => {
                 let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
@@ -311,43 +353,50 @@ impl App {
 
     /// Keys for the overlay on top of the stack.
     fn overlay_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let Some(top) = self.overlays.last_mut() else {
-            return vec![];
-        };
-        match top {
-            Overlay::Harness(picker) => {
-                let chosen = match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.overlays.pop();
-                        return vec![];
-                    }
-                    KeyCode::Char(c @ '1'..='9') => Some(c as usize - '1' as usize),
-                    _ => match picker.key(key) {
-                        Pick::Chosen => picker.selected_index(),
-                        _ => None,
-                    },
-                };
-                match chosen {
-                    Some(index) => {
-                        self.overlays.pop();
-                        self.pick(index)
-                    }
-                    None => vec![],
-                }
-            }
+        // A message stays up only until the next key.
+        self.message = None;
+        match self.overlays.last() {
+            Some(Overlay::Harness(_)) => self.harness_key(key),
+            Some(Overlay::QuickPrompt(_)) => self.quick_prompt_key(key),
+            Some(Overlay::Model(_)) => self.model_key(key),
+            Some(Overlay::ModelName(_)) => self.model_name_key(key),
+            Some(Overlay::Project(_)) => self.project_key(key),
+            None => vec![],
         }
     }
 
-    fn open_picker(&mut self) {
+    fn open_picker(&mut self) -> Vec<Action> {
         if self.project.is_none() {
             self.message = Some("no project open".into());
-            return;
+            return vec![];
         }
         self.overlays
             .push(Overlay::Harness(overlay::harness_picker(&self.harnesses)));
+        // A CLI installed since the daemon started shows up when the answer comes.
+        vec![Action::Send(ClientRequest::RescanHarnesses)]
     }
 
-    fn pick(&mut self, index: usize) -> Vec<Action> {
+    /// In the quick prompt a harness is chosen for the launch line; otherwise it starts
+    /// a session at once.
+    fn harness_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Harness(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let chosen = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+                return vec![];
+            }
+            KeyCode::Char(c @ '1'..='9') => Some(c as usize - '1' as usize),
+            _ => match picker.key(key) {
+                Pick::Chosen => picker.selected_index(),
+                _ => None,
+            },
+        };
+        let Some(index) = chosen else {
+            return vec![];
+        };
+        self.overlays.pop();
         let Some(choice) = self.harnesses.get(index).cloned() else {
             return vec![];
         };
@@ -358,9 +407,217 @@ impl App {
             ));
             return vec![];
         }
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            q.set_harness(choice.harness);
+            return vec![];
+        }
         self.create(SessionKind::Agent {
             harness: choice.harness,
         })
+    }
+
+    fn is_available(&self, harness: Harness) -> bool {
+        self.harnesses
+            .iter()
+            .any(|h| h.harness == harness && h.available)
+    }
+
+    /// `p` and `C-a p`: opens on the last launch line (or the first installed CLI), and
+    /// asks for the prompt history and for CLIs installed since the daemon started.
+    fn open_quick_prompt(&mut self) -> Vec<Action> {
+        let Some(project) = self.project else {
+            self.message = Some("no project open".into());
+            return vec![];
+        };
+        let launch = self
+            .state
+            .last_launch
+            .clone()
+            .filter(|l| self.is_available(l.harness))
+            .unwrap_or_else(|| LaunchOptions {
+                harness: self
+                    .harnesses
+                    .iter()
+                    .find(|h| h.available)
+                    .map_or(Harness::Claude, |h| h.harness),
+                model: None,
+                effort: None,
+            });
+        let mut input = TextInput::new(true);
+        input.set_history(self.prompt_history.clone());
+        self.overlays.push(Overlay::QuickPrompt(QuickPrompt {
+            input,
+            project,
+            launch,
+        }));
+        vec![
+            Action::Send(ClientRequest::ListPromptHistory {
+                limit: PROMPT_HISTORY,
+            }),
+            Action::Send(ClientRequest::RescanHarnesses),
+        ]
+    }
+
+    fn quick_prompt_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.overlays.pop();
+            }
+            KeyCode::Tab => {
+                let current = q.launch.harness;
+                let mut picker = overlay::harness_picker(&self.harnesses);
+                if let Some(i) = self.harnesses.iter().position(|h| h.harness == current) {
+                    picker.select_index(i);
+                }
+                self.overlays.push(Overlay::Harness(picker));
+            }
+            KeyCode::Char('o') if ctrl => {
+                let launch = q.launch.clone();
+                let recent = self
+                    .recent_models
+                    .get(&launch.harness)
+                    .cloned()
+                    .unwrap_or_default();
+                self.overlays
+                    .push(Overlay::Model(ModelPicker::new(&launch, recent)));
+                return vec![Action::Send(ClientRequest::ListModels {
+                    harness: launch.harness,
+                })];
+            }
+            KeyCode::Char('p') if ctrl => {
+                let current = q.project;
+                let open = self.open_projects().cloned().collect();
+                self.overlays
+                    .push(Overlay::Project(overlay::project_picker(open, current)));
+            }
+            _ => {
+                if q.input.key(key) == Edit::Submit {
+                    return self.submit_quick_prompt();
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Starts the task. An empty prompt starts the CLI bare; a CLI that is not
+    /// installed starts nothing and the prompt stays open.
+    fn submit_quick_prompt(&mut self) -> Vec<Action> {
+        let Some(Overlay::QuickPrompt(q)) = self.overlays.last() else {
+            return vec![];
+        };
+        let harness = q.launch.harness;
+        if !self.is_available(harness) {
+            self.message = Some(format!(
+                "{} is not installed (not found on PATH)",
+                harness.id()
+            ));
+            return vec![];
+        }
+        let Some(Overlay::QuickPrompt(q)) = self.overlays.pop() else {
+            return vec![];
+        };
+        let text = q.input.text();
+        let prompt = (!text.trim().is_empty()).then(|| text.to_string());
+        self.focus_next_created = true;
+        let (cols, rows) = self.pane;
+        vec![
+            Action::Send(ClientRequest::SetLastLaunch(q.launch.clone())),
+            Action::Send(ClientRequest::CreateSession {
+                project: q.project,
+                kind: SessionKind::Agent { harness },
+                prompt,
+                model: q.launch.model,
+                effort: q.launch.effort,
+                cols: cols.max(20),
+                rows: rows.max(5),
+            }),
+        ]
+    }
+
+    fn model_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Model(m)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Left | KeyCode::Char('h') => m.step_effort(-1),
+            KeyCode::Right | KeyCode::Char('l') => m.step_effort(1),
+            _ => {
+                if m.models.key(key) == Pick::Chosen {
+                    match m.models.selected().cloned() {
+                        Some(ModelChoice::Type) => self
+                            .overlays
+                            .push(Overlay::ModelName(TextInput::new(false))),
+                        Some(choice) => {
+                            let effort = m.effort();
+                            self.overlays.pop();
+                            self.set_model(choice.model(), effort);
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// A typed model name goes to the CLI exactly as typed (trimmed).
+    fn model_name_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::ModelName(input)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if input.key(key) != Edit::Submit {
+            return vec![];
+        }
+        let name = input.text().trim().to_string();
+        if name.is_empty() {
+            self.message = Some("type a model name, or Esc to go back".into());
+            return vec![];
+        }
+        self.overlays.pop();
+        let effort = match self.overlays.pop() {
+            Some(Overlay::Model(m)) => m.effort(),
+            _ => None,
+        };
+        self.set_model(Some(name), effort);
+        vec![]
+    }
+
+    /// Model and effort for the quick prompt below.
+    fn set_model(&mut self, model: Option<String>, effort: Option<String>) {
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            q.launch.model = model;
+            q.launch.effort = effort;
+        }
+    }
+
+    fn project_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Project(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if picker.key(key) == Pick::Chosen
+            && let Some(id) = picker.selected().map(|p| p.id)
+        {
+            self.overlays.pop();
+            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+                q.project = id;
+            }
+        }
+        vec![]
     }
 
     /// Enter on a card: focus a live session, resume a stopped one.
@@ -702,7 +959,11 @@ mod tests {
     #[test]
     fn n_opens_the_picker_and_enter_starts_the_highlighted_cli() {
         let (mut app, s) = app();
-        assert!(app.on_key(k(K::Char('n'))).is_empty());
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('n')))),
+            vec![&ClientRequest::RescanHarnesses],
+            "a CLI installed since the daemon started shows up"
+        );
         assert_eq!(picker(&app), Some(0));
         app.on_key(k(K::Char('k')));
         assert_eq!(picker(&app), Some(0), "stops at the top");
@@ -994,5 +1255,323 @@ mod tests {
             update,
         });
         assert_eq!(app.screens[&s[0].id].line_text(0), "h");
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(k(K::Char(c)));
+        }
+    }
+
+    fn quick_prompt(app: &App) -> &QuickPrompt {
+        app.overlays
+            .iter()
+            .rev()
+            .find_map(|o| match o {
+                Overlay::QuickPrompt(q) => Some(q),
+                _ => None,
+            })
+            .expect("a quick prompt is open")
+    }
+
+    fn launch(harness: Harness, model: Option<&str>, effort: Option<&str>) -> LaunchOptions {
+        LaunchOptions {
+            harness,
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn p_opens_the_quick_prompt_on_the_last_launch_and_asks_for_the_history() {
+        let (mut app, s) = app();
+        app.state.last_launch = Some(launch(Harness::Codex, Some("gpt-5"), Some("high")));
+        let actions = app.on_key(k(K::Char('p')));
+        assert_eq!(
+            sent(&actions),
+            vec![
+                &ClientRequest::ListPromptHistory { limit: 50 },
+                &ClientRequest::RescanHarnesses
+            ]
+        );
+        let q = quick_prompt(&app);
+        assert_eq!(q.project, s[0].project);
+        assert_eq!(
+            q.launch,
+            launch(Harness::Codex, Some("gpt-5"), Some("high"))
+        );
+    }
+
+    #[test]
+    fn enter_starts_the_task_with_its_prompt_model_and_effort_and_focuses_it() {
+        let (mut app, s) = app();
+        app.state.last_launch = Some(launch(Harness::Claude, Some("opus"), Some("max")));
+        app.on_key(k(K::Char('p')));
+        type_text(&mut app, "fix the login redirect");
+        app.on_key(KeyEvent::new(K::Enter, M::SHIFT));
+        type_text(&mut app, "and add a test");
+        let actions = app.on_key(k(K::Enter));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            sent(&actions),
+            vec![
+                &ClientRequest::SetLastLaunch(launch(Harness::Claude, Some("opus"), Some("max"))),
+                &ClientRequest::CreateSession {
+                    project: s[0].project,
+                    kind: SessionKind::Agent {
+                        harness: Harness::Claude
+                    },
+                    prompt: Some("fix the login redirect\nand add a test".into()),
+                    model: Some("opus".into()),
+                    effort: Some("max".into()),
+                    cols: 80,
+                    rows: 20
+                }
+            ]
+        );
+        let fresh = session(s[0].project, "claude-5", AgentStatus::Fresh);
+        app.on_event(ServerEvent::SessionUpdated(fresh.clone()));
+        assert_eq!((app.selected, app.mode), (Some(fresh.id), Mode::Focus));
+    }
+
+    #[test]
+    fn an_empty_quick_prompt_starts_the_cli_bare() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        type_text(&mut app, "   ");
+        let actions = app.on_key(k(K::Enter));
+        match sent(&actions)[1] {
+            ClientRequest::CreateSession { prompt, model, .. } => {
+                assert_eq!((prompt, model), (&None, &None));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // Every picker opened from the quick prompt, chosen from or cancelled, returns to
+    // the same text.
+    #[test]
+    fn the_prompt_text_survives_opening_and_cancelling_every_picker() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        type_text(&mut app, "fix the bug");
+        app.on_key(KeyEvent::new(K::Enter, M::ALT));
+        type_text(&mut app, "and test it");
+        let text = quick_prompt(&app).input.text().to_string();
+        let before = quick_prompt(&app).launch.clone();
+        let keys = [
+            vec![k(K::Tab), k(K::Esc)],
+            vec![ctrl('o'), k(K::Esc)],
+            vec![
+                ctrl('o'),
+                k(K::Char('j')),
+                k(K::Enter),
+                k(K::Char('x')),
+                k(K::Esc),
+                k(K::Esc),
+            ],
+            vec![ctrl('p'), k(K::Char('w')), k(K::Esc)],
+        ];
+        for sequence in keys {
+            for key in sequence {
+                app.on_key(key);
+            }
+            assert_eq!(app.overlays.len(), 1, "back to the quick prompt");
+            assert_eq!(quick_prompt(&app).input.text(), text);
+            assert_eq!(quick_prompt(&app).launch, before);
+        }
+        app.on_key(k(K::Tab));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).input.text(), text, "and after choosing");
+        assert_eq!(quick_prompt(&app).launch.harness, Harness::Codex);
+    }
+
+    #[test]
+    fn tab_switches_the_cli_and_drops_a_model_that_belongs_to_the_old_one() {
+        let (mut app, _) = app();
+        app.state.last_launch = Some(launch(Harness::Claude, Some("opus"), Some("high")));
+        app.on_key(k(K::Char('p')));
+        app.on_key(k(K::Tab));
+        app.on_key(k(K::Char('2')));
+        assert_eq!(
+            quick_prompt(&app).launch,
+            launch(Harness::Codex, None, Some("high"))
+        );
+    }
+
+    #[test]
+    fn a_cli_that_is_not_installed_is_not_chosen_or_started() {
+        let (mut app, _) = app();
+        app.state.last_launch = Some(launch(Harness::Codex, None, None));
+        app.on_event(ServerEvent::Harnesses(vec![
+            HarnessInfo {
+                harness: Harness::Claude,
+                available: false,
+            },
+            HarnessInfo {
+                harness: Harness::Codex,
+                available: false,
+            },
+            HarnessInfo {
+                harness: Harness::OpenCode,
+                available: true,
+            },
+        ]));
+        app.on_key(k(K::Char('p')));
+        assert_eq!(
+            quick_prompt(&app).launch.harness,
+            Harness::OpenCode,
+            "the first installed one"
+        );
+        app.on_key(k(K::Tab));
+        app.on_key(k(K::Char('1')));
+        assert_eq!(quick_prompt(&app).launch.harness, Harness::OpenCode);
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap()
+                .contains("claude is not installed")
+        );
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::OpenCode,
+            available: false,
+        }]));
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        assert_eq!(app.overlays.len(), 1, "the prompt stays open");
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap()
+                .contains("opencode is not installed")
+        );
+    }
+
+    #[test]
+    fn ctrl_o_picks_a_recent_model_and_an_effort() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        assert_eq!(
+            sent(&app.on_key(ctrl('o'))),
+            vec![&ClientRequest::ListModels {
+                harness: Harness::Claude
+            }]
+        );
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Claude,
+            recent: vec!["opus".into(), "sonnet".into()],
+        });
+        for key in [
+            K::Char('j'),
+            K::Char('j'),
+            K::Char('l'),
+            K::Char('l'),
+            K::Right,
+            K::Enter,
+        ] {
+            app.on_key(k(key));
+        }
+        assert_eq!(
+            quick_prompt(&app).launch,
+            launch(Harness::Claude, Some("sonnet"), Some("high"))
+        );
+        app.on_key(ctrl('o'));
+        for key in [
+            K::Char('k'),
+            K::Char('k'),
+            K::Char('h'),
+            K::Char('h'),
+            K::Char('h'),
+            K::Enter,
+        ] {
+            app.on_key(k(key));
+        }
+        assert_eq!(
+            quick_prompt(&app).launch,
+            launch(Harness::Claude, None, None)
+        );
+    }
+
+    #[test]
+    fn a_typed_model_name_is_used_exactly_as_typed() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Enter));
+        assert!(matches!(app.overlays.last(), Some(Overlay::ModelName(_))));
+        app.on_key(k(K::Enter));
+        assert!(app.message.is_some(), "an empty name is refused");
+        type_text(&mut app, r#" my "odd" model "#);
+        app.on_key(k(K::Enter));
+        assert_eq!(app.overlays.len(), 1);
+        assert_eq!(
+            quick_prompt(&app).launch,
+            launch(Harness::Claude, Some(r#"my "odd" model"#), Some("low"))
+        );
+    }
+
+    #[test]
+    fn opencode_has_no_effort_to_pick() {
+        let (mut app, _) = app();
+        app.state.last_launch = Some(launch(Harness::OpenCode, None, None));
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Enter));
+        assert_eq!(
+            quick_prompt(&app).launch,
+            launch(Harness::OpenCode, None, None)
+        );
+    }
+
+    #[test]
+    fn ctrl_p_starts_the_task_in_another_project() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('p'));
+        type_text(&mut app, "web");
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).project, s[3].project);
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[1],
+            ClientRequest::CreateSession { project, .. } if *project == s[3].project
+        ));
+    }
+
+    #[test]
+    fn up_in_the_empty_prompt_brings_back_the_last_prompt() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_event(ServerEvent::PromptHistory(vec![
+            "the last one".into(),
+            "older".into(),
+        ]));
+        app.on_key(k(K::Up));
+        assert_eq!(quick_prompt(&app).input.text(), "the last one");
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('p')));
+        app.on_key(k(K::Up));
+        assert_eq!(
+            quick_prompt(&app).input.text(),
+            "the last one",
+            "remembered for the next prompt"
+        );
+    }
+
+    #[test]
+    fn a_paste_goes_into_the_open_text_box_not_the_pane() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Char('p')));
+        assert_eq!(app.mode, Mode::Focus);
+        assert!(app.on_paste("line one\nline two").is_empty());
+        assert_eq!(quick_prompt(&app).input.text(), "line one\nline two");
+        app.on_key(k(K::Esc));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::Focus, "Esc returns to the focused pane");
     }
 }

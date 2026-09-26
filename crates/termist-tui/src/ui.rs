@@ -118,8 +118,8 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         height: areas.cards.height + areas.pane.height,
         ..areas.cards
     };
-    for overlay in &app.overlays {
-        overlay_view::draw(f, app, overlay, body);
+    for (i, overlay) in app.overlays.iter().enumerate() {
+        overlay_view::draw(f, app, overlay, body, i + 1 == app.overlays.len());
     }
     draw_footer(f, app, areas.footer);
 }
@@ -549,5 +549,60 @@ mod tests {
         assert!(text.contains("codex"));
         assert!(text.contains("not installed"));
         assert!(text.contains("opencode"));
+    }
+
+    fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::from(code)
+    }
+
+    fn ctrl(c: char) -> ratatui::crossterm::event::KeyEvent {
+        ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char(c),
+            ratatui::crossterm::event::KeyModifiers::CONTROL,
+        )
+    }
+
+    fn screen_text(t: &Terminal<TestBackend>) -> String {
+        t.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn quick_prompt_with_its_launch_line() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.state.last_launch = Some(termist_core::LaunchOptions {
+            harness: termist_core::Harness::Claude,
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        });
+        app.on_key(key(K::Char('p')));
+        for c in "fix the login redirect".chars() {
+            app.on_key(key(K::Char(c)));
+        }
+        insta::assert_snapshot!(render(&mut app, 60, 16).backend());
+    }
+
+    #[test]
+    fn the_model_picker_offers_the_efforts_of_the_cli() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('p')));
+        app.on_key(ctrl('o'));
+        let text = screen_text(&render(&mut app, 80, 20));
+        assert!(text.contains("CLI default"));
+        assert!(text.contains("type a model…"));
+        assert!(text.contains("xhigh"));
+        app.on_key(key(K::Esc));
+        app.on_key(key(K::Tab));
+        app.on_key(key(K::Char('3')));
+        app.on_key(ctrl('o'));
+        let text = screen_text(&render(&mut app, 80, 20));
+        assert!(text.contains("model · opencode"));
+        assert!(!text.contains("effort"), "OpenCode has no effort flag");
     }
 }
