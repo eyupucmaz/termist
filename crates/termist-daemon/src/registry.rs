@@ -1,6 +1,6 @@
 use crate::launch::{LaunchRequest, Launcher};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
-use crate::store::{Store, StoredSession};
+use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession};
 use crate::transcript::TranscriptTail;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, HarnessInfo, ProjectId, ProjectInfo, ServerEvent,
-    SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
+    ServerEvent, SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -68,6 +68,8 @@ pub struct Registry {
     store: Store,
     projects: Vec<ProjectInfo>,
     sessions: Vec<Session>,
+    /// The quick prompt's last choice, as the store has it.
+    last_launch: Option<LaunchOptions>,
     clients: HashMap<ClientId, UnboundedSender<ServerEvent>>,
     notes: UnboundedSender<SessionNote>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -92,6 +94,7 @@ impl Registry {
             .filter_map(|s| s.info.name.rsplit_once('-')?.1.parse::<u32>().ok())
             .max()
             .unwrap_or(0);
+        let last_launch = store.last_launch();
         Registry {
             launcher,
             harnesses,
@@ -101,6 +104,7 @@ impl Registry {
                 .into_iter()
                 .map(|StoredSession { info, resumable }| Session::new(info, None, resumable))
                 .collect(),
+            last_launch,
             clients: HashMap::new(),
             notes,
             shutdown: Some(shutdown),
@@ -121,7 +125,7 @@ impl Registry {
         StateSnapshot {
             projects: self.projects.clone(),
             sessions: self.sessions.iter().map(|s| s.info.clone()).collect(),
-            last_launch: None,
+            last_launch: self.last_launch.clone(),
         }
     }
 
@@ -134,6 +138,26 @@ impl Registry {
     fn broadcast(&self, event: ServerEvent) {
         for out in self.clients.values() {
             let _ = out.send(event.clone());
+        }
+    }
+
+    /// Tells `client` why its request failed, if it did.
+    fn report(&self, client: ClientId, result: anyhow::Result<()>) {
+        if let Err(e) = result {
+            self.send(
+                client,
+                ServerEvent::Error {
+                    message: format!("{e:#}"),
+                },
+            );
+        }
+    }
+
+    /// Stores and broadcasts a session's changed info.
+    fn updated(&self, id: SessionId) {
+        if let Some(s) = self.session(id) {
+            self.persist(id);
+            self.broadcast(ServerEvent::SessionUpdated(s.info.clone()));
         }
     }
 
@@ -329,15 +353,41 @@ impl Registry {
                     );
                 }
             }
-            ClientRequest::RenameSession { .. }
-            | ClientRequest::ArchiveSession { .. }
-            | ClientRequest::UnarchiveSession { .. }
-            | ClientRequest::CloseProject { .. }
-            | ClientRequest::OpenProject { .. }
-            | ClientRequest::ListPromptHistory { .. }
-            | ClientRequest::SetLastLaunch(_)
-            | ClientRequest::ListModels { .. }
-            | ClientRequest::RescanHarnesses => self.send(
+            ClientRequest::RenameSession { session, name } => {
+                let result = self.rename(session, &name);
+                self.report(client, result);
+            }
+            ClientRequest::ArchiveSession { session } => {
+                let result = self.set_archived(session, true);
+                self.report(client, result);
+            }
+            ClientRequest::UnarchiveSession { session } => {
+                let result = self.set_archived(session, false);
+                self.report(client, result);
+            }
+            ClientRequest::CloseProject { project } => {
+                self.set_project_open(client, project, false)
+            }
+            ClientRequest::OpenProject { project } => self.set_project_open(client, project, true),
+            ClientRequest::ListPromptHistory { limit } => {
+                let limit = (limit as usize).min(PROMPT_HISTORY_MAX);
+                let history = self.store.prompt_history(limit).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "could not read the prompt history");
+                    vec![]
+                });
+                self.send(client, ServerEvent::PromptHistory(history));
+            }
+            ClientRequest::SetLastLaunch(launch) => {
+                if let Err(e) = self.store.set_last_launch(&launch) {
+                    tracing::warn!(error = %e, "could not store the last launch");
+                }
+                self.last_launch = Some(launch);
+            }
+            ClientRequest::ListModels { harness } => {
+                let recent = self.store.recent_models(harness);
+                self.send(client, ServerEvent::Models { harness, recent });
+            }
+            ClientRequest::RescanHarnesses => self.send(
                 client,
                 ServerEvent::Error {
                     message: "this daemon does not support that request yet".into(),
@@ -537,13 +587,20 @@ impl Registry {
         }
     }
 
+    /// A known path reopens its project; an unknown one is added.
     fn add_project(&mut self, path: PathBuf) -> anyhow::Result<()> {
         let path = std::fs::canonicalize(&path)
             .with_context(|| format!("cannot open {}", path.display()))?;
         if !path.is_dir() {
             bail!("{} is not a directory", path.display());
         }
-        if self.projects.iter().any(|p| p.path == path) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.path == path) {
+            if !p.open {
+                p.open = true;
+                if let Err(e) = self.store.upsert_project(p) {
+                    tracing::warn!(error = %e, "could not store project");
+                }
+            }
             return Ok(());
         }
         let name = path
@@ -559,6 +616,50 @@ impl Registry {
         if let Err(e) = self.store.upsert_project(self.projects.last().unwrap()) {
             tracing::warn!(error = %e, "could not store project");
         }
+        Ok(())
+    }
+
+    /// Closing hides the tab; the sessions keep running. Every client gets the new state.
+    fn set_project_open(&mut self, client: ClientId, project: ProjectId, open: bool) {
+        let Some(p) = self.projects.iter_mut().find(|p| p.id == project) else {
+            self.report(client, Err(anyhow::anyhow!("unknown project")));
+            return;
+        };
+        p.open = open;
+        if let Err(e) = self.store.upsert_project(p) {
+            tracing::warn!(error = %e, "could not store project");
+        }
+        self.broadcast(ServerEvent::State(self.state()));
+    }
+
+    /// The new name sticks: terminal titles no longer replace it.
+    fn rename(&mut self, id: SessionId, name: &str) -> anyhow::Result<()> {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty() {
+            bail!("a session name cannot be empty");
+        }
+        let Some(s) = self.session_mut(id) else {
+            bail!("unknown session")
+        };
+        s.info.name = name;
+        s.info.user_named = true;
+        self.updated(id);
+        Ok(())
+    }
+
+    /// Archiving stops a live session; the record (and the agent's conversation) stays.
+    fn set_archived(&mut self, id: SessionId, archived: bool) -> anyhow::Result<()> {
+        let Some(s) = self.session_mut(id) else {
+            bail!("unknown session")
+        };
+        if archived
+            && s.info.status.is_live()
+            && let Some(cmd) = &s.cmd
+        {
+            let _ = cmd.send(SessionCmd::Kill);
+        }
+        s.info.archived = archived;
+        self.updated(id);
         Ok(())
     }
 
@@ -604,6 +705,7 @@ impl Registry {
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.notes.clone())
             .with_context(|| format!("could not start {} ({program})", kind.label()))?;
+        self.remember_launch(&kind, prompt.as_deref(), model.as_deref());
         self.created += 1;
         let info = SessionInfo {
             id,
@@ -624,6 +726,20 @@ impl Registry {
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
         Ok(())
+    }
+
+    /// A started session's prompt goes into the history, its model into the recent models.
+    fn remember_launch(&self, kind: &SessionKind, prompt: Option<&str>, model: Option<&str>) {
+        if let Some(p) = prompt.filter(|p| !p.trim().is_empty())
+            && let Err(e) = self.store.add_prompt(p)
+        {
+            tracing::warn!(error = %e, "could not store the prompt");
+        }
+        if let (SessionKind::Agent { harness }, Some(m)) = (kind, model)
+            && let Err(e) = self.store.add_recent_model(*harness, m)
+        {
+            tracing::warn!(error = %e, "could not store the model");
+        }
     }
 
     fn resume(&mut self, id: SessionId, cols: u16, rows: u16) -> anyhow::Result<()> {
@@ -857,5 +973,28 @@ mod tests {
             assert!(err.to_string().contains("no effort level"), "{err}");
         }
         assert!(reg.sessions.is_empty());
+    }
+
+    // An archived card stays archived whatever its hooks say; only its status moves.
+    #[test]
+    fn hooks_move_an_archived_sessions_status_but_keep_it_archived() {
+        let p = project();
+        let mut s = stored(&p, "claude-1");
+        s.kind = SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        s.archived = true;
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        reg.session_mut(s.id).unwrap().info.status = AgentStatus::Running;
+        let mut rx = connect(&mut reg);
+        reg.hook(s.id, Harness::Claude, "Stop", &Value::Null);
+        match rx.try_recv() {
+            Ok(ServerEvent::SessionUpdated(info)) => {
+                assert_eq!(info.status, AgentStatus::Unseen);
+                assert!(info.archived);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(reg.store.load().unwrap().1[0].info.archived, "stored too");
     }
 }

@@ -1264,3 +1264,199 @@ async fn model_and_effort_reach_the_cli_and_come_back_on_resume() {
     assert_eq!(back.model.as_deref(), Some("my model"));
     wait_screen_text(&mut c, s.id, "--model my model --effort high --session-id").await;
 }
+
+async fn error(c: &mut Client) -> String {
+    match next_event(c, |e| matches!(e, ServerEvent::Error { .. })).await {
+        ServerEvent::Error { message } => message,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn a_rename_sticks_and_an_empty_name_is_refused() {
+    let d = start(shell_config()).await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, d._tmp.path().to_path_buf()).await;
+    let s = create(&mut c, project, SessionKind::Shell).await;
+    c.send(&ClientRequest::RenameSession {
+        session: s.id,
+        name: " \n ".into(),
+    })
+    .await
+    .unwrap();
+    assert!(error(&mut c).await.contains("cannot be empty"));
+    c.send(&ClientRequest::RenameSession {
+        session: s.id,
+        name: "  login\nbug ".into(),
+    })
+    .await
+    .unwrap();
+    let renamed = match next_event(
+        &mut c,
+        |e| matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && u.user_named),
+    )
+    .await
+    {
+        ServerEvent::SessionUpdated(u) => u,
+        _ => unreachable!(),
+    };
+    assert_eq!(renamed.name, "login bug");
+}
+
+#[tokio::test]
+async fn archiving_stops_a_live_session_and_unarchiving_lets_it_resume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    c.send(&ClientRequest::ArchiveSession { session: s.id })
+        .await
+        .unwrap();
+    next_event(
+        &mut c,
+        |e| matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && u.archived),
+    )
+    .await;
+    let stopped = exited(&mut c, s.id).await;
+    assert!(matches!(stopped, AgentStatus::Exited { .. }));
+    let listed = state(&mut c).await;
+    assert!(
+        listed.sessions.iter().any(|x| x.id == s.id && x.archived),
+        "the record stays"
+    );
+    c.send(&ClientRequest::UnarchiveSession { session: s.id })
+        .await
+        .unwrap();
+    next_event(
+        &mut c,
+        |e| matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && !u.archived),
+    )
+    .await;
+    c.send(&ClientRequest::Resume {
+        session: s.id,
+        cols: 80,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        status_change(&mut c, s.id, stopped).await,
+        AgentStatus::Fresh
+    );
+}
+
+#[tokio::test]
+async fn a_closed_project_keeps_its_sessions_and_opens_again() {
+    let d = start(shell_config()).await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let dir = d._tmp.path().to_path_buf();
+    let project = add_project(&mut c, dir.clone()).await;
+    let s = create(&mut c, project, SessionKind::Shell).await;
+    let open_state = |open: bool| move |e: &ServerEvent| matches!(e, ServerEvent::State(st) if st.projects[0].open == open);
+    c.send(&ClientRequest::CloseProject { project })
+        .await
+        .unwrap();
+    match next_event(&mut c, open_state(false)).await {
+        ServerEvent::State(st) => {
+            let kept = st.sessions.iter().find(|x| x.id == s.id).unwrap();
+            assert!(kept.status.is_live(), "closing a tab stops nothing");
+        }
+        _ => unreachable!(),
+    }
+    c.send(&ClientRequest::OpenProject { project })
+        .await
+        .unwrap();
+    next_event(&mut c, open_state(true)).await;
+    c.send(&ClientRequest::CloseProject { project })
+        .await
+        .unwrap();
+    next_event(&mut c, open_state(false)).await;
+    c.send(&ClientRequest::AddProject { path: dir })
+        .await
+        .unwrap();
+    match next_event(&mut c, open_state(true)).await {
+        ServerEvent::State(st) => assert_eq!(st.projects.len(), 1, "reopened, not added again"),
+        _ => unreachable!(),
+    }
+    c.send(&ClientRequest::CloseProject {
+        project: ProjectId::new(),
+    })
+    .await
+    .unwrap();
+    assert!(error(&mut c).await.contains("unknown project"));
+}
+
+#[tokio::test]
+async fn prompts_models_and_the_last_launch_are_remembered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path().join("home"));
+    let config = DaemonConfig {
+        claude_bin: Some(echo_agent(tmp.path(), "claude", true)),
+        ..Default::default()
+    };
+    let launch = LaunchOptions {
+        harness: Harness::Claude,
+        model: Some("opus".into()),
+        effort: Some("max".into()),
+    };
+    let task = run_daemon(&paths, config.clone()).await;
+    let mut c = Client::connect(&paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    c.send(&ClientRequest::CreateSession {
+        project,
+        kind: SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+        prompt: Some("fix the login redirect".into()),
+        model: Some("opus".into()),
+        effort: None,
+        cols: 80,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    next_event(&mut c, |e| matches!(e, ServerEvent::SessionUpdated(_))).await;
+    c.send(&ClientRequest::ListPromptHistory { limit: 10 })
+        .await
+        .unwrap();
+    assert_eq!(
+        next_event(&mut c, |e| matches!(e, ServerEvent::PromptHistory(_))).await,
+        ServerEvent::PromptHistory(vec!["fix the login redirect".into()])
+    );
+    c.send(&ClientRequest::ListModels {
+        harness: Harness::Claude,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        next_event(&mut c, |e| matches!(e, ServerEvent::Models { .. })).await,
+        ServerEvent::Models {
+            harness: Harness::Claude,
+            recent: vec!["opus".into()]
+        }
+    );
+    c.send(&ClientRequest::SetLastLaunch(launch.clone()))
+        .await
+        .unwrap();
+    assert_eq!(state(&mut c).await.last_launch.as_ref(), Some(&launch));
+    drop(c);
+    shutdown(&paths, task).await;
+
+    let task = run_daemon(&paths, config).await;
+    let mut c = Client::connect(&paths).await.unwrap();
+    assert_eq!(state(&mut c).await.last_launch, Some(launch));
+    drop(c);
+    shutdown(&paths, task).await;
+}
