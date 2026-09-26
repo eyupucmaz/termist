@@ -71,6 +71,7 @@ pub fn status_style(status: AgentStatus) -> (char, Color, &'static str) {
         AgentStatus::Unseen => ('✓', Color::Blue, "done"),
         AgentStatus::Finished => ('●', Color::Green, "ready"),
         AgentStatus::NeedsFeedback => ('◆', Color::Red, "waiting"),
+        AgentStatus::Exited { code: Some(0) } => ('●', Color::DarkGray, "closed"),
         AgentStatus::Exited { .. } => ('✗', Color::Magenta, "exited"),
         AgentStatus::Disconnected => ('○', Color::Gray, "disconnected"),
     }
@@ -112,7 +113,58 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         }
         draw_pane(f, app, areas);
     }
+    if let Mode::PickHarness(selected) = app.mode {
+        draw_picker(
+            f,
+            app,
+            selected,
+            Rect {
+                height: areas.cards.height + areas.pane.height,
+                ..areas.cards
+            },
+        );
+    }
     draw_footer(f, app, areas.footer);
+}
+
+fn draw_picker(f: &mut Frame, app: &App, selected: usize, body: Rect) {
+    let w = 36.min(body.width);
+    let h = (app.harnesses.len() as u16 + 2).min(body.height);
+    let area = Rect {
+        x: body.x + body.width.saturating_sub(w) / 2,
+        y: body.y + body.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    let lines: Vec<Line> = app
+        .harnesses
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let note = if h.available { "" } else { "not installed" };
+            let mut style = if h.available {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            if i == selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::from(Span::styled(
+                format!(" {} {:<9} {note}", i + 1, h.harness.id()),
+                style,
+            ))
+        })
+        .collect();
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" new session "),
+        ),
+        area,
+    );
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -215,6 +267,12 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         {
             f.set_cursor_position((areas.pane_inner.x + c.col, areas.pane_inner.y + c.row));
         }
+    } else if info.status == AgentStatus::Disconnected {
+        f.render_widget(
+            Paragraph::new("Not running. Enter resumes this session.")
+                .style(Style::default().fg(Color::DarkGray)),
+            areas.pane_inner,
+        );
     }
 }
 
@@ -275,7 +333,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             )
         }
         (_, Mode::Grid) => (
-            "n claude · t shell · Enter focus · . next● · hjkl move · d kill · q quit".into(),
+            "n new agent · t shell · Enter focus/resume · . next● · hjkl move · d kill · q quit"
+                .into(),
             Style::default().fg(Color::DarkGray),
         ),
         (_, Mode::Focus) => (
@@ -284,6 +343,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ),
         (_, Mode::FocusPrefix) => (
             "C-a …  Esc grid · . , next/prev● · hjkl move · C-a literal".into(),
+            Style::default().fg(Color::Yellow),
+        ),
+        (_, Mode::PickHarness(_)) => (
+            "j/k choose · Enter start · 1-3 pick · Esc cancel".into(),
             Style::default().fg(Color::Yellow),
         ),
     };
@@ -409,6 +472,10 @@ mod tests {
             ('✗', Color::Magenta, "exited")
         );
         assert_eq!(
+            status_style(AgentStatus::Exited { code: Some(0) }),
+            ('●', Color::DarkGray, "closed")
+        );
+        assert_eq!(
             status_style(AgentStatus::Disconnected),
             ('○', Color::Gray, "disconnected")
         );
@@ -462,5 +529,59 @@ mod tests {
             t.draw(|f| draw(f, &app, &areas)).unwrap();
             app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         }
+    }
+
+    #[test]
+    fn a_disconnected_card_explains_how_to_resume_it() {
+        let mut app = fixture();
+        let id = app.selected.unwrap();
+        let mut info = app.selected_info().unwrap().clone();
+        info.status = AgentStatus::Disconnected;
+        app.screens.remove(&id);
+        app.on_event(ServerEvent::SessionUpdated(info));
+        let t = render(&mut app, 60, 16);
+        let text: String = t
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Enter resumes this session"));
+    }
+
+    // Review Focus 4
+    #[test]
+    fn the_picker_marks_missing_clis() {
+        let mut app = fixture();
+        app.on_event(ServerEvent::Harnesses(vec![
+            termist_core::HarnessInfo {
+                harness: termist_core::Harness::Claude,
+                available: true,
+            },
+            termist_core::HarnessInfo {
+                harness: termist_core::Harness::Codex,
+                available: false,
+            },
+            termist_core::HarnessInfo {
+                harness: termist_core::Harness::OpenCode,
+                available: true,
+            },
+        ]));
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('n'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        let t = render(&mut app, 60, 16);
+        let text: String = t
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("codex"));
+        assert!(text.contains("not installed"));
+        assert!(text.contains("opencode"));
     }
 }

@@ -2,8 +2,8 @@ use crate::encode::{encode_key, encode_paste};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, ProjectId, ServerEvent, SessionId, SessionInfo,
-    SessionKind, Snapshot, StateSnapshot, next_in_attention,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, ProjectId, ServerEvent, SessionId,
+    SessionInfo, SessionKind, Snapshot, StateSnapshot, next_in_attention,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub enum Mode {
     ConfirmQuit,
     /// `d` was pressed on this session; `y` / Enter kills it, any other key cancels.
     ConfirmKill(SessionId),
+    /// `n` was pressed: choose the agent CLI; index into `App::harnesses`.
+    PickHarness(usize),
 }
 
 #[derive(Debug, PartialEq)]
@@ -34,7 +36,11 @@ pub struct App {
     pub message: Option<String>,
     /// Set by the first `State` from the daemon; until then the body says "Connecting…".
     pub connected: bool,
+    /// The agent CLIs the daemon can launch; the default is all three, until the
+    /// daemon's `Harnesses` event arrives.
+    pub harnesses: Vec<HarnessInfo>,
     focus_next_created: bool,
+    resume_pending: Option<SessionId>,
 }
 
 impl Default for App {
@@ -56,7 +62,15 @@ impl App {
             cards_per_row: 1,
             message: None,
             connected: false,
+            harnesses: Harness::ALL
+                .into_iter()
+                .map(|harness| HarnessInfo {
+                    harness,
+                    available: true,
+                })
+                .collect(),
             focus_next_created: false,
+            resume_pending: None,
         }
     }
 
@@ -82,7 +96,7 @@ impl App {
                 self.repair_selection();
             }
             ServerEvent::SessionUpdated(info) => {
-                let id = info.id;
+                let (id, status) = (info.id, info.status);
                 // You are looking at it (PRD §8): a focused session that finishes is seen.
                 let seen_now = info.status == AgentStatus::Unseen
                     && self.selected == Some(id)
@@ -101,6 +115,12 @@ impl App {
                 self.repair_selection();
                 if seen_now {
                     actions.push(Action::Send(ClientRequest::MarkSeen { session: id }));
+                }
+                if self.resume_pending == Some(id) && status == AgentStatus::Fresh {
+                    self.resume_pending = None;
+                    self.select(id);
+                    self.mode = Mode::Focus;
+                    self.attached = None; // the old process's attachment ended with it
                 }
             }
             ServerEvent::SessionRemoved(id) => {
@@ -125,9 +145,10 @@ impl App {
             }
             ServerEvent::Error { message } => {
                 self.focus_next_created = false;
+                self.resume_pending = None;
                 self.message = Some(message);
             }
-            ServerEvent::Harnesses(_) => {}
+            ServerEvent::Harnesses(list) => self.harnesses = list,
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
@@ -184,16 +205,30 @@ impl App {
                     _ => {}
                 }
             }
+            Mode::PickHarness(i) => {
+                let n = self.harnesses.len().max(1);
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.mode = Mode::PickHarness((i + 1) % n)
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.mode = Mode::PickHarness((i + n - 1) % n)
+                    }
+                    KeyCode::Char(c @ '1'..='9') => return self.pick(c as usize - '1' as usize),
+                    KeyCode::Enter => return self.pick(i),
+                    KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Grid,
+                    _ => {}
+                }
+                return vec![];
+            }
             Mode::Grid => {
                 // An error message stays up only until the next key.
                 self.message = None;
                 match key.code {
                     KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
                     KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
-                    KeyCode::Enter if self.selected.is_some() => self.mode = Mode::Focus,
-                    KeyCode::Char('n') => actions.extend(self.create(SessionKind::Agent {
-                        harness: Harness::Claude,
-                    })),
+                    KeyCode::Enter if self.selected.is_some() => actions.extend(self.enter()),
+                    KeyCode::Char('n') => self.open_picker(),
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
                     KeyCode::Char('d') => {
                         if let Some(id) = self.selected {
@@ -265,6 +300,54 @@ impl App {
             cols: cols.max(20),
             rows: rows.max(5),
         })]
+    }
+
+    fn open_picker(&mut self) {
+        if self.project.is_none() {
+            self.message = Some("no project open".into());
+            return;
+        }
+        let first = self.harnesses.iter().position(|h| h.available).unwrap_or(0);
+        self.mode = Mode::PickHarness(first);
+    }
+
+    fn pick(&mut self, index: usize) -> Vec<Action> {
+        self.mode = Mode::Grid;
+        let Some(choice) = self.harnesses.get(index).cloned() else {
+            return vec![];
+        };
+        if !choice.available {
+            self.message = Some(format!(
+                "{} is not installed (not found on PATH)",
+                choice.harness.id()
+            ));
+            return vec![];
+        }
+        self.create(SessionKind::Agent {
+            harness: choice.harness,
+        })
+    }
+
+    /// Enter on a card: focus a live session, resume a stopped one.
+    fn enter(&mut self) -> Vec<Action> {
+        let Some(info) = self.selected_info() else {
+            return vec![];
+        };
+        if matches!(
+            info.status,
+            AgentStatus::Exited { .. } | AgentStatus::Disconnected
+        ) {
+            let id = info.id;
+            let (cols, rows) = self.pane;
+            self.resume_pending = Some(id);
+            return vec![Action::Send(ClientRequest::Resume {
+                session: id,
+                cols: cols.max(20),
+                rows: rows.max(5),
+            })];
+        }
+        self.mode = Mode::Focus;
+        vec![]
     }
 
     fn navigate(&mut self, c: char) {
@@ -539,7 +622,8 @@ mod tests {
     #[test]
     fn new_session_is_requested_at_pane_size_and_focused_when_it_arrives() {
         let (mut app, s) = app();
-        let actions = app.on_key(k(K::Char('n')));
+        app.on_key(k(K::Char('n')));
+        let actions = app.on_key(k(K::Enter));
         assert_eq!(
             sent(&actions),
             vec![&ClientRequest::CreateSession {
@@ -556,6 +640,107 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(fresh.clone()));
         assert_eq!(app.selected, Some(fresh.id));
         assert_eq!(app.mode, Mode::Focus);
+    }
+
+    #[test]
+    fn n_opens_the_picker_and_enter_starts_the_highlighted_cli() {
+        let (mut app, s) = app();
+        assert!(app.on_key(k(K::Char('n'))).is_empty());
+        assert_eq!(app.mode, Mode::PickHarness(0));
+        app.on_key(k(K::Char('j')));
+        assert_eq!(app.mode, Mode::PickHarness(1));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Grid);
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::CreateSession {
+                project: s[0].project,
+                kind: SessionKind::Agent {
+                    harness: Harness::Codex
+                },
+                prompt: None,
+                cols: 80,
+                rows: 20
+            }]
+        );
+    }
+
+    // Review Focus 4
+    #[test]
+    fn a_cli_that_is_not_installed_cannot_be_started() {
+        let (mut app, _) = app();
+        app.on_event(ServerEvent::Harnesses(vec![
+            HarnessInfo {
+                harness: Harness::Claude,
+                available: false,
+            },
+            HarnessInfo {
+                harness: Harness::Codex,
+                available: true,
+            },
+            HarnessInfo {
+                harness: Harness::OpenCode,
+                available: false,
+            },
+        ]));
+        app.on_key(k(K::Char('n')));
+        assert_eq!(
+            app.mode,
+            Mode::PickHarness(1),
+            "opens on the first available CLI"
+        );
+        let actions = app.on_key(k(K::Char('3')));
+        assert!(sent(&actions).is_empty());
+        assert_eq!(app.mode, Mode::Grid);
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap()
+                .contains("opencode is not installed")
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_picker_without_sending() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('n')));
+        assert!(app.on_key(k(K::Esc)).is_empty());
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    #[test]
+    fn enter_on_a_stopped_card_resumes_it_and_focuses_when_it_is_back() {
+        let (mut app, s) = app();
+        let mut stopped = s[0].clone();
+        stopped.status = AgentStatus::Disconnected;
+        app.on_event(ServerEvent::SessionUpdated(stopped.clone()));
+        assert_eq!(app.selected, Some(stopped.id));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::Resume {
+                session: stopped.id,
+                cols: 80,
+                rows: 20
+            }]
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Grid,
+            "not focused until the process is back"
+        );
+        let mut back = stopped.clone();
+        back.status = AgentStatus::Fresh;
+        let actions = app.on_event(ServerEvent::SessionUpdated(back));
+        assert_eq!(app.mode, Mode::Focus);
+        assert!(
+            sent(&actions).contains(&&ClientRequest::Attach {
+                session: stopped.id,
+                cols: 80,
+                rows: 20
+            }),
+            "re-attaches to the new process"
+        );
     }
 
     #[test]
