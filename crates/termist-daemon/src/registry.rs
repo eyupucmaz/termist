@@ -564,6 +564,8 @@ impl Registry {
         let s = &mut self.sessions[pos];
         s.cmd = Some(cmd); // dropping the old sender ends the old session task
         s.transcript = None;
+        s.activity_broadcast = None;
+        s.info.title = None; // the new process sets its own
         s.info.status = AgentStatus::Fresh;
         s.resumable = resume.is_some();
         s.info.agent_session_id = launch.agent_session_id;
@@ -680,6 +682,38 @@ mod tests {
             updates.push(ev);
         }
         assert_eq!(updates.len(), 1, "{updates:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resume_starts_with_no_title_and_a_fresh_activity_window() {
+        let p = project();
+        let mut s = stored(&p, "shell-1");
+        s.title = Some("old title".into());
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        reg.session_mut(s.id).unwrap().activity_broadcast = Some(std::time::Instant::now());
+        let _rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::Resume {
+                session: s.id,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let back = reg.session(s.id).unwrap();
+        assert_eq!(back.info.status, AgentStatus::Fresh);
+        assert_eq!(back.info.title, None);
+        assert_eq!(back.activity_broadcast, None);
+        assert_eq!(
+            reg.store.load().unwrap().1[0].info.title,
+            None,
+            "stored too"
+        );
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::KillSession { session: s.id },
+        });
     }
 
     #[test]
