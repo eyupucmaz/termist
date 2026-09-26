@@ -1139,7 +1139,8 @@ impl App {
         }
     }
 
-    /// Keeps `project` on an open project and `selected` on one of its sessions.
+    /// Keeps `project` on an open project and `selected` on one of its sessions. A
+    /// focused card that has to be left for another goes back to the grid.
     fn repair_selection(&mut self) {
         if !self
             .project
@@ -1153,6 +1154,9 @@ impl App {
             .is_some_and(|id| self.project_sessions().iter().any(|s| s.id == id));
         if !valid {
             self.selected = self.project_sessions().first().map(|s| s.id);
+            if matches!(self.mode, Mode::Focus | Mode::FocusPrefix) {
+                self.mode = Mode::Grid;
+            }
         }
     }
 
@@ -1706,6 +1710,20 @@ mod tests {
         app.on_event(ServerEvent::SessionRemoved(s[0].id));
         assert_eq!(app.mode, Mode::Grid);
         assert_eq!(app.selected, Some(s[1].id));
+    }
+
+    // Another client closes the project of the focused card: the pane must not go on
+    // typing into whichever card the selection lands on.
+    #[test]
+    fn closing_the_focused_cards_project_elsewhere_returns_to_the_grid() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let mut state = app.state.clone();
+        state.projects[0].open = false;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.selected, Some(s[3].id));
+        assert_eq!(app.mode, Mode::Grid);
     }
 
     #[test]
