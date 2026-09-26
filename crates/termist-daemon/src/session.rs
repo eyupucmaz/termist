@@ -125,6 +125,7 @@ pub fn spawn(
         let mut dirty = false;
         let mut last_activity_note = Instant::now() - Duration::from_secs(10);
         let mut tick = tokio::time::interval(Duration::from_millis(16));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut output_open = true;
         loop {
             tokio::select! {
@@ -167,7 +168,7 @@ pub fn spawn(
                     }
                     Some(SessionCmd::Detach { client }) => { attached.remove(&client); }
                 },
-                _ = tick.tick() => {
+                _ = tick.tick(), if !attached.is_empty() => {
                     if term.tick(Instant::now()) {
                         dirty = true;
                     }

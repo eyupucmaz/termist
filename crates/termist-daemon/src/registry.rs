@@ -16,6 +16,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::time::MissedTickBehavior;
 
+/// How often a session's PTY activity is broadcast to clients as `SessionUpdated`.
+const ACTIVITY_BROADCAST: Duration = Duration::from_secs(5);
+
 pub enum Msg {
     Connected {
         client: ClientId,
@@ -33,6 +36,8 @@ struct Session {
     /// `None` for a session loaded from the store that has not been resumed yet.
     cmd: Option<UnboundedSender<SessionCmd>>,
     transcript: Option<TranscriptTail>,
+    /// Last time an `Activity` note was broadcast; throttles `SessionUpdated`.
+    activity_broadcast: Option<std::time::Instant>,
 }
 
 pub struct Registry {
@@ -71,6 +76,7 @@ impl Registry {
                     info,
                     cmd: None,
                     transcript: None,
+                    activity_broadcast: None,
                 })
                 .collect(),
             clients: HashMap::new(),
@@ -160,8 +166,18 @@ impl Registry {
                 }
             }
             SessionNote::Activity(id) => {
-                if let Some(s) = self.session_mut(id) {
+                let due = self.session_mut(id).and_then(|s| {
                     s.info.last_activity_ms = now_ms();
+                    let due = s
+                        .activity_broadcast
+                        .is_none_or(|t| t.elapsed() >= ACTIVITY_BROADCAST);
+                    if due {
+                        s.activity_broadcast = Some(std::time::Instant::now());
+                    }
+                    due.then(|| s.info.clone())
+                });
+                if let Some(info) = due {
+                    self.broadcast(ServerEvent::SessionUpdated(info));
                 }
             }
             SessionNote::Exited(id, code) => self.signal(id, Signal::ProcessExited { code }),
@@ -450,6 +466,7 @@ impl Registry {
             info: info.clone(),
             cmd: Some(cmd),
             transcript: None,
+            activity_broadcast: None,
         });
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
@@ -511,6 +528,74 @@ pub async fn run(
             },
             Some(note) = notes.recv() => reg.note(note),
             _ = transcripts.tick() => reg.poll_transcripts(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::launch::{DaemonConfig, HarnessPrograms};
+    use crate::store::Store;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn registry_with(project: &ProjectInfo, sessions: &[SessionInfo]) -> Registry {
+        let store = Store::open_in_memory();
+        store.upsert_project(project).unwrap();
+        for s in sessions {
+            store.upsert_session(s).unwrap();
+        }
+        let launcher = Launcher {
+            config: DaemonConfig::default(),
+            programs: HarnessPrograms {
+                claude: "claude".into(),
+                codex: "codex".into(),
+                opencode: "opencode".into(),
+            },
+            exe: PathBuf::from("/t/termist"),
+            claude_settings: PathBuf::from("/t/claude-hooks.json"),
+            runtime_dir: PathBuf::from("/t/run"),
+            termist_home: None,
+            opencode_config_dir: PathBuf::from("/t/opencode"),
+        };
+        let (notes, _notes_rx) = unbounded_channel();
+        let (stop, _stop_rx) = oneshot::channel();
+        Registry::new(launcher, vec![], store, notes, stop)
+    }
+
+    #[test]
+    fn activity_is_broadcast_at_most_once_per_window() {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "api".into(),
+            path: PathBuf::from("/code/api"),
+        };
+        let s = SessionInfo {
+            id: SessionId::new(),
+            project: p.id,
+            kind: SessionKind::Shell,
+            name: "shell-1".into(),
+            status: AgentStatus::Disconnected,
+            agent_session_id: None,
+            title: None,
+            last_activity_ms: 1,
+        };
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        let (out, mut rx) = unbounded_channel();
+        reg.handle(Msg::Connected {
+            client: ClientId(1),
+            out,
+        });
+        reg.note(SessionNote::Activity(s.id));
+        reg.note(SessionNote::Activity(s.id));
+        let mut updates = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            updates.push(ev);
+        }
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        match &updates[0] {
+            ServerEvent::SessionUpdated(info) => assert!(info.last_activity_ms > 1),
+            other => panic!("{other:?}"),
         }
     }
 }

@@ -116,10 +116,13 @@ async fn wait_screen_text(c: &mut Client, id: SessionId, needle: &str) -> Screen
     .expect("text never appeared")
 }
 
-async fn status_update(c: &mut Client, id: SessionId) -> AgentStatus {
+/// Waits for a `SessionUpdated` for `id` whose status is `expected`, skipping any other
+/// update in between (Task 9: PTY activity broadcasts a `SessionUpdated` with the
+/// current, unchanged status, and can race with a hook- or exit-driven status change).
+async fn status_update(c: &mut Client, id: SessionId, expected: AgentStatus) -> AgentStatus {
     match next_event(
         c,
-        |e| matches!(e, ServerEvent::SessionUpdated(s) if s.id == id),
+        |e| matches!(e, ServerEvent::SessionUpdated(s) if s.id == id && s.status == expected),
     )
     .await
     {
@@ -245,14 +248,17 @@ async fn claude_hooks_drive_the_status_dot() {
         r#"{"hook_event_name":"UserPromptSubmit"}"#,
     )
     .await;
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Running
+    );
     hook(
         "PermissionRequest",
         r#"{"hook_event_name":"PermissionRequest","tool_name":"Write"}"#,
     )
     .await;
     assert_eq!(
-        status_update(&mut ui, s.id).await,
+        status_update(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
         AgentStatus::NeedsFeedback
     );
     // an idle notification must not produce an update; typing then answers optimistically
@@ -263,13 +269,22 @@ async fn claude_hooks_drive_the_status_dot() {
     })
     .await
     .unwrap();
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Running
+    );
     hook("Stop", r#"{"hook_event_name":"Stop"}"#).await;
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Unseen);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Unseen).await,
+        AgentStatus::Unseen
+    );
     ui.send(&ClientRequest::MarkSeen { session: s.id })
         .await
         .unwrap();
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Finished);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Finished).await,
+        AgentStatus::Finished
+    );
 }
 
 #[tokio::test]
@@ -309,15 +324,18 @@ async fn codex_hooks_drive_status_and_capture_its_session_id() {
         Some("019a-codex")
     );
     hook("UserPromptSubmit", "{}").await;
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Running
+    );
     hook("PermissionRequest", "{}").await;
     assert_eq!(
-        status_update(&mut ui, s.id).await,
+        status_update(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
         AgentStatus::NeedsFeedback
     );
     hook("Interrupt", "{}").await;
     assert_eq!(
-        status_update(&mut ui, s.id).await,
+        status_update(&mut ui, s.id, AgentStatus::Finished).await,
         AgentStatus::Finished,
         "Interrupt = cancelled or denied"
     );
@@ -365,7 +383,10 @@ async fn opencode_subagent_events_do_not_move_the_parent_card() {
     )
     .await;
     hook("chat.message", r#"{"sessionID":"ses_parent"}"#).await;
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Running
+    );
     // a subagent asks for permission: the parent card must not turn red
     hook(
         "permission.asked",
@@ -378,7 +399,7 @@ async fn opencode_subagent_events_do_not_move_the_parent_card() {
     )
     .await;
     assert_eq!(
-        status_update(&mut ui, s.id).await,
+        status_update(&mut ui, s.id, AgentStatus::Unseen).await,
         AgentStatus::Unseen,
         "the child's permission.asked was ignored"
     );
@@ -413,7 +434,7 @@ async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
         .await
         .unwrap();
     assert_eq!(
-        status_update(&mut ui, s.id).await,
+        status_update(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::Running,
         "history must not cancel"
     );
@@ -427,7 +448,10 @@ async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
             )
         })
         .unwrap();
-    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Finished);
+    assert_eq!(
+        status_update(&mut ui, s.id, AgentStatus::Finished).await,
+        AgentStatus::Finished
+    );
 }
 
 // Review Focus 3
@@ -695,7 +719,10 @@ async fn sessions_survive_a_daemon_restart_and_resume_in_place() {
     })
     .await
     .unwrap();
-    assert_eq!(status_update(&mut c, claude.id).await, AgentStatus::Fresh);
+    assert_eq!(
+        status_update(&mut c, claude.id, AgentStatus::Fresh).await,
+        AgentStatus::Fresh
+    );
     c.send(&ClientRequest::Attach {
         session: claude.id,
         cols: 300,
@@ -747,7 +774,10 @@ async fn resuming_without_a_captured_id_starts_fresh() {
     })
     .await
     .unwrap();
-    assert_eq!(status_update(&mut c, s.id).await, AgentStatus::Fresh);
+    assert_eq!(
+        status_update(&mut c, s.id, AgentStatus::Fresh).await,
+        AgentStatus::Fresh
+    );
     c.send(&ClientRequest::Attach {
         session: s.id,
         cols: 4000,
