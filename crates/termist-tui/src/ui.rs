@@ -1,5 +1,6 @@
 //! Rendering: header, cards, live pane and footer.
 use crate::app::{App, Mode};
+use crate::overlay_view;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -113,58 +114,14 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         }
         draw_pane(f, app, areas);
     }
-    if let Mode::PickHarness(selected) = app.mode {
-        draw_picker(
-            f,
-            app,
-            selected,
-            Rect {
-                height: areas.cards.height + areas.pane.height,
-                ..areas.cards
-            },
-        );
+    let body = Rect {
+        height: areas.cards.height + areas.pane.height,
+        ..areas.cards
+    };
+    for overlay in &app.overlays {
+        overlay_view::draw(f, app, overlay, body);
     }
     draw_footer(f, app, areas.footer);
-}
-
-fn draw_picker(f: &mut Frame, app: &App, selected: usize, body: Rect) {
-    let w = 36.min(body.width);
-    let h = (app.harnesses.len() as u16 + 2).min(body.height);
-    let area = Rect {
-        x: body.x + body.width.saturating_sub(w) / 2,
-        y: body.y + body.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
-    };
-    let lines: Vec<Line> = app
-        .harnesses
-        .iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let note = if h.available { "" } else { "not installed" };
-            let mut style = if h.available {
-                Style::default()
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            if i == selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            Line::from(Span::styled(
-                format!(" {} {:<9} {note}", i + 1, h.harness.id()),
-                style,
-            ))
-        })
-        .collect();
-    f.render_widget(ratatui::widgets::Clear, area);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" new session "),
-        ),
-        area,
-    );
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -312,8 +269,17 @@ fn color(c: termist_core::Color) -> Color {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let shows_message = app.mode == Mode::Grid || !app.overlays.is_empty();
     let (text, style) = match (&app.message, app.mode) {
-        (Some(m), Mode::Grid) => (m.clone(), Style::default().fg(Color::Red)),
+        (Some(m), _) if shows_message => (m.clone(), Style::default().fg(Color::Red)),
+        _ if !app.overlays.is_empty() => (
+            app.overlays
+                .last()
+                .map(overlay_view::hint)
+                .unwrap_or_default()
+                .to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
         (_, Mode::ConfirmQuit) => (
             "Leave termist? Sessions keep running in the daemon.  y / Enter: quit · any key: stay"
                 .into(),
@@ -343,10 +309,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ),
         (_, Mode::FocusPrefix) => (
             "C-a …  Esc grid · . , next/prev● · hjkl move · C-a literal".into(),
-            Style::default().fg(Color::Yellow),
-        ),
-        (_, Mode::PickHarness(_)) => (
-            "j/k choose · Enter start · 1-3 pick · Esc cancel".into(),
             Style::default().fg(Color::Yellow),
         ),
     };

@@ -1,4 +1,6 @@
 use crate::encode::{encode_key, encode_paste};
+use crate::list_picker::Pick;
+use crate::overlay::{self, Overlay};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use termist_core::{
@@ -14,8 +16,6 @@ pub enum Mode {
     ConfirmQuit,
     /// `d` was pressed on this session; `y` / Enter kills it, any other key cancels.
     ConfirmKill(SessionId),
-    /// `n` was pressed: choose the agent CLI; index into `App::harnesses`.
-    PickHarness(usize),
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,6 +39,8 @@ pub struct App {
     /// The agent CLIs the daemon can launch; the default is all three, until the
     /// daemon's `Harnesses` event arrives.
     pub harnesses: Vec<HarnessInfo>,
+    /// Pickers and text boxes on top of the grid or pane; the last one gets the keys.
+    pub overlays: Vec<Overlay>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
 }
@@ -69,6 +71,7 @@ impl App {
                     available: true,
                 })
                 .collect(),
+            overlays: Vec::new(),
             focus_next_created: false,
             resume_pending: None,
         }
@@ -148,7 +151,16 @@ impl App {
                 self.resume_pending = None;
                 self.message = Some(message);
             }
-            ServerEvent::Harnesses(list) => self.harnesses = list,
+            ServerEvent::Harnesses(list) => {
+                for picker in self
+                    .overlays
+                    .iter_mut()
+                    .filter_map(Overlay::harness_picker_mut)
+                {
+                    picker.set_items(list.clone(), overlay::harness_label);
+                }
+                self.harnesses = list;
+            }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
@@ -157,7 +169,18 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('q') {
+            // Ctrl+Q always gets you out: every overlay closes and focus mode ends.
+            self.overlays.clear();
+            self.mode = Mode::Grid;
+            return vec![];
+        }
         let mut actions = Vec::new();
+        if !self.overlays.is_empty() {
+            actions.extend(self.overlay_key(key));
+            actions.extend(self.sync_attachment());
+            return actions;
+        }
         match self.mode {
             Mode::ConfirmQuit => {
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
@@ -176,9 +199,7 @@ impl App {
                 return vec![];
             }
             Mode::Focus => {
-                if ctrl && key.code == KeyCode::Char('q') {
-                    self.mode = Mode::Grid;
-                } else if ctrl && key.code == KeyCode::Char('a') {
+                if ctrl && key.code == KeyCode::Char('a') {
                     self.mode = Mode::FocusPrefix;
                 } else if let Some(id) = self.selected {
                     let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
@@ -191,7 +212,6 @@ impl App {
             Mode::FocusPrefix => {
                 self.mode = Mode::Focus;
                 match key.code {
-                    // Esc, q, and C-q (PRD §7: C-q always escapes, prefix or not).
                     KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Grid,
                     KeyCode::Char('a') if ctrl => {
                         if let Some(id) = self.selected {
@@ -204,22 +224,6 @@ impl App {
                     KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
                     _ => {}
                 }
-            }
-            Mode::PickHarness(i) => {
-                let n = self.harnesses.len().max(1);
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        self.mode = Mode::PickHarness((i + 1) % n)
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        self.mode = Mode::PickHarness((i + n - 1) % n)
-                    }
-                    KeyCode::Char(c @ '1'..='9') => return self.pick(c as usize - '1' as usize),
-                    KeyCode::Enter => return self.pick(i),
-                    KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Grid,
-                    _ => {}
-                }
-                return vec![];
             }
             Mode::Grid => {
                 // An error message stays up only until the next key.
@@ -302,17 +306,45 @@ impl App {
         })]
     }
 
+    /// Keys for the overlay on top of the stack.
+    fn overlay_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(top) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match top {
+            Overlay::Harness(picker) => {
+                let chosen = match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.overlays.pop();
+                        return vec![];
+                    }
+                    KeyCode::Char(c @ '1'..='9') => Some(c as usize - '1' as usize),
+                    _ => match picker.key(key) {
+                        Pick::Chosen => picker.selected_index(),
+                        _ => None,
+                    },
+                };
+                match chosen {
+                    Some(index) => {
+                        self.overlays.pop();
+                        self.pick(index)
+                    }
+                    None => vec![],
+                }
+            }
+        }
+    }
+
     fn open_picker(&mut self) {
         if self.project.is_none() {
             self.message = Some("no project open".into());
             return;
         }
-        let first = self.harnesses.iter().position(|h| h.available).unwrap_or(0);
-        self.mode = Mode::PickHarness(first);
+        self.overlays
+            .push(Overlay::Harness(overlay::harness_picker(&self.harnesses)));
     }
 
     fn pick(&mut self, index: usize) -> Vec<Action> {
-        self.mode = Mode::Grid;
         let Some(choice) = self.harnesses.get(index).cloned() else {
             return vec![];
         };
@@ -499,6 +531,14 @@ mod tests {
         (app, s)
     }
 
+    /// The highlighted row of the harness picker, when it is the top overlay.
+    fn picker(app: &App) -> Option<usize> {
+        match app.overlays.last() {
+            Some(Overlay::Harness(p)) => p.selected_index(),
+            _ => None,
+        }
+    }
+
     fn sent(actions: &[Action]) -> Vec<&ClientRequest> {
         actions
             .iter()
@@ -649,11 +689,13 @@ mod tests {
     fn n_opens_the_picker_and_enter_starts_the_highlighted_cli() {
         let (mut app, s) = app();
         assert!(app.on_key(k(K::Char('n'))).is_empty());
-        assert_eq!(app.mode, Mode::PickHarness(0));
+        assert_eq!(picker(&app), Some(0));
+        app.on_key(k(K::Char('k')));
+        assert_eq!(picker(&app), Some(0), "stops at the top");
         app.on_key(k(K::Char('j')));
-        assert_eq!(app.mode, Mode::PickHarness(1));
+        assert_eq!(picker(&app), Some(1));
         let actions = app.on_key(k(K::Enter));
-        assert_eq!(app.mode, Mode::Grid);
+        assert!(app.overlays.is_empty());
         assert_eq!(
             sent(&actions),
             vec![&ClientRequest::CreateSession {
@@ -686,14 +728,10 @@ mod tests {
             },
         ]));
         app.on_key(k(K::Char('n')));
-        assert_eq!(
-            app.mode,
-            Mode::PickHarness(1),
-            "opens on the first available CLI"
-        );
+        assert_eq!(picker(&app), Some(1), "opens on the first available CLI");
         let actions = app.on_key(k(K::Char('3')));
         assert!(sent(&actions).is_empty());
-        assert_eq!(app.mode, Mode::Grid);
+        assert!(app.overlays.is_empty());
         assert!(
             app.message
                 .as_deref()
@@ -707,7 +745,48 @@ mod tests {
         let (mut app, _) = app();
         app.on_key(k(K::Char('n')));
         assert!(app.on_key(k(K::Esc)).is_empty());
+        assert!(app.overlays.is_empty());
         assert_eq!(app.mode, Mode::Grid);
+    }
+
+    #[test]
+    fn keys_go_to_the_top_overlay_and_esc_closes_only_that_one() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('n')));
+        app.on_key(k(K::Char('l')));
+        assert_eq!(app.selected, Some(s[0].id), "l did not move the grid");
+        let below = app.overlays[0].clone();
+        app.overlays.push(below);
+        app.on_key(k(K::Esc));
+        assert_eq!(app.overlays.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_q_closes_every_overlay_and_leaves_focus_mode() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        app.overlays
+            .push(Overlay::Harness(overlay::harness_picker(&app.harnesses)));
+        let again = app.overlays[0].clone();
+        app.overlays.push(again);
+        assert!(sent(&app.on_key(ctrl('q'))).is_empty());
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    #[test]
+    fn a_newer_harness_list_updates_the_open_picker() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('n')));
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Codex,
+            available: true,
+        }]));
+        match app.overlays.last() {
+            Some(Overlay::Harness(p)) => assert_eq!(p.items().len(), 1),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -844,7 +923,7 @@ mod tests {
         app.on_key(ctrl('a'));
         assert_eq!(app.mode, Mode::FocusPrefix);
         assert!(sent(&app.on_key(ctrl('q'))).is_empty());
-        assert_eq!(app.mode, Mode::Grid, "C-q always escapes (PRD §7)");
+        assert_eq!(app.mode, Mode::Grid, "C-q always escapes");
     }
 
     #[test]
