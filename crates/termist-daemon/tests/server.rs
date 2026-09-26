@@ -343,6 +343,85 @@ async fn codex_hooks_drive_status_and_capture_its_session_id() {
     );
 }
 
+/// Codex's internal/sub-agent sessions inherit our `-c` hook flags and fire their own
+/// SessionStart mid-turn; that must not overwrite the card's real agent id (a later
+/// Resume would target a session id Codex never saved). A genuine switch to a new
+/// Codex conversation (e.g. `/new`) can only happen between turns, so it is still
+/// adopted once the turn has stopped.
+#[tokio::test]
+async fn codex_ignores_a_mid_turn_session_start_for_another_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        codex_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Codex,
+        },
+    )
+    .await;
+    let hook = |event: &'static str, payload: &'static str| {
+        let paths = d.paths.clone();
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::Codex, event, payload.into())
+                .await
+                .unwrap()
+        }
+    };
+    hook(
+        "SessionStart",
+        r#"{"session_id":"session-a","source":"startup"}"#,
+    )
+    .await;
+    assert_eq!(
+        info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
+        Some("session-a")
+    );
+    hook("UserPromptSubmit", "{}").await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
+        AgentStatus::Running
+    );
+    // A foreign SessionStart arrives mid-turn, as if from a Codex sub-agent session.
+    hook(
+        "SessionStart",
+        r#"{"session_id":"session-b","source":"startup"}"#,
+    )
+    .await;
+    hook("Stop", "{}").await;
+    let after_stop = match next_event(
+        &mut ui,
+        |e| matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && u.status != AgentStatus::Running),
+    )
+    .await
+    {
+        ServerEvent::SessionUpdated(u) => u,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(after_stop.status, AgentStatus::Unseen);
+    assert_eq!(
+        after_stop.agent_session_id.as_deref(),
+        Some("session-a"),
+        "mid-turn SessionStart for another session must not overwrite the card's id"
+    );
+    // Between turns, a real SessionStart for a new conversation is adopted.
+    hook(
+        "SessionStart",
+        r#"{"session_id":"session-c","source":"startup"}"#,
+    )
+    .await;
+    assert_eq!(
+        info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
+        Some("session-c")
+    );
+}
+
 #[tokio::test]
 async fn opencode_subagent_events_do_not_move_the_parent_card() {
     let tmp = tempfile::tempdir().unwrap();

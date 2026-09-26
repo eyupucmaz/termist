@@ -374,7 +374,7 @@ impl Registry {
                 claude::signal_for(event, payload)
             }
             Harness::Codex => {
-                if self.capture_session_start(id, event, payload) {
+                if self.capture_codex_session_start(id, event, payload) {
                     self.mark_resumable(id);
                 }
                 codex::signal_for(event, payload)
@@ -398,6 +398,37 @@ impl Registry {
             }
             _ => false,
         }
+    }
+
+    /// Codex only: like `capture_session_start`, but a `SessionStart` for a different
+    /// id that arrives mid-turn (Running or NeedsFeedback) is ignored. Codex's
+    /// internal/sub-agent sessions inherit our `-c` hook flags and fire their own
+    /// SessionStart while the user's turn is still running; a genuine switch to a new
+    /// Codex conversation can only happen between turns, so this can't mistake one
+    /// for the other. The SessionStart itself carries no status signal for Codex.
+    fn capture_codex_session_start(&mut self, id: SessionId, event: &str, payload: &Value) -> bool {
+        let Some(sid) = payload.get("session_id").and_then(Value::as_str) else {
+            return false;
+        };
+        if event != "SessionStart" {
+            return false;
+        }
+        if let Some(s) = self.session(id)
+            && matches!(
+                s.info.status,
+                AgentStatus::Running | AgentStatus::NeedsFeedback
+            )
+            && s.info.agent_session_id.as_deref() != Some(sid)
+        {
+            tracing::debug!(
+                session = %id,
+                session_id = sid,
+                "ignored mid-turn Codex SessionStart for another session"
+            );
+            return false;
+        }
+        self.set_agent_session_id(id, sid);
+        true
     }
 
     /// The card follows the OpenCode session the user is in: a session created
