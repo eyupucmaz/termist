@@ -113,8 +113,10 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             "No project yet: run termist inside a project folder."
         } else if app.project.is_none() {
             "No project open · o opens one"
+        } else if app.archive_view {
+            "Nothing archived in this project.  A: back"
         } else {
-            "No sessions yet.  n: new agent  ·  t: new shell"
+            "No sessions yet.  p: new task  ·  n: agent  ·  t: shell"
         };
         f.render_widget(
             Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
@@ -175,6 +177,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " termist ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
+    if app.archive_view {
+        spans.push(Span::styled(
+            "archive ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -192,7 +202,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 .state
                 .sessions
                 .iter()
-                .filter(|s| s.project == p.id && s.status == status)
+                .filter(|s| s.project == p.id && s.status == status && !s.archived)
                 .count();
             if n > 0 {
                 let (glyph, color, _) = status_style(status);
@@ -357,8 +367,24 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Yellow),
             )
         }
+        (_, Mode::ConfirmArchive(id)) => {
+            let session = app.state.sessions.iter().find(|s| s.id == id);
+            let name = session.map_or("this session", |s| s.display_name());
+            let text = if session.is_some_and(|s| s.status.is_live()) {
+                format!("Stop and archive {name}? y/N")
+            } else {
+                format!("Archive {name}? y/N")
+            };
+            (text, Style::default().fg(Color::Yellow))
+        }
+        (_, Mode::Grid) if app.archive_view => (
+            "archive · Enter restore and resume · hjkl move · d delete · A/Esc back · q quit"
+                .into(),
+            Style::default().fg(Color::DarkGray),
+        ),
         (_, Mode::Grid) => (
-            "n new agent · t shell · Enter focus/resume · . next● · hjkl move · d kill · q quit"
+            "p new task · Space follow-up · / sessions · n agent · t shell · Enter focus · \
+             . next● · o open · x close tab · r rename · a archive · A archived · d kill · q quit"
                 .into(),
             Style::default().fg(Color::DarkGray),
         ),
@@ -744,5 +770,32 @@ mod tests {
             app.on_key(key(K::Char('j')));
         }
         insta::assert_snapshot!(render(&mut app, 60, 16).backend());
+    }
+
+    #[test]
+    fn the_archive_view() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        let mut info = app.state.sessions[1].clone();
+        info.archived = true;
+        info.status = AgentStatus::Exited { code: None };
+        app.on_event(ServerEvent::SessionUpdated(info));
+        let t = render(&mut app, 60, 16);
+        assert_eq!(
+            row(&t, 0),
+            " termist   orbit-api ◆1",
+            "archived cards are not counted"
+        );
+        app.on_key(key(K::Char('A')));
+        insta::assert_snapshot!(render(&mut app, 60, 16).backend());
+    }
+
+    #[test]
+    fn archiving_asks_first_and_says_whether_it_stops_something() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('a')));
+        let t = render(&mut app, 60, 16);
+        assert_eq!(row(&t, 15), "Stop and archive claude-1? y/N");
     }
 }

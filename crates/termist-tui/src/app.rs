@@ -27,6 +27,8 @@ pub enum Mode {
     ConfirmKill(SessionId),
     /// `x` was pressed on this project tab; `y` / Enter closes it.
     ConfirmClose(ProjectId),
+    /// `a` was pressed on this session; `y` / Enter archives it.
+    ConfirmArchive(SessionId),
 }
 
 #[derive(Debug, PartialEq)]
@@ -49,6 +51,8 @@ pub struct App {
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
     pub card_scroll: usize,
+    /// `A`: the grid shows the project's archived cards instead of its live ones.
+    pub archive_view: bool,
     pub message: Option<String>,
     /// Set by the first `State` from the daemon; until then the body says "Connecting…".
     pub connected: bool,
@@ -92,6 +96,7 @@ impl App {
             cards_per_row: 1,
             card_rows: 1,
             card_scroll: 0,
+            archive_view: false,
             message: None,
             connected: false,
             harnesses: Harness::ALL
@@ -110,11 +115,13 @@ impl App {
         }
     }
 
+    /// The cards of the current project: its archived ones in the archive view, the
+    /// others everywhere else.
     pub fn project_sessions(&self) -> Vec<&SessionInfo> {
         self.state
             .sessions
             .iter()
-            .filter(|s| Some(s.project) == self.project)
+            .filter(|s| Some(s.project) == self.project && s.archived == self.archive_view)
             .collect()
     }
 
@@ -156,6 +163,17 @@ impl App {
             }
             ServerEvent::SessionUpdated(info) => {
                 let (id, status) = (info.id, info.status);
+                // Archived elsewhere while focused here: back to the grid.
+                if info.archived
+                    && !self.archive_view
+                    && self.selected == Some(id)
+                    && matches!(
+                        self.mode,
+                        Mode::Focus | Mode::FocusPrefix | Mode::ConfirmArchive(_)
+                    )
+                {
+                    self.mode = Mode::Grid;
+                }
                 // You are looking at it: a focused session that finishes is seen.
                 let seen_now = info.status == AgentStatus::Unseen
                     && self.selected == Some(id)
@@ -194,7 +212,7 @@ impl App {
                         self.mode = Mode::Grid;
                     }
                 }
-                if self.mode == Mode::ConfirmKill(id) {
+                if matches!(self.mode, Mode::ConfirmKill(x) | Mode::ConfirmArchive(x) if x == id) {
                     self.mode = Mode::Grid;
                 }
                 self.repair_selection();
@@ -282,6 +300,17 @@ impl App {
                 }
                 return vec![];
             }
+            Mode::ConfirmArchive(session) => {
+                self.mode = Mode::Grid;
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                    return vec![Action::Send(ClientRequest::ArchiveSession { session })];
+                }
+                return vec![];
+            }
+            Mode::Grid if self.archive_view => {
+                self.message = None;
+                actions.extend(self.archive_key(key));
+            }
             Mode::Focus => {
                 if ctrl && key.code == KeyCode::Char('a') {
                     self.mode = Mode::FocusPrefix;
@@ -323,6 +352,12 @@ impl App {
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
                     KeyCode::Char(' ') => self.open_follow_up(),
                     KeyCode::Char('r') => self.open_rename(),
+                    KeyCode::Char('a') => {
+                        if let Some(id) = self.selected {
+                            self.mode = Mode::ConfirmArchive(id);
+                        }
+                    }
+                    KeyCode::Char('A') => self.set_archive_view(true),
                     KeyCode::Char('/') => self.open_palette(),
                     KeyCode::Char('d') if ctrl => self.half_page(1),
                     KeyCode::Char('u') if ctrl => self.half_page(-1),
@@ -954,6 +989,50 @@ impl App {
             .unwrap_or(0) as isize;
         let next = (pos + delta).clamp(0, ids.len() as isize - 1) as usize;
         self.selected = Some(ids[next]);
+    }
+
+    fn set_archive_view(&mut self, on: bool) {
+        self.archive_view = on;
+        self.selected = None;
+        self.card_scroll = 0;
+        self.repair_selection();
+    }
+
+    /// The archive view: move, restore (Enter), delete (d), leave (A, Esc). Keys that
+    /// start or reach live sessions do nothing here.
+    fn archive_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('A') => self.set_archive_view(false),
+            KeyCode::Enter => return self.restore(),
+            KeyCode::Char('d') if ctrl => self.half_page(1),
+            KeyCode::Char('u') if ctrl => self.half_page(-1),
+            KeyCode::Char('d') => {
+                if let Some(id) = self.selected {
+                    self.mode = Mode::ConfirmKill(id);
+                }
+            }
+            KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
+            KeyCode::Char(']') => self.switch_project(1),
+            KeyCode::Char('[') => self.switch_project(-1),
+            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.navigate(c),
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// Enter in the archive view: the card comes back to the grid and, if it is not
+    /// running, resumes; it is focused once it is back.
+    fn restore(&mut self) -> Vec<Action> {
+        let Some(id) = self.selected else {
+            return vec![];
+        };
+        self.archive_view = false;
+        let mut actions = vec![Action::Send(ClientRequest::UnarchiveSession {
+            session: id,
+        })];
+        actions.extend(self.enter());
+        actions
     }
 
     /// Each frame's layout: cards per row and rows that fit. Scrolls just enough to
@@ -2342,5 +2421,107 @@ mod tests {
         assert_eq!(app.selected, Some(s[15].id));
         assert_eq!(app.card_scroll, 4);
         assert_eq!(app.mode, Mode::Grid, "Ctrl+D is not d (kill)");
+    }
+
+    fn archived(s: &SessionInfo, status: AgentStatus) -> SessionInfo {
+        let mut a = s.clone();
+        a.archived = true;
+        a.status = status;
+        a
+    }
+
+    #[test]
+    fn a_archives_the_selected_card_after_asking() {
+        let (mut app, s) = app();
+        assert!(sent(&app.on_key(k(K::Char('a')))).is_empty());
+        assert_eq!(app.mode, Mode::ConfirmArchive(s[0].id));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('y')))),
+            vec![&ClientRequest::ArchiveSession { session: s[0].id }]
+        );
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[0],
+            AgentStatus::Finished,
+        )));
+        assert!(app.project_sessions().iter().all(|x| x.id != s[0].id));
+        assert_eq!(app.selected, Some(s[1].id));
+        app.on_key(k(K::Char('a')));
+        app.on_key(k(K::Esc));
+        assert_eq!(app.mode, Mode::Grid, "any other key cancels");
+    }
+
+    // An archived card's late hooks move its status, but it stays out of the grid and
+    // never takes the selection or the focus.
+    #[test]
+    fn an_archived_card_stays_hidden_whatever_its_hooks_say() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Char('l')));
+        app.on_key(k(K::Enter));
+        assert_eq!((app.selected, app.mode), (Some(s[2].id), Mode::Focus));
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[2],
+            AgentStatus::Running,
+        )));
+        assert_eq!(app.mode, Mode::Grid, "archived elsewhere: back to the grid");
+        for status in [AgentStatus::NeedsFeedback, AgentStatus::Unseen] {
+            app.on_event(ServerEvent::SessionUpdated(archived(&s[2], status)));
+            assert!(app.project_sessions().iter().all(|x| x.id != s[2].id));
+            assert_ne!(app.selected, Some(s[2].id));
+        }
+    }
+
+    #[test]
+    fn the_archive_view_shows_archived_cards_and_enter_restores_and_resumes() {
+        let (mut app, s) = app();
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[1],
+            AgentStatus::Disconnected,
+        )));
+        app.on_key(k(K::Char('A')));
+        assert!(app.archive_view);
+        let shown: Vec<SessionId> = app.project_sessions().iter().map(|x| x.id).collect();
+        assert_eq!(shown, vec![s[1].id]);
+        assert_eq!(app.selected, Some(s[1].id));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions)[..2],
+            [
+                &ClientRequest::UnarchiveSession { session: s[1].id },
+                &ClientRequest::Resume {
+                    session: s[1].id,
+                    cols: 80,
+                    rows: 20
+                }
+            ]
+        );
+        assert!(!app.archive_view);
+        let mut back = s[1].clone();
+        back.status = AgentStatus::Disconnected;
+        app.on_event(ServerEvent::SessionUpdated(back.clone()));
+        back.status = AgentStatus::Fresh;
+        app.on_event(ServerEvent::SessionUpdated(back));
+        assert_eq!((app.selected, app.mode), (Some(s[1].id), Mode::Focus));
+    }
+
+    #[test]
+    fn the_archive_view_only_moves_restores_deletes_and_leaves() {
+        let (mut app, s) = app();
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[1],
+            AgentStatus::Disconnected,
+        )));
+        app.on_key(k(K::Char('A')));
+        for c in ['p', 'n', ' ', 'r', 'a', '/', 'o', 't', '.'] {
+            assert!(sent(&app.on_key(k(K::Char(c)))).is_empty(), "{c:?}");
+            assert!(app.overlays.is_empty(), "{c:?}");
+            assert_eq!(app.mode, Mode::Grid, "{c:?}");
+        }
+        app.on_key(k(K::Char('d')));
+        assert_eq!(app.mode, Mode::ConfirmKill(s[1].id));
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Esc));
+        assert!(!app.archive_view);
+        assert_eq!(app.selected, Some(s[0].id));
     }
 }
