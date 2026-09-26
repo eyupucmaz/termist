@@ -33,7 +33,14 @@ fn login_shell_lookup(_name: &str) -> Option<PathBuf> {
 /// the name is interpolated into a shell command.
 #[cfg(unix)]
 pub fn via_login_shell(name: &str, limit: Duration) -> Option<PathBuf> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    ask_shell(&shell, name, limit)
+}
+
+#[cfg(unix)]
+fn ask_shell(shell: &str, name: &str, limit: Duration) -> Option<PathBuf> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     if name.is_empty()
         || !name
@@ -42,28 +49,55 @@ pub fn via_login_shell(name: &str, limit: Duration) -> Option<PathBuf> {
     {
         return None;
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut child = Command::new(shell)
+    let mut child = match Command::new(shell)
         .args(["-lc", &format!("command -v {name}")])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // its own process group, so a timeout also ends whatever the profile started
+        .process_group(0)
         .spawn()
-        .ok()?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
+    {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(shell, name, error = %e, "could not start the login shell for a lookup");
+            return None;
         }
+    };
+    let started = Instant::now();
+    // A job the profile started in the background can hold stdout open long after the
+    // shell exits, so the read happens on its own thread and is given up at the limit.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = tx.send(stdout.read_to_string(&mut out).map(|_| out));
+    });
+    let out = rx.recv_timeout(limit);
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break true,
+            Ok(None) if started.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            _ => break false,
+        }
+    };
+    if out.is_err() || !exited {
+        // SAFETY: kill(2) takes no pointers. The group id is our child's pid, and a pid
+        // is not reused while a process group of that id still has members.
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.wait();
     }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let out = match out {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            tracing::debug!(shell, name, error = %e, "login shell output unreadable");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(shell, name, ?limit, "login shell lookup timed out");
+            return None;
+        }
+    };
     out.lines()
         .map(str::trim)
         .filter(|l| l.starts_with('/'))
@@ -133,6 +167,45 @@ mod tests {
         let path = std::env::join_paths([a.path(), b.path()]).unwrap();
         assert_eq!(find_in_path("codex", &path), Some(b.path().join("codex")));
         assert_eq!(find_in_path("opencode", &path), None);
+    }
+
+    // A profile that starts a background job keeps the shell's stdout open after the
+    // shell exits: the lookup must still end at its limit, and take the job with it.
+    #[test]
+    fn a_login_shell_that_leaves_a_job_behind_is_bounded_and_cleaned_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("job.pid");
+        let shell = tmp.path().join("fake-shell");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\nsleep 10 &\necho $! > '{}'\necho /bin/sh\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = Instant::now();
+        let found = ask_shell(shell.to_str().unwrap(), "sh", Duration::from_millis(500));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(found, None, "no answer within the limit");
+        let job: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            // SAFETY: signal 0 only checks that the process exists.
+            (unsafe { libc::kill(job, 0) }) != 0
+        });
+        assert!(gone, "the background job was killed with the shell");
     }
 
     #[test]
