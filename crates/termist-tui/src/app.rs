@@ -338,6 +338,9 @@ impl App {
             AgentStatus::Exited { .. } | AgentStatus::Disconnected
         ) {
             let id = info.id;
+            if self.resume_pending == Some(id) {
+                return vec![]; // already asked; wait for it to come back
+            }
             let (cols, rows) = self.pane;
             self.resume_pending = Some(id);
             return vec![Action::Send(ClientRequest::Resume {
@@ -741,6 +744,21 @@ mod tests {
             }),
             "re-attaches to the new process"
         );
+    }
+
+    #[test]
+    fn a_second_enter_while_resuming_sends_nothing() {
+        let (mut app, s) = app();
+        let mut stopped = s[0].clone();
+        stopped.status = AgentStatus::Exited { code: Some(1) };
+        app.on_event(ServerEvent::SessionUpdated(stopped.clone()));
+        assert_eq!(sent(&app.on_key(k(K::Enter))).len(), 1);
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        // an error ends the wait: Enter resumes again
+        app.on_event(ServerEvent::Error {
+            message: "no".into(),
+        });
+        assert_eq!(sent(&app.on_key(k(K::Enter))).len(), 1);
     }
 
     #[test]
