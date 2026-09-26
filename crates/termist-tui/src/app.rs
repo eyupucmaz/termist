@@ -190,8 +190,7 @@ impl App {
                 }
                 if !known && self.focus_next_created {
                     self.focus_next_created = false;
-                    self.select(id);
-                    self.mode = Mode::Focus;
+                    self.arrived(id);
                 }
                 self.repair_selection();
                 if seen_now {
@@ -199,9 +198,8 @@ impl App {
                 }
                 if self.resume_pending == Some(id) && status == AgentStatus::Fresh {
                     self.resume_pending = None;
-                    self.select(id);
-                    self.mode = Mode::Focus;
                     self.attached = None; // the old process's attachment ended with it
+                    self.arrived(id);
                 }
             }
             ServerEvent::SessionRemoved(id) => {
@@ -1119,6 +1117,21 @@ impl App {
         }
     }
 
+    /// A card the user started or resumed is here: it takes the focus from the grid or
+    /// the pane. Under a question it is only selected, so the question keeps its keys;
+    /// the archive view keeps its own selection.
+    fn arrived(&mut self, id: SessionId) {
+        match self.mode {
+            Mode::Grid if self.archive_view => {}
+            Mode::Grid | Mode::Focus => {
+                self.select(id);
+                self.archive_view = false;
+                self.mode = Mode::Focus;
+            }
+            _ => self.select(id),
+        }
+    }
+
     fn select(&mut self, id: SessionId) {
         if let Some(s) = self.state.sessions.iter().find(|s| s.id == id) {
             self.project = Some(s.project);
@@ -1418,6 +1431,45 @@ mod tests {
                 rows: 20
             }]
         );
+    }
+
+    // A card the user started arrives while a question is on screen: the question stays
+    // (a `y` meant for it must not reach the new card), the card is only selected.
+    #[test]
+    fn a_new_card_arriving_under_a_question_does_not_take_the_focus() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('n')));
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Char('q')));
+        assert_eq!(app.mode, Mode::ConfirmQuit);
+        let fresh = session(s[0].project, "claude-5", AgentStatus::Fresh);
+        app.on_event(ServerEvent::SessionUpdated(fresh.clone()));
+        assert_eq!(app.mode, Mode::ConfirmQuit);
+        assert_eq!(app.selected, Some(fresh.id));
+        app.on_key(k(K::Esc));
+        let later = session(s[0].project, "claude-6", AgentStatus::Fresh);
+        app.on_event(ServerEvent::SessionUpdated(later));
+        assert_eq!(
+            (app.selected, app.mode),
+            (Some(fresh.id), Mode::Grid),
+            "the request was used up"
+        );
+
+        // a resumed card coming back while the archive is showing leaves it alone
+        let (mut app, s) = self::app();
+        let mut stopped = s[0].clone();
+        stopped.status = AgentStatus::Disconnected;
+        app.on_event(ServerEvent::SessionUpdated(stopped.clone()));
+        app.on_key(k(K::Enter));
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[1],
+            AgentStatus::Disconnected,
+        )));
+        app.on_key(k(K::Char('A')));
+        stopped.status = AgentStatus::Fresh;
+        app.on_event(ServerEvent::SessionUpdated(stopped));
+        assert!(app.archive_view);
+        assert_eq!((app.selected, app.mode), (Some(s[1].id), Mode::Grid));
     }
 
     #[test]
