@@ -1,7 +1,10 @@
 /// Environment variables removed before spawning an agent: they make agent CLIs think
 /// they run inside tmux, zellij, the host terminal, or a nested Claude Code session.
-/// Only the nested-session markers of Claude Code are removed
-/// (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`); every other
+/// Only the markers that belong to a parent Claude Code session are removed
+/// (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`,
+/// `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+/// `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_BRIDGE_SESSION_ID`,
+/// `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_PID`); every other
 /// `CLAUDE_CODE_*` variable is user configuration (Bedrock, Vertex, OAuth token, …)
 /// and is passed through.
 pub fn should_scrub(name: &str) -> bool {
@@ -13,6 +16,14 @@ pub fn should_scrub(name: &str) -> bool {
             | "CLAUDECODE"
             | "CLAUDE_CODE_ENTRYPOINT"
             | "CLAUDE_CODE_SSE_PORT"
+            | "CLAUDE_CODE_CHILD_SESSION"
+            | "CLAUDE_CODE_SESSION_ID"
+            | "CLAUDE_CODE_MESSAGING_SOCKET"
+            | "CLAUDE_CODE_MESSAGING_TOKEN"
+            | "CLAUDE_CODE_BRIDGE_SESSION_ID"
+            | "CLAUDE_CODE_SESSION_ATTENDED"
+            | "CLAUDE_CODE_EXECPATH"
+            | "CLAUDE_PID"
             | "WT_SESSION"
     ) || name.starts_with("ZELLIJ")
         || name.starts_with("TERM_PROGRAM")
@@ -51,11 +62,28 @@ mod tests {
     }
 
     #[test]
+    fn parent_claude_code_session_markers_are_scrubbed() {
+        for v in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_EXECPATH",
+            "CLAUDE_PID",
+        ] {
+            assert!(should_scrub(v), "{v}");
+        }
+    }
+
+    #[test]
     fn claude_code_user_configuration_is_kept() {
         for v in [
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
             "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_EFFORT",
         ] {
             assert!(!should_scrub(v), "{v} is user configuration");
         }
