@@ -1,12 +1,20 @@
-//! Persistence (PRD §11.6): projects and sessions in SQLite. Status is not stored:
-//! a stored session has no process in a new daemon, so it loads as Disconnected.
-use rusqlite::{Connection, params};
+//! Persistence: projects, sessions, the prompt history and the quick prompt's last
+//! choice, in SQLite. Status is not stored: a stored session has no process in a new
+//! daemon, so it loads as Disconnected.
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use termist_core::{
-    AgentStatus, Harness, ProjectId, ProjectInfo, SessionId, SessionInfo, SessionKind, now_ms,
+    AgentStatus, Harness, LaunchOptions, ProjectId, ProjectInfo, SessionId, SessionInfo,
+    SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// How many prompts the history keeps.
+pub const PROMPT_HISTORY_MAX: usize = 200;
+
+/// How many recently used models are kept per harness.
+pub const RECENT_MODELS_MAX: usize = 8;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS projects (
@@ -27,6 +35,26 @@ CREATE TABLE IF NOT EXISTS sessions (
     resumable INTEGER NOT NULL DEFAULT 0
 );
 PRAGMA user_version = 1;
+";
+
+/// Schema v1 as released, brought to v2. Runs in one transaction: a failure leaves the
+/// v1 file as it was.
+const MIGRATE_V2: &str = "
+ALTER TABLE sessions ADD COLUMN model TEXT;
+ALTER TABLE sessions ADD COLUMN effort TEXT;
+ALTER TABLE sessions ADD COLUMN user_named INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN open INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE prompt_history (
+    id INTEGER PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+CREATE TABLE ui_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+PRAGMA user_version = 2;
 ";
 
 pub struct Store {
@@ -111,7 +139,7 @@ impl Store {
         Self::migrate(Connection::open(path)?)
     }
 
-    fn migrate(conn: Connection) -> anyhow::Result<Store> {
+    fn migrate(mut conn: Connection) -> anyhow::Result<Store> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // Safety probe: a garbage file will fail here
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
@@ -122,7 +150,11 @@ impl Store {
         }
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         match version {
-            0 => conn.execute_batch(SCHEMA_V1)?,
+            0 => {
+                conn.execute_batch(SCHEMA_V1)?;
+                Self::upgrade_to_v2(&mut conn)?;
+            }
+            1 => Self::upgrade_to_v2(&mut conn)?,
             SCHEMA_VERSION => {}
             newer => anyhow::bail!(
                 "schema version {newer} is newer than this termist ({SCHEMA_VERSION})"
@@ -131,20 +163,33 @@ impl Store {
         // A table of the right version but the wrong shape is as unusable as garbage.
         conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                    created_ms, resumable FROM sessions LIMIT 0",
+                    created_ms, resumable, model, effort, user_named, archived
+             FROM sessions LIMIT 0",
         )?;
+        conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
+        conn.prepare("SELECT id, prompt, created_ms FROM prompt_history LIMIT 0")?;
+        conn.prepare("SELECT key, value FROM ui_state LIMIT 0")?;
         Ok(Store { conn })
+    }
+
+    fn upgrade_to_v2(conn: &mut Connection) -> anyhow::Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute_batch(MIGRATE_V2)?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn upsert_project(&self, p: &ProjectInfo) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO projects (id, name, path, created_ms) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path",
+            "INSERT INTO projects (id, name, path, created_ms, open) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path,
+               open = excluded.open",
             params![
                 p.id.to_string(),
                 p.name,
                 p.path.to_string_lossy(),
-                now_ms() as i64
+                now_ms() as i64,
+                p.open
             ],
         )?;
         Ok(())
@@ -152,11 +197,13 @@ impl Store {
 
     pub fn upsert_session(&self, s: &SessionInfo, resumable: bool) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms, created_ms, resumable)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms,
+                                   created_ms, resumable, model, effort, user_named, archived)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_session_id = excluded.agent_session_id,
                title = excluded.title, last_activity_ms = excluded.last_activity_ms,
-               resumable = excluded.resumable",
+               resumable = excluded.resumable, model = excluded.model, effort = excluded.effort,
+               user_named = excluded.user_named, archived = excluded.archived",
             params![
                 s.id.to_string(),
                 s.project.to_string(),
@@ -166,7 +213,11 @@ impl Store {
                 s.title,
                 s.last_activity_ms as i64,
                 now_ms() as i64,
-                resumable
+                resumable,
+                s.model,
+                s.effort,
+                s.user_named,
+                s.archived
             ],
         )?;
         Ok(())
@@ -183,45 +234,58 @@ impl Store {
     pub fn load(&self) -> anyhow::Result<(Vec<ProjectInfo>, Vec<StoredSession>)> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, path FROM projects ORDER BY created_ms, rowid")?;
+            .prepare("SELECT id, name, path, open FROM projects ORDER BY created_ms, rowid")?;
         let projects = stmt
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, bool>(3)?,
                 ))
             })?
             .filter_map(|row| row.ok())
-            .filter_map(|(id, name, path)| {
+            .filter_map(|(id, name, path, open)| {
                 Some(ProjectInfo {
                     id: id.parse::<ProjectId>().ok()?,
                     name,
                     path: PathBuf::from(path),
-                    open: true,
+                    open,
                 })
             })
             .collect();
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms, resumable
+            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms, resumable,
+                    model, effort, user_named, archived
              FROM sessions ORDER BY created_ms, rowid",
         )?;
         let sessions = stmt
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, bool>(7)?,
+                    (
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, bool>(7)?,
+                    ),
+                    (
+                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
+                        r.get::<_, bool>(10)?,
+                        r.get::<_, bool>(11)?,
+                    ),
                 ))
             })?
             .filter_map(|row| row.ok())
             .filter_map(
-                |(id, project, kind, name, agent_session_id, title, last, resumable)| {
+                |(
+                    (id, project, kind, name, agent_session_id, title, last, resumable),
+                    (model, effort, user_named, archived),
+                )| {
                     Some(StoredSession {
                         info: SessionInfo {
                             id: id.parse::<SessionId>().ok()?,
@@ -232,10 +296,10 @@ impl Store {
                             agent_session_id,
                             title,
                             last_activity_ms: last.max(0) as u64,
-                            model: None,
-                            effort: None,
-                            user_named: false,
-                            archived: false,
+                            model,
+                            effort,
+                            user_named,
+                            archived,
                         },
                         resumable,
                     })
@@ -244,6 +308,96 @@ impl Store {
             .collect();
         Ok((projects, sessions))
     }
+
+    /// Adds a prompt to the history, unless it repeats the newest one, and keeps only
+    /// the newest `PROMPT_HISTORY_MAX`.
+    pub fn add_prompt(&self, prompt: &str) -> anyhow::Result<()> {
+        let newest: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT prompt FROM prompt_history ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if newest.as_deref() == Some(prompt) {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO prompt_history (prompt, created_ms) VALUES (?1, ?2)",
+            params![prompt, now_ms() as i64],
+        )?;
+        self.conn.execute(
+            "DELETE FROM prompt_history WHERE id NOT IN
+               (SELECT id FROM prompt_history ORDER BY id DESC LIMIT ?1)",
+            params![PROMPT_HISTORY_MAX as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Up to `limit` prompts, newest first.
+    pub fn prompt_history(&self, limit: usize) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT prompt FROM prompt_history ORDER BY id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    fn ui_value(&self, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM ui_state WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn set_ui_value(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO ui_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// The quick prompt's last choice; `None` if never set or unreadable.
+    pub fn last_launch(&self) -> Option<LaunchOptions> {
+        let json = self.ui_value("last_launch").ok()??;
+        serde_json::from_str(&json).ok()
+    }
+
+    pub fn set_last_launch(&self, launch: &LaunchOptions) -> anyhow::Result<()> {
+        self.set_ui_value("last_launch", &serde_json::to_string(launch)?)
+    }
+
+    /// Models recently started with `harness`, most recent first.
+    pub fn recent_models(&self, harness: Harness) -> Vec<String> {
+        self.ui_value(&recent_models_key(harness))
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// Moves `model` to the front of the harness's recent models (at most `RECENT_MODELS_MAX`).
+    pub fn add_recent_model(&self, harness: Harness, model: &str) -> anyhow::Result<()> {
+        let mut models = self.recent_models(harness);
+        models.retain(|m| m != model);
+        models.insert(0, model.to_string());
+        models.truncate(RECENT_MODELS_MAX);
+        self.set_ui_value(
+            &recent_models_key(harness),
+            &serde_json::to_string(&models)?,
+        )
+    }
+}
+
+fn recent_models_key(harness: Harness) -> String {
+    format!("recent_models.{}", harness.id())
 }
 
 #[cfg(test)]
@@ -486,5 +640,188 @@ mod tests {
             "corrupt database should be moved aside. Files: {:?}",
             files
         );
+    }
+
+    fn moved_aside(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("termist.db.broken-")
+            })
+            .map(|e| e.path())
+            .filter(|p| {
+                !p.to_string_lossy().ends_with("-wal") && !p.to_string_lossy().ends_with("-shm")
+            })
+            .collect()
+    }
+
+    // A released v1 database, with data, opened by this termist.
+    #[test]
+    fn a_v1_database_with_data_upgrades_to_v2_without_losing_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        let (project, session) = (ProjectId::new(), SessionId::new());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_ms) VALUES (?1, 'api', '/code/api', 1)",
+                params![project.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title,
+                                       last_activity_ms, created_ms, resumable)
+                 VALUES (?1, ?2, 'codex', 'codex-1', 'agent-1', 'Fix Login', 42, 2, 1)",
+                params![session.to_string(), project.to_string()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(
+            moved_aside(tmp.path()).is_empty(),
+            "nothing was moved aside"
+        );
+        let (projects, sessions) = store.load().unwrap();
+        assert_eq!(
+            projects,
+            vec![ProjectInfo {
+                id: project,
+                name: "api".into(),
+                path: PathBuf::from("/code/api"),
+                open: true,
+            }]
+        );
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        assert!(s.resumable);
+        assert_eq!(s.info.id, session);
+        assert_eq!(s.info.project, project);
+        assert_eq!(
+            s.info.kind,
+            SessionKind::Agent {
+                harness: Harness::Codex
+            }
+        );
+        assert_eq!(s.info.name, "codex-1");
+        assert_eq!(s.info.agent_session_id.as_deref(), Some("agent-1"));
+        assert_eq!(s.info.title.as_deref(), Some("Fix Login"));
+        assert_eq!(s.info.last_activity_ms, 42);
+        assert_eq!(
+            (s.info.model.as_deref(), s.info.effort.as_deref()),
+            (None, None)
+        );
+        assert!(!s.info.user_named && !s.info.archived);
+        assert!(store.prompt_history(10).unwrap().is_empty());
+        assert_eq!(store.last_launch(), None);
+    }
+
+    #[test]
+    fn a_v1_database_that_cannot_be_upgraded_is_moved_aside_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // a `model` column already there makes the upgrade's ALTER TABLE fail
+            conn.execute_batch(&SCHEMA_V1.replace(
+                "resumable INTEGER NOT NULL DEFAULT 0",
+                "resumable INTEGER NOT NULL DEFAULT 0,\n    model TEXT",
+            ))
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.load().unwrap().1.is_empty(), "a fresh store");
+        let aside = moved_aside(tmp.path());
+        assert_eq!(aside.len(), 1);
+        let version: i64 = Connection::open(&aside[0])
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "the failed upgrade was rolled back");
+    }
+
+    #[test]
+    fn the_v2_fields_survive_a_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        let mut p = project("/code/api");
+        p.open = false;
+        let mut s = session(
+            p.id,
+            SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+            "claude-1",
+        );
+        s.model = Some("claude opus \"4\"".into());
+        s.effort = Some("max".into());
+        s.user_named = true;
+        s.archived = true;
+        {
+            let store = Store::open(&path).unwrap();
+            store.upsert_project(&p).unwrap();
+            store.upsert_session(&s, false).unwrap();
+        }
+        let (projects, sessions) = Store::open(&path).unwrap().load().unwrap();
+        assert!(!projects[0].open);
+        let back = &sessions[0].info;
+        assert_eq!(back.model, s.model);
+        assert_eq!(back.effort.as_deref(), Some("max"));
+        assert!(back.user_named && back.archived);
+    }
+
+    #[test]
+    fn the_prompt_history_keeps_the_newest_prompts_newest_first() {
+        let store = Store::open_in_memory();
+        for i in 0..PROMPT_HISTORY_MAX + 5 {
+            store.add_prompt(&format!("p{i}")).unwrap();
+        }
+        store.add_prompt("p204").unwrap(); // repeats the newest: not added again
+        let all = store.prompt_history(1000).unwrap();
+        assert_eq!(all.len(), PROMPT_HISTORY_MAX);
+        assert_eq!(all[0], "p204");
+        assert_eq!(all[PROMPT_HISTORY_MAX - 1], "p5");
+        assert_eq!(store.prompt_history(2).unwrap(), vec!["p204", "p203"]);
+    }
+
+    #[test]
+    fn the_last_launch_and_recent_models_survive_a_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        let launch = LaunchOptions {
+            harness: Harness::Codex,
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+        };
+        {
+            let store = Store::open(&path).unwrap();
+            store.set_last_launch(&launch).unwrap();
+            for m in ["a", "b", "a"] {
+                store.add_recent_model(Harness::Codex, m).unwrap();
+            }
+            store.add_recent_model(Harness::Claude, "opus").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.last_launch(), Some(launch));
+        assert_eq!(store.recent_models(Harness::Codex), vec!["a", "b"]);
+        assert_eq!(store.recent_models(Harness::Claude), vec!["opus"]);
+        assert!(store.recent_models(Harness::OpenCode).is_empty());
+        for i in 0..RECENT_MODELS_MAX + 3 {
+            store
+                .add_recent_model(Harness::Codex, &format!("m{i}"))
+                .unwrap();
+        }
+        let recent = store.recent_models(Harness::Codex);
+        assert_eq!(recent.len(), RECENT_MODELS_MAX);
+        assert_eq!(recent[0], format!("m{}", RECENT_MODELS_MAX + 2));
     }
 }
