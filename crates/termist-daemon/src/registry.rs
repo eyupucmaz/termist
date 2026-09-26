@@ -86,7 +86,12 @@ impl Registry {
             tracing::warn!(error = %e, "could not load stored sessions");
             (vec![], vec![])
         });
-        let created = sessions.len() as u32;
+        // Names are `<label>-<n>`: go on from the highest n, so none repeats.
+        let created = sessions
+            .iter()
+            .filter_map(|s| s.info.name.rsplit_once('-')?.1.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
         Registry {
             launcher,
             harnesses,
@@ -617,29 +622,53 @@ mod tests {
         Registry::new(launcher, vec![], store, notes, stop)
     }
 
-    #[test]
-    fn activity_is_broadcast_at_most_once_per_window() {
-        let p = ProjectInfo {
+    fn project() -> ProjectInfo {
+        ProjectInfo {
             id: ProjectId::new(),
             name: "api".into(),
-            path: PathBuf::from("/code/api"),
-        };
-        let s = SessionInfo {
+            path: std::env::temp_dir(),
+        }
+    }
+
+    fn stored(p: &ProjectInfo, name: &str) -> SessionInfo {
+        SessionInfo {
             id: SessionId::new(),
             project: p.id,
             kind: SessionKind::Shell,
-            name: "shell-1".into(),
+            name: name.into(),
             status: AgentStatus::Disconnected,
             agent_session_id: None,
             title: None,
             last_activity_ms: 1,
-        };
-        let mut reg = registry_with(&p, std::slice::from_ref(&s));
-        let (out, mut rx) = unbounded_channel();
+        }
+    }
+
+    fn connect(reg: &mut Registry) -> UnboundedReceiver<ServerEvent> {
+        let (out, rx) = unbounded_channel();
         reg.handle(Msg::Connected {
             client: ClientId(1),
             out,
         });
+        rx
+    }
+
+    #[test]
+    fn names_keep_counting_from_the_highest_stored_number() {
+        let p = project();
+        let names = [
+            "claude-1", "claude-3", "shell-2", "my-notes", "codex-x", "odd",
+        ];
+        let sessions: Vec<_> = names.iter().map(|n| stored(&p, n)).collect();
+        assert_eq!(registry_with(&p, &sessions).created, 3);
+        assert_eq!(registry_with(&p, &[]).created, 0);
+    }
+
+    #[test]
+    fn activity_is_broadcast_at_most_once_per_window() {
+        let p = project();
+        let s = stored(&p, "shell-1");
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        let mut rx = connect(&mut reg);
         reg.note(SessionNote::Activity(s.id));
         reg.note(SessionNote::Activity(s.id));
         let mut updates = vec![];
