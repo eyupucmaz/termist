@@ -271,7 +271,13 @@ impl Registry {
                     self.broadcast(ServerEvent::SessionUpdated(info));
                 }
             }
-            SessionNote::Exited(id, code) => self.signal(id, Signal::ProcessExited { code }),
+            SessionNote::Exited(id, code) => {
+                // The idle title was the exited process's; it says nothing about the next.
+                if let Some(s) = self.session_mut(id) {
+                    s.idle_title_since = None;
+                }
+                self.signal(id, Signal::ProcessExited { code })
+            }
         }
     }
 
@@ -915,6 +921,7 @@ impl Registry {
         s.cmd = Some(cmd); // dropping the old sender ends the old session task
         s.transcript = None;
         s.activity_broadcast = None;
+        s.idle_title_since = None;
         s.info.title = None; // the new process sets its own
         s.info.status = AgentStatus::Fresh;
         s.resumable = resume.is_some();
@@ -1306,6 +1313,28 @@ mod tests {
         reg.note(SessionNote::Title(id, Some("✳ Fix login again".into())));
         reg.note(SessionNote::Title(id, Some("✻ Fix login again".into())));
         reg.poll_idle_titles(later(1600));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    // The idle timer belongs to the process that showed the title: once it exits, a
+    // resumed process starts without it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_timer_does_not_outlive_its_process() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.launcher
+            .programs
+            .set(Harness::Claude, "/usr/bin/true".into());
+        let id = running_claude(&mut reg, &p);
+        reg.note(SessionNote::Title(id, Some("✳ Fix login".into())));
+        reg.note(SessionNote::Exited(id, Some(0)));
+        assert_eq!(reg.session(id).unwrap().idle_title_since, None);
+        reg.session_mut(id).unwrap().idle_title_since = Some(std::time::Instant::now());
+        reg.resume(id, 80, 24).unwrap();
+        // the new process's turn starts
+        reg.session_mut(id).unwrap().info.status = AgentStatus::Running;
+        reg.poll_idle_titles(later(5000));
         assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
     }
 
