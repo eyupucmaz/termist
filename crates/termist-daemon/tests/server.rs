@@ -116,13 +116,15 @@ async fn wait_screen_text(c: &mut Client, id: SessionId, needle: &str) -> Screen
     .expect("text never appeared")
 }
 
-/// Waits for a `SessionUpdated` for `id` whose status is `expected`, skipping any other
-/// update in between (Task 9: PTY activity broadcasts a `SessionUpdated` with the
-/// current, unchanged status, and can race with a hook- or exit-driven status change).
-async fn status_update(c: &mut Client, id: SessionId, expected: AgentStatus) -> AgentStatus {
+/// Waits for a `SessionUpdated` for `id` whose status differs from `from`, skipping only
+/// duplicate broadcasts of that same `from` status in between (Task 9: PTY activity
+/// broadcasts a `SessionUpdated` that repeats the current, unchanged status, which can
+/// race with a real transition). Unlike filtering for a specific expected status, this
+/// still lets a test catch a wrong transition: the caller asserts on the returned status.
+async fn status_change(c: &mut Client, id: SessionId, from: AgentStatus) -> AgentStatus {
     match next_event(
         c,
-        |e| matches!(e, ServerEvent::SessionUpdated(s) if s.id == id && s.status == expected),
+        |e| matches!(e, ServerEvent::SessionUpdated(s) if s.id == id && s.status != from),
     )
     .await
     {
@@ -249,7 +251,7 @@ async fn claude_hooks_drive_the_status_dot() {
     )
     .await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
         AgentStatus::Running
     );
     hook(
@@ -258,7 +260,7 @@ async fn claude_hooks_drive_the_status_dot() {
     )
     .await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::NeedsFeedback
     );
     // an idle notification must not produce an update; typing then answers optimistically
@@ -270,19 +272,19 @@ async fn claude_hooks_drive_the_status_dot() {
     .await
     .unwrap();
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        status_change(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
         AgentStatus::Running
     );
     hook("Stop", r#"{"hook_event_name":"Stop"}"#).await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Unseen).await,
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::Unseen
     );
     ui.send(&ClientRequest::MarkSeen { session: s.id })
         .await
         .unwrap();
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Finished).await,
+        status_change(&mut ui, s.id, AgentStatus::Unseen).await,
         AgentStatus::Finished
     );
 }
@@ -325,17 +327,17 @@ async fn codex_hooks_drive_status_and_capture_its_session_id() {
     );
     hook("UserPromptSubmit", "{}").await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
         AgentStatus::Running
     );
     hook("PermissionRequest", "{}").await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::NeedsFeedback
     );
     hook("Interrupt", "{}").await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Finished).await,
+        status_change(&mut ui, s.id, AgentStatus::NeedsFeedback).await,
         AgentStatus::Finished,
         "Interrupt = cancelled or denied"
     );
@@ -384,7 +386,7 @@ async fn opencode_subagent_events_do_not_move_the_parent_card() {
     .await;
     hook("chat.message", r#"{"sessionID":"ses_parent"}"#).await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
         AgentStatus::Running
     );
     // a subagent asks for permission: the parent card must not turn red
@@ -399,7 +401,7 @@ async fn opencode_subagent_events_do_not_move_the_parent_card() {
     )
     .await;
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Unseen).await,
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::Unseen,
         "the child's permission.asked was ignored"
     );
@@ -434,7 +436,7 @@ async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
         .await
         .unwrap();
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Running).await,
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
         AgentStatus::Running,
         "history must not cancel"
     );
@@ -449,7 +451,7 @@ async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
         })
         .unwrap();
     assert_eq!(
-        status_update(&mut ui, s.id, AgentStatus::Finished).await,
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
         AgentStatus::Finished
     );
 }
@@ -720,7 +722,7 @@ async fn sessions_survive_a_daemon_restart_and_resume_in_place() {
     .await
     .unwrap();
     assert_eq!(
-        status_update(&mut c, claude.id, AgentStatus::Fresh).await,
+        status_change(&mut c, claude.id, AgentStatus::Disconnected).await,
         AgentStatus::Fresh
     );
     c.send(&ClientRequest::Attach {
@@ -775,7 +777,7 @@ async fn resuming_without_a_captured_id_starts_fresh() {
     .await
     .unwrap();
     assert_eq!(
-        status_update(&mut c, s.id, AgentStatus::Fresh).await,
+        status_change(&mut c, s.id, exited).await,
         AgentStatus::Fresh
     );
     c.send(&ClientRequest::Attach {
