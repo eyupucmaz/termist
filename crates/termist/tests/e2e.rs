@@ -168,105 +168,147 @@ async fn recv_until(c: &mut Client, mut pred: impl FnMut(&ServerEvent) -> bool) 
     .expect("timed out")
 }
 
-#[tokio::test]
-async fn a_fake_claude_turn_end_to_end() {
-    let tmp = tempfile::tempdir().unwrap();
-    let agent = tmp.path().join("fake-claude.sh");
+/// Copies a fixture script into `dir` as an executable and returns its path.
+fn fixture(dir: &std::path::Path, name: &str) -> PathBuf {
+    let dest = dir.join(name);
     std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-claude.sh"),
-        &agent,
+        format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR")),
+        &dest,
     )
     .unwrap();
-    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let home = tmp.path().join("home");
-    let mut guard = DaemonGuard {
-        home: home.clone(),
-        child: Some(
-            Command::new(BIN)
-                .arg("daemon")
-                .env("TERMIST_HOME", &home)
-                .env("TERMIST_CLAUDE_BIN", &agent)
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap(),
-        ),
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dest
+}
+
+/// Starts `termist daemon` for `home` with extra env vars; returns a connected client and
+/// the guard that stops the daemon when the test ends (even on a failed assertion).
+async fn daemon(
+    home: &std::path::Path,
+    envs: &[(&str, &std::path::Path)],
+) -> (Paths, Client, DaemonGuard) {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("daemon")
+        .env("TERMIST_HOME", home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd.spawn().unwrap();
+    let guard = DaemonGuard {
+        home: home.to_path_buf(),
+        child: Some(child),
     };
-    let paths = Paths::under(home.clone());
-    let mut c = None;
+    let paths = Paths::under(home.to_path_buf());
     for _ in 0..250 {
-        if let Ok(client) = Client::connect(&paths).await {
-            c = Some(client);
-            break;
+        if let Ok(c) = Client::connect(&paths).await {
+            return (paths, c, guard);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let mut c = c.expect("daemon never came up");
+    panic!("daemon never came up");
+}
 
+/// Creates a session of `kind` in `project_dir`, attaches wide, and plays one turn:
+/// answers the permission prompt with "y" and returns the status sequence and the screen.
+async fn play_turn(
+    c: &mut Client,
+    project_dir: &std::path::Path,
+    kind: SessionKind,
+) -> (SessionInfo, Vec<AgentStatus>, Snapshot) {
     c.send(&ClientRequest::AddProject {
-        path: tmp.path().to_path_buf(),
+        path: project_dir.to_path_buf(),
     })
     .await
     .unwrap();
-    let ServerEvent::State(state) =
-        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    let ServerEvent::State(state) = recv_until(c, |e| matches!(e, ServerEvent::State(_))).await
     else {
         unreachable!()
     };
-    let project = state.projects[0].id;
     c.send(&ClientRequest::CreateSession {
-        project,
-        kind: SessionKind::Agent {
-            harness: Harness::Claude,
-        },
+        project: state.projects[0].id,
+        kind,
         prompt: None,
-        cols: 100,
-        rows: 12,
+        cols: 300,
+        rows: 20,
     })
     .await
     .unwrap();
-    let ServerEvent::SessionUpdated(s) =
-        recv_until(&mut c, |e| matches!(e, ServerEvent::SessionUpdated(_))).await
+    let ServerEvent::SessionUpdated(mut info) =
+        recv_until(c, |e| matches!(e, ServerEvent::SessionUpdated(_))).await
     else {
         unreachable!()
     };
     c.send(&ClientRequest::Attach {
-        session: s.id,
-        cols: 100,
-        rows: 12,
+        session: info.id,
+        cols: 300,
+        rows: 20,
     })
     .await
     .unwrap();
-
-    let mut statuses = vec![];
-    let mut screen = Snapshot::default();
-    let mut answered = false;
+    let (mut statuses, mut screen, mut answered) = (vec![], Snapshot::default(), false);
     timeout(Duration::from_secs(15), async {
         loop {
             match c.recv().await.unwrap().unwrap() {
-                ServerEvent::SessionUpdated(info) if info.id == s.id => {
-                    if statuses.last() != Some(&info.status) && info.status != AgentStatus::Fresh {
-                        statuses.push(info.status);
+                ServerEvent::SessionUpdated(u) if u.id == info.id => {
+                    if statuses.last() != Some(&u.status) && u.status != AgentStatus::Fresh {
+                        statuses.push(u.status);
                     }
-                    if info.status == AgentStatus::NeedsFeedback && !answered {
+                    if u.status == AgentStatus::NeedsFeedback && !answered {
                         answered = true;
                         c.send(&ClientRequest::Input {
-                            session: s.id,
+                            session: u.id,
                             data: b"y\r".to_vec(),
                         })
                         .await
                         .unwrap();
                     }
-                    if info.status == AgentStatus::Unseen {
+                    let done = u.status == AgentStatus::Unseen;
+                    info = u;
+                    if done {
                         break;
                     }
                 }
-                ServerEvent::Screen { session, update } if session == s.id => screen.apply(&update),
+                ServerEvent::Screen { session, update } if session == info.id => {
+                    screen.apply(&update)
+                }
                 _ => {}
             }
         }
     })
     .await
-    .expect("turn never finished");
+    .expect("the turn never finished");
+    recv_until(c, |e| {
+        if let ServerEvent::Screen { update, .. } = e {
+            screen.apply(update);
+        }
+        (0..screen.rows as usize).any(|r| screen.line_text(r).contains("done: y"))
+    })
+    .await;
+    (info, statuses, screen)
+}
+
+fn screen_text(s: &Snapshot) -> String {
+    (0..s.rows as usize)
+        .map(|r| s.line_text(r) + "\n")
+        .collect()
+}
+
+#[tokio::test]
+async fn a_fake_claude_turn_end_to_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = fixture(tmp.path(), "fake-claude.sh");
+    let home = tmp.path().join("home");
+    let (_paths, mut c, mut guard) = daemon(&home, &[("TERMIST_CLAUDE_BIN", &agent)]).await;
+
+    let (_info, statuses, screen) = play_turn(
+        &mut c,
+        tmp.path(),
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
     assert_eq!(
         statuses,
         vec![
@@ -278,16 +320,7 @@ async fn a_fake_claude_turn_end_to_end() {
     );
 
     // the pane shows the launch arguments and the answer
-    recv_until(&mut c, |e| {
-        if let ServerEvent::Screen { update, .. } = e {
-            screen.apply(update);
-        }
-        (0..screen.rows as usize).any(|r| screen.line_text(r).contains("done: y"))
-    })
-    .await;
-    let text: String = (0..screen.rows as usize)
-        .map(|r| screen.line_text(r) + "\n")
-        .collect();
+    let text = screen_text(&screen);
     assert!(text.contains("--session-id"), "{text}");
     assert!(text.contains("--settings"), "{text}");
 
@@ -303,6 +336,127 @@ async fn a_fake_claude_turn_end_to_end() {
         assert!(Instant::now() < deadline, "daemon did not exit after kill");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[tokio::test]
+async fn a_codex_turn_through_its_real_hook_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fixture(tmp.path(), "fake-codex.sh");
+    let (_paths, mut c, _guard) =
+        daemon(&tmp.path().join("home"), &[("TERMIST_CODEX_BIN", &bin)]).await;
+    let (info, statuses, screen) = play_turn(
+        &mut c,
+        tmp.path(),
+        SessionKind::Agent {
+            harness: Harness::Codex,
+        },
+    )
+    .await;
+    assert_eq!(
+        statuses,
+        vec![
+            AgentStatus::Running,
+            AgentStatus::NeedsFeedback,
+            AgentStatus::Running,
+            AgentStatus::Unseen
+        ]
+    );
+    assert_eq!(info.agent_session_id.as_deref(), Some("codex-e2e-1"));
+    let text = screen_text(&screen);
+    assert!(
+        text.contains("hooks.state."),
+        "trust entries are passed: {text}"
+    );
+    assert!(!text.contains("dangerously"));
+}
+
+#[tokio::test]
+async fn an_opencode_turn_ignores_its_subagent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fixture(tmp.path(), "fake-opencode.sh");
+    let (_paths, mut c, _guard) =
+        daemon(&tmp.path().join("home"), &[("TERMIST_OPENCODE_BIN", &bin)]).await;
+    let (info, statuses, screen) = play_turn(
+        &mut c,
+        tmp.path(),
+        SessionKind::Agent {
+            harness: Harness::OpenCode,
+        },
+    )
+    .await;
+    assert_eq!(
+        statuses,
+        vec![
+            AgentStatus::Running,
+            AgentStatus::NeedsFeedback,
+            AgentStatus::Running,
+            AgentStatus::Unseen
+        ]
+    );
+    assert_eq!(info.agent_session_id.as_deref(), Some("ses_parent"));
+    assert!(
+        screen_text(&screen).contains("plugin: ok"),
+        "the plugin was written into OPENCODE_CONFIG_DIR"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_session_survives_kill_and_restart_and_resumes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fixture(tmp.path(), "fake-claude.sh");
+    let home = tmp.path().join("home");
+    let session = {
+        let (_paths, mut c, _guard) = daemon(&home, &[("TERMIST_CLAUDE_BIN", &bin)]).await;
+        let (info, _, _) = play_turn(
+            &mut c,
+            tmp.path(),
+            SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+        )
+        .await;
+        assert_eq!(info.agent_session_id.as_deref(), Some("fake-session"));
+        info
+        // _guard drops here: `termist kill`, the daemon exits, the record stays
+    };
+    let (_paths, mut c, _guard) = daemon(&home, &[("TERMIST_CLAUDE_BIN", &bin)]).await;
+    c.send(&ClientRequest::ListState).await.unwrap();
+    let ServerEvent::State(state) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    else {
+        unreachable!()
+    };
+    let restored = state
+        .sessions
+        .iter()
+        .find(|s| s.id == session.id)
+        .expect("the session was stored");
+    assert_eq!(restored.status, AgentStatus::Disconnected);
+    assert_eq!(restored.agent_session_id.as_deref(), Some("fake-session"));
+    c.send(&ClientRequest::Resume {
+        session: session.id,
+        cols: 300,
+        rows: 20,
+    })
+    .await
+    .unwrap();
+    c.send(&ClientRequest::Attach {
+        session: session.id,
+        cols: 300,
+        rows: 20,
+    })
+    .await
+    .unwrap();
+    let mut screen = Snapshot::default();
+    recv_until(&mut c, |e| {
+        if let ServerEvent::Screen { session: s, update } = e
+            && *s == session.id
+        {
+            screen.apply(update);
+        }
+        screen_text(&screen).contains("--resume fake-session")
+    })
+    .await;
 }
 
 /// Kills the TUI running in the test PTY when dropped.
