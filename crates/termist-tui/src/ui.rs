@@ -619,4 +619,12 @@ mod tests {
         assert!(text.contains("◆ mine"));
         assert!(!text.contains("Auto Title"));
     }
+
+    #[test]
+    fn palette_over_the_grid() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('/')));
+        insta::assert_snapshot!(render(&mut app, 70, 16).backend());
+    }
 }

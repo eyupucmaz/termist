@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::overlay::{Overlay, QuickPrompt};
 use crate::text_input::TextInput;
+use crate::ui::status_style;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -216,6 +217,41 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             text_box(f, body, &format!("follow-up · {name}"), 64, input, top);
         }
         Overlay::Rename { input, .. } => text_box(f, body, "rename", 48, input, top),
+        Overlay::Palette(picker) => {
+            let rows = picker
+                .visible()
+                .filter_map(|(_, id, on)| {
+                    let s = app.state.sessions.iter().find(|s| s.id == *id)?;
+                    let project = app
+                        .state
+                        .projects
+                        .iter()
+                        .find(|p| p.id == s.project)
+                        .map_or("", |p| p.name.as_str());
+                    let (glyph, color, word) = status_style(s.status);
+                    Some(Line::from(vec![
+                        Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                        Span::styled(
+                            format!("{project:<14} {:<24}", s.display_name()),
+                            highlighted(Style::default(), on),
+                        ),
+                        Span::styled(format!(" {} · {word}", s.kind.label()), dim()),
+                    ]))
+                })
+                .collect();
+            draw_list(
+                f,
+                body,
+                ListBox {
+                    title: "sessions".into(),
+                    width: 64,
+                    query: picker.query().map(str::to_string),
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -257,5 +293,6 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
         Overlay::FollowUp { .. } => "Enter send to the agent · Esc cancel",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
+        Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
     }
 }

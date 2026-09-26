@@ -1,12 +1,13 @@
 use crate::encode::{encode_key, encode_paste};
-use crate::list_picker::Pick;
+use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{self, ModelChoice, ModelPicker, Overlay, QuickPrompt};
 use crate::text_input::{Edit, TextInput};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
-    ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, next_in_attention,
+    ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
+    next_in_attention,
 };
 
 /// How many earlier prompts the quick prompt asks for.
@@ -98,6 +99,23 @@ impl App {
     /// The projects shown as tabs.
     pub fn open_projects(&self) -> impl Iterator<Item = &ProjectInfo> {
         self.state.projects.iter().filter(|p| p.open)
+    }
+
+    /// Sessions the palette and `.` / `,` can reach: not archived, in an open project.
+    pub fn visible_sessions(&self) -> Vec<SessionInfo> {
+        self.state
+            .sessions
+            .iter()
+            .filter(|s| {
+                !s.archived
+                    && self
+                        .state
+                        .projects
+                        .iter()
+                        .any(|p| p.id == s.project && p.open)
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn selected_info(&self) -> Option<&SessionInfo> {
@@ -257,6 +275,7 @@ impl App {
                         }
                     }
                     KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
+                    KeyCode::Char('/') => self.open_palette(),
                     KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
                     _ => {}
                 }
@@ -273,6 +292,7 @@ impl App {
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
                     KeyCode::Char(' ') => self.open_follow_up(),
                     KeyCode::Char('r') => self.open_rename(),
+                    KeyCode::Char('/') => self.open_palette(),
                     KeyCode::Char('d') => {
                         if let Some(id) = self.selected {
                             self.mode = Mode::ConfirmKill(id);
@@ -365,6 +385,7 @@ impl App {
             Some(Overlay::Project(_)) => self.project_key(key),
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
+            Some(Overlay::Palette(_)) => self.palette_key(key),
             None => vec![],
         }
     }
@@ -686,6 +707,50 @@ impl App {
         ]
     }
 
+    /// The list is fixed when it opens (attention order then); the rows show live status.
+    fn open_palette(&mut self) {
+        let sessions = self.visible_sessions();
+        let labels: HashMap<SessionId, String> = sessions
+            .iter()
+            .map(|s| {
+                let project = self
+                    .state
+                    .projects
+                    .iter()
+                    .find(|p| p.id == s.project)
+                    .map_or("", |p| p.name.as_str());
+                (
+                    s.id,
+                    format!("{project} {} {}", s.display_name(), s.kind.label()),
+                )
+            })
+            .collect();
+        let order = attention_order(&sessions);
+        self.overlays.push(Overlay::Palette(ListPicker::new(
+            order,
+            |id| labels.get(id).cloned().unwrap_or_default(),
+            true,
+        )));
+    }
+
+    /// Enter goes to the session: its project and card. Focus mode stays focus mode.
+    fn palette_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Palette(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if picker.key(key) == Pick::Chosen
+            && let Some(id) = picker.selected().copied()
+        {
+            self.overlays.pop();
+            self.select(id);
+        }
+        vec![]
+    }
+
     /// `r`: the box starts with the name the card shows.
     fn open_rename(&mut self) {
         let Some(info) = self.selected_info() else {
@@ -748,7 +813,8 @@ impl App {
     fn navigate(&mut self, c: char) {
         match c {
             '.' | ',' => {
-                if let Some(id) = next_in_attention(&self.state.sessions, self.selected, c == '.') {
+                let visible = self.visible_sessions();
+                if let Some(id) = next_in_attention(&visible, self.selected, c == '.') {
                     self.select(id);
                 }
             }
@@ -1778,5 +1844,86 @@ mod tests {
         assert!(sent(&app.on_key(k(K::Enter))).is_empty());
         assert_eq!(app.message.as_deref(), Some("a name cannot be empty"));
         assert_eq!(app.overlays.len(), 1);
+    }
+
+    fn palette(app: &App) -> Vec<SessionId> {
+        match app.overlays.last() {
+            Some(Overlay::Palette(p)) => p.visible().map(|(_, id, _)| *id).collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_lists_the_sessions_by_attention_and_enter_goes_there() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('/')));
+        assert_eq!(palette(&app), vec![s[3].id, s[2].id, s[1].id, s[0].id]);
+        app.on_key(k(K::Enter));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            (app.project, app.selected),
+            (Some(s[3].project), Some(s[3].id))
+        );
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    #[test]
+    fn typing_narrows_the_palette_by_project_and_name() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('/')));
+        type_text(&mut app, "web");
+        assert_eq!(palette(&app), vec![s[3].id]);
+        app.on_key(k(K::Backspace));
+        app.on_key(k(K::Backspace));
+        app.on_key(k(K::Backspace));
+        type_text(&mut app, "a2");
+        assert_eq!(palette(&app), vec![s[1].id]);
+    }
+
+    #[test]
+    fn the_palette_from_focus_mode_keeps_you_focused_on_the_new_card() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Char('/')));
+        app.on_key(k(K::Down));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!((app.selected, app.mode), (Some(s[2].id), Mode::Focus));
+        assert!(sent(&actions).contains(&&ClientRequest::Attach {
+            session: s[2].id,
+            cols: 80,
+            rows: 20
+        }));
+    }
+
+    // An archived card whose hooks keep coming (it may still be finishing) and the
+    // sessions of a closed project are out of reach of the palette and of `.` / `,`.
+    #[test]
+    fn archived_and_closed_sessions_are_left_out_of_the_palette_and_the_attention_order() {
+        let (mut app, s) = app();
+        let mut archived = s[2].clone();
+        archived.archived = true;
+        archived.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(archived));
+        let mut state = app.state.clone();
+        state.projects[1].open = false;
+        app.on_event(ServerEvent::State(state));
+        app.on_key(k(K::Char('/')));
+        assert_eq!(palette(&app), vec![s[1].id, s[0].id]);
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('.')));
+        assert_eq!(
+            app.selected,
+            Some(s[1].id),
+            "the unread card, not the archived one"
+        );
+        app.on_key(k(K::Char('.')));
+        assert_eq!(app.selected, Some(s[0].id));
+        app.on_key(k(K::Char('.')));
+        assert_eq!(
+            app.selected,
+            Some(s[1].id),
+            "and never the closed project's"
+        );
     }
 }

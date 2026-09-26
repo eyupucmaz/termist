@@ -27,6 +27,8 @@ pub enum Overlay {
         session: SessionId,
         input: TextInput,
     },
+    /// `/` and `C-a /`: every session in the open projects, by attention.
+    Palette(ListPicker<SessionId>),
 }
 
 impl Overlay {
