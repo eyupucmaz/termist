@@ -69,11 +69,28 @@ pub fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// `codex [resume <id>] -c hooks.… -c hooks.state=… [prompt]`.
-pub fn args(exe: &Path, resume: Option<&str>, prompt: Option<&str>) -> Vec<String> {
+/// `codex [resume <id>] [-m <model>] [-c model_reasoning_effort="<level>"]
+/// -c hooks.… -c hooks.state=… [prompt]`. The effort flag is not a hook, so it does
+/// not change the trust hashes.
+pub fn args(
+    exe: &Path,
+    resume: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    prompt: Option<&str>,
+) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(id) = resume {
         args.extend(["resume".to_string(), id.to_string()]);
+    }
+    if let Some(m) = model {
+        args.extend(["-m".to_string(), m.to_string()]);
+    }
+    if let Some(e) = effort {
+        args.extend([
+            "-c".to_string(),
+            format!("model_reasoning_effort={}", toml_string(e)),
+        ]);
     }
     let mut state_entries = Vec::with_capacity(EVENTS.len());
     for ev in EVENTS {
@@ -155,7 +172,7 @@ mod tests {
     #[test]
     fn every_hook_is_paired_with_its_trust_entry() {
         let exe = Path::new("/usr/local/bin/termist");
-        let args = args(exe, None, Some("fix it"));
+        let args = args(exe, None, None, None, Some("fix it"));
         assert!(!args.iter().any(|a| a.contains("dangerously")));
         assert!(
             !args.iter().any(|a| a.contains(".trusted_hash=")),
@@ -204,9 +221,41 @@ mod tests {
 
     #[test]
     fn resume_comes_first_and_drops_the_prompt() {
-        let args = args(Path::new("/t"), Some("019a-uuid"), Some("ignored"));
+        let args = args(
+            Path::new("/t"),
+            Some("019a-uuid"),
+            None,
+            None,
+            Some("ignored"),
+        );
         assert_eq!(&args[..2], ["resume", "019a-uuid"]);
         assert!(!args.contains(&"ignored".to_string()));
+    }
+
+    #[test]
+    fn model_and_effort_come_before_the_hooks_and_the_prompt_stays_last() {
+        let args = args(
+            Path::new("/t"),
+            Some("019a-uuid"),
+            Some("gpt-5"),
+            Some("high"),
+            None,
+        );
+        assert_eq!(
+            &args[..6],
+            [
+                "resume",
+                "019a-uuid",
+                "-m",
+                "gpt-5",
+                "-c",
+                "model_reasoning_effort=\"high\""
+            ]
+        );
+        let args = self::args(Path::new("/t"), None, Some("gpt-5"), None, Some("go"));
+        assert_eq!(&args[..2], ["-m", "gpt-5"]);
+        assert!(!args.iter().any(|a| a.contains("model_reasoning_effort")));
+        assert_eq!(args.last().map(String::as_str), Some("go"));
     }
 
     #[test]

@@ -1221,3 +1221,46 @@ async fn a_running_session_cannot_be_resumed() {
         _ => unreachable!(),
     }
 }
+
+#[tokio::test]
+async fn model_and_effort_reach_the_cli_and_come_back_on_resume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(echo_agent(tmp.path(), "claude", true)),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    c.send(&ClientRequest::CreateSession {
+        project,
+        kind: SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+        prompt: Some("fix it".into()),
+        model: Some("  my model  ".into()),
+        effort: Some("high".into()),
+        cols: 400,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    let s = match next_event(&mut c, |e| matches!(e, ServerEvent::SessionUpdated(_))).await {
+        ServerEvent::SessionUpdated(s) => s,
+        _ => unreachable!(),
+    };
+    assert_eq!(s.model.as_deref(), Some("my model"), "trimmed");
+    assert_eq!(s.effort.as_deref(), Some("high"));
+    exited(&mut c, s.id).await;
+    c.send(&ClientRequest::Attach {
+        session: s.id,
+        cols: 400,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    wait_screen_text(&mut c, s.id, "--model my model --effort high --session-id").await;
+    let back = resume(&mut c, s.id).await;
+    assert_eq!(back.model.as_deref(), Some("my model"));
+    wait_screen_text(&mut c, s.id, "--model my model --effort high --session-id").await;
+}

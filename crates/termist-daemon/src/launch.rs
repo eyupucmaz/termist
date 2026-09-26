@@ -109,6 +109,10 @@ pub struct LaunchRequest<'a> {
     pub id: SessionId,
     pub kind: &'a SessionKind,
     pub prompt: Option<&'a str>,
+    /// Passed as the CLI's model flag; `None` passes no flag.
+    pub model: Option<&'a str>,
+    /// Passed as the CLI's effort flag (Claude, Codex); `None` passes no flag.
+    pub effort: Option<&'a str>,
     pub cwd: &'a Path,
     pub cols: u16,
     pub rows: u16,
@@ -117,7 +121,7 @@ pub struct LaunchRequest<'a> {
 
 pub struct Launch {
     pub spec: SpawnSpec,
-    /// Known up front for Claude (`--session-id`); used for resume in Plan 2.
+    /// Known up front for Claude (`--session-id`); resume passes it back.
     pub agent_session_id: Option<String>,
 }
 
@@ -160,6 +164,12 @@ impl Launcher {
                     "--settings".to_string(),
                     self.claude_settings.display().to_string(),
                 ];
+                if let Some(m) = req.model {
+                    args.extend(["--model".to_string(), m.to_string()]);
+                }
+                if let Some(e) = req.effort {
+                    args.extend(["--effort".to_string(), e.to_string()]);
+                }
                 let sid = match req.resume {
                     Some(id) => {
                         args.extend(["--resume".to_string(), id.to_string()]);
@@ -184,7 +194,7 @@ impl Launcher {
                 harness: Harness::Codex,
             } => (
                 self.programs.get(Harness::Codex).to_string(),
-                crate::codex::args(&self.exe, req.resume, req.prompt),
+                crate::codex::args(&self.exe, req.resume, req.model, req.effort, req.prompt),
                 req.resume.map(str::to_string),
             ),
             SessionKind::Agent {
@@ -196,7 +206,7 @@ impl Launcher {
                 ));
                 (
                     self.programs.get(Harness::OpenCode).to_string(),
-                    crate::opencode::args(req.resume),
+                    crate::opencode::args(req.resume, req.model, req.prompt),
                     req.resume.map(str::to_string),
                 )
             }
@@ -265,6 +275,8 @@ mod tests {
             id,
             kind: &SessionKind::Shell,
             prompt: None,
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -283,7 +295,7 @@ mod tests {
         assert_eq!(
             env(&l, "TERMIST_RUNTIME_DIR").as_deref(),
             Some("/run/termist"),
-            "hooks must reach the daemon that spawned them (PRD §11.4)"
+            "hooks must reach the daemon that spawned them"
         );
         assert_eq!(env(&l, "TERMIST_HOME"), None);
     }
@@ -296,6 +308,8 @@ mod tests {
             id: SessionId::new(),
             kind: &SessionKind::Shell,
             prompt: None,
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -313,6 +327,8 @@ mod tests {
             id: SessionId::new(),
             kind: &kind,
             prompt: Some("fix the login redirect"),
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -337,6 +353,8 @@ mod tests {
             id: SessionId::new(),
             kind: &kind,
             prompt: None,
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -395,6 +413,8 @@ mod tests {
             id: SessionId::new(),
             kind: &kind,
             prompt: None,
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -410,21 +430,23 @@ mod tests {
     }
 
     #[test]
-    fn opencode_runs_with_our_config_dir() {
+    fn opencode_runs_with_our_config_dir_and_the_prompt_as_a_flag() {
         let kind = SessionKind::Agent {
             harness: Harness::OpenCode,
         };
         let l = launcher().launch(LaunchRequest {
             id: SessionId::new(),
             kind: &kind,
-            prompt: Some("ignored for now"),
+            prompt: Some("fix it"),
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
             resume: None,
         });
         assert_eq!(l.spec.program, "/fake/opencode");
-        assert!(l.spec.args.is_empty());
+        assert_eq!(l.spec.args, ["--prompt", "fix it"]);
         let dir = env(&l, "OPENCODE_CONFIG_DIR").or_else(|| env(&l, "OPENCODE_CONFIG_CONTENT"));
         assert!(dir.is_some_and(|d| d.contains("/data/opencode")));
     }
@@ -434,6 +456,8 @@ mod tests {
             id: SessionId::new(),
             kind: &kind,
             prompt: Some("ignored"),
+            model: None,
+            effort: None,
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
@@ -477,5 +501,93 @@ mod tests {
         let s = resumed(SessionKind::Shell, "whatever");
         assert!(s.spec.args.is_empty());
         assert_eq!(s.agent_session_id, None);
+    }
+
+    fn with_model(
+        harness: Harness,
+        model: &str,
+        effort: Option<&str>,
+        resume: Option<&str>,
+    ) -> Launch {
+        launcher().launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &SessionKind::Agent { harness },
+            prompt: Some("fix it"),
+            model: Some(model),
+            effort,
+            cwd: Path::new("/p"),
+            cols: 80,
+            rows: 24,
+            resume,
+        })
+    }
+
+    #[test]
+    fn claude_gets_model_and_effort_before_its_session_flags() {
+        let l = with_model(Harness::Claude, "opus", Some("xhigh"), None);
+        assert_eq!(
+            &l.spec.args[..6],
+            [
+                "--settings",
+                "/data/claude-hooks.json",
+                "--model",
+                "opus",
+                "--effort",
+                "xhigh"
+            ]
+        );
+        assert_eq!(l.spec.args[6], "--session-id");
+        assert_eq!(l.spec.args.last().unwrap(), "fix it");
+    }
+
+    #[test]
+    fn resume_passes_the_model_and_effort_again() {
+        let c = with_model(Harness::Claude, "opus", Some("max"), Some("c-1"));
+        assert_eq!(
+            c.spec.args,
+            [
+                "--settings",
+                "/data/claude-hooks.json",
+                "--model",
+                "opus",
+                "--effort",
+                "max",
+                "--resume",
+                "c-1"
+            ]
+        );
+        let x = with_model(Harness::Codex, "gpt-5", Some("low"), Some("x-1"));
+        assert_eq!(
+            &x.spec.args[..6],
+            [
+                "resume",
+                "x-1",
+                "-m",
+                "gpt-5",
+                "-c",
+                "model_reasoning_effort=\"low\""
+            ]
+        );
+        let o = with_model(Harness::OpenCode, "openai/gpt-5", None, Some("ses_1"));
+        assert_eq!(o.spec.args, ["--session", "ses_1", "-m", "openai/gpt-5"]);
+    }
+
+    // A model name typed by the user goes to the CLI as one argument, exactly as
+    // typed: there is no shell in between to split or unquote it.
+    #[test]
+    fn a_model_name_with_spaces_and_quotes_is_one_argument() {
+        let odd = r#"my "odd" model's name"#;
+        for (harness, flag) in [
+            (Harness::Claude, "--model"),
+            (Harness::Codex, "-m"),
+            (Harness::OpenCode, "-m"),
+        ] {
+            let args = with_model(harness, odd, None, None).spec.args;
+            let at = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("{harness:?}: no {flag} in {args:?}"));
+            assert_eq!(args[at + 1], odd, "{harness:?}");
+        }
     }
 }

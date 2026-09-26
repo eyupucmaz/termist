@@ -235,12 +235,14 @@ impl Registry {
                 project,
                 kind,
                 prompt,
-                model: _,
-                effort: _,
+                model,
+                effort,
                 cols,
                 rows,
             } => {
-                if let Err(e) = self.create_session(project, kind, prompt, cols, rows) {
+                if let Err(e) =
+                    self.create_session(project, kind, prompt, model, effort, (cols, rows))
+                {
                     self.send(
                         client,
                         ServerEvent::Error {
@@ -565,17 +567,35 @@ impl Registry {
         project: ProjectId,
         kind: SessionKind,
         prompt: Option<String>,
-        cols: u16,
-        rows: u16,
+        model: Option<String>,
+        effort: Option<String>,
+        (cols, rows): (u16, u16),
     ) -> anyhow::Result<()> {
         let Some(proj) = self.projects.iter().find(|p| p.id == project) else {
             bail!("unknown project")
+        };
+        // A shell has no model or effort; an agent only takes an effort its CLI knows.
+        let (model, effort) = match &kind {
+            SessionKind::Shell => (None, None),
+            SessionKind::Agent { harness } => {
+                if let Some(e) = &effort
+                    && !harness.efforts().contains(&e.as_str())
+                {
+                    bail!("{} has no effort level {e:?}", harness.id());
+                }
+                let model = model
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty());
+                (model, effort)
+            }
         };
         let id = SessionId::new();
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &kind,
             prompt: prompt.as_deref(),
+            model: model.as_deref(),
+            effort: effort.as_deref(),
             cwd: &proj.path,
             cols,
             rows,
@@ -594,8 +614,8 @@ impl Registry {
             agent_session_id: launch.agent_session_id,
             title: None,
             last_activity_ms: now_ms(),
-            model: None,
-            effort: None,
+            model,
+            effort,
             user_named: false,
             archived: false,
         };
@@ -618,6 +638,7 @@ impl Registry {
             bail!("the project of {} is gone", info.name)
         };
         let kind = info.kind.clone();
+        let (model, effort) = (info.model.clone(), info.effort.clone());
         // Without a conversation to resume (no prompt yet), start the agent fresh.
         let resume = if self.sessions[pos].resumable {
             info.agent_session_id.clone()
@@ -628,6 +649,8 @@ impl Registry {
             id,
             kind: &kind,
             prompt: None,
+            model: model.as_deref(),
+            effort: effort.as_deref(),
             cwd: &project.path,
             cols,
             rows,
@@ -813,5 +836,26 @@ mod tests {
             ServerEvent::SessionUpdated(info) => assert!(info.last_activity_ms > 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_effort_the_cli_does_not_know_is_refused_before_anything_starts() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let agent = |harness| SessionKind::Agent { harness };
+        for (harness, effort) in [(Harness::Claude, "turbo"), (Harness::OpenCode, "high")] {
+            let err = reg
+                .create_session(
+                    p.id,
+                    agent(harness),
+                    None,
+                    None,
+                    Some(effort.into()),
+                    (80, 24),
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("no effort level"), "{err}");
+        }
+        assert!(reg.sessions.is_empty());
     }
 }
