@@ -1,4 +1,5 @@
 use crate::app::{Action, App};
+use crate::browse::{self, Listing};
 use crate::ui;
 use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
@@ -16,7 +17,7 @@ use termist_core::{ClientRequest, ServerEvent};
 use termist_platform::framed::write_frame;
 use termist_platform::ipc::SendHalf;
 use termist_platform::{Client, Paths};
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 pub async fn connect_or_spawn(paths: &Paths) -> anyhow::Result<Client> {
     match Client::connect(paths).await {
@@ -132,6 +133,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         }
     });
 
+    let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
     let mut app = App::new();
     let result: anyhow::Result<()> = async {
         loop {
@@ -139,7 +141,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             let areas = ui::layout(Rect::new(0, 0, size.width, size.height), app.project_sessions().len());
             app.cards_per_row = areas.cards_per_row;
             let resize = app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
-            if perform(resize, &mut writer).await? {
+            if perform(resize, &mut writer, &listing_tx).await? {
                 return Ok(());
             }
             terminal.draw(|f| ui::draw(f, &app, &areas))?;
@@ -154,8 +156,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                     Some(ev) => app.on_event(ev),
                     None => bail!("the termist daemon went away"),
                 },
+                Some((dir, listing)) = listing_rx.recv() => {
+                    app.listed(&dir, listing);
+                    vec![]
+                }
             };
-            if perform(actions, &mut writer).await? {
+            if perform(actions, &mut writer, &listing_tx).await? {
                 return Ok(());
             }
         }
@@ -186,11 +192,26 @@ fn set_panic_hook(enhanced: bool) {
     }));
 }
 
-/// Sends requests; returns `true` when the user asked to quit.
-async fn perform(actions: Vec<Action>, writer: &mut SendHalf) -> anyhow::Result<bool> {
+/// A folder listing, for the folder it lists.
+type Listed = (PathBuf, Result<Listing, String>);
+
+/// Sends requests and starts folder listings; returns `true` when the user asked to quit.
+async fn perform(
+    actions: Vec<Action>,
+    writer: &mut SendHalf,
+    listings: &UnboundedSender<Listed>,
+) -> anyhow::Result<bool> {
     for action in actions {
         match action {
             Action::Send(req) => write_frame(writer, &req).await?,
+            // A slow or hung folder (a network mount) blocks only that thread.
+            Action::ListDir(dir) => {
+                let listings = listings.clone();
+                tokio::task::spawn_blocking(move || {
+                    let listing = browse::list_dir(&dir);
+                    let _ = listings.send((dir, listing));
+                });
+            }
             Action::Quit => return Ok(true),
         }
     }

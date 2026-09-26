@@ -1,8 +1,10 @@
 //! What is open on top of the grid or the focused pane. The top of `App::overlays`
 //! gets every key; Esc closes it and Ctrl+Q closes them all, so a picker opened from
 //! the quick prompt returns to it with the text still there.
+use crate::browse::{DirEntry, Listing};
 use crate::list_picker::ListPicker;
 use crate::text_input::TextInput;
+use std::path::PathBuf;
 use termist_core::{Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo, SessionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +31,8 @@ pub enum Overlay {
     },
     /// `/` and `C-a /`: every session in the open projects, by attention.
     Palette(ListPicker<SessionId>),
+    /// `o`: the known projects, then a folder browser.
+    OpenProject(OpenProject),
 }
 
 impl Overlay {
@@ -71,6 +75,86 @@ pub fn project_picker(projects: Vec<ProjectInfo>, current: ProjectId) -> ListPic
         picker.select_index(i);
     }
     picker
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrowseEntry {
+    Project(ProjectInfo),
+    Dir(DirEntry),
+}
+
+impl BrowseEntry {
+    pub fn label(&self) -> String {
+        match self {
+            BrowseEntry::Project(p) => p.name.clone(),
+            BrowseEntry::Dir(d) => d.name.clone(),
+        }
+    }
+}
+
+/// Known projects on top (closed ones first), the folders of `dir` below them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenProject {
+    pub dir: PathBuf,
+    pub list: ListPicker<BrowseEntry>,
+    projects: Vec<ProjectInfo>,
+    /// The folders of `dir` are on their way.
+    pub loading: bool,
+    pub error: Option<String>,
+    /// More folders than are shown.
+    pub truncated: bool,
+}
+
+impl OpenProject {
+    pub fn new(projects: &[ProjectInfo], dir: PathBuf) -> OpenProject {
+        let mut projects = projects.to_vec();
+        projects.sort_by_key(|p| p.open);
+        let mut open = OpenProject {
+            dir: PathBuf::new(),
+            list: ListPicker::new(vec![], BrowseEntry::label, true),
+            projects,
+            loading: false,
+            error: None,
+            truncated: false,
+        };
+        open.enter(dir);
+        open
+    }
+
+    /// Moves to `dir`: its folders are unknown until `listed` gets them.
+    pub fn enter(&mut self, dir: PathBuf) {
+        self.dir = dir;
+        self.loading = true;
+        self.error = None;
+        self.truncated = false;
+        self.list = ListPicker::new(self.entries(vec![]), BrowseEntry::label, true);
+    }
+
+    /// The folders of `self.dir`, or why they could not be read.
+    pub fn listed(&mut self, listing: Result<Listing, String>) {
+        self.loading = false;
+        let dirs = match listing {
+            Ok(listing) => {
+                self.truncated = listing.truncated;
+                listing.entries
+            }
+            Err(e) => {
+                self.error = Some(e);
+                vec![]
+            }
+        };
+        let entries = self.entries(dirs);
+        self.list.set_items(entries, BrowseEntry::label);
+    }
+
+    fn entries(&self, dirs: Vec<DirEntry>) -> Vec<BrowseEntry> {
+        self.projects
+            .iter()
+            .cloned()
+            .map(BrowseEntry::Project)
+            .chain(dirs.into_iter().map(BrowseEntry::Dir))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

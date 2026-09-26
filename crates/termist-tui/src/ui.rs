@@ -86,6 +86,8 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             "Connecting to the termist daemon…"
         } else if app.state.projects.is_empty() {
             "No project yet: run termist inside a project folder."
+        } else if app.project.is_none() {
+            "No project open · o opens one"
         } else {
             "No sessions yet.  n: new agent  ·  t: new shell"
         };
@@ -129,7 +131,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " termist ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    for p in &app.state.projects {
+    for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
@@ -294,6 +296,20 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .map_or("this session", |s| s.display_name());
             (
                 format!("Kill {name}? It stops the process.  y / Enter: kill · any key: cancel"),
+                Style::default().fg(Color::Yellow),
+            )
+        }
+        (_, Mode::ConfirmClose(id)) => {
+            let name = app
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == id)
+                .map_or("this project", |p| p.name.as_str());
+            (
+                format!(
+                    "Close {name}? Its sessions keep running.  y / Enter: close · any key: cancel"
+                ),
                 Style::default().fg(Color::Yellow),
             )
         }
@@ -625,6 +641,43 @@ mod tests {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
         app.on_key(key(K::Char('/')));
+        insta::assert_snapshot!(render(&mut app, 70, 16).backend());
+    }
+
+    #[test]
+    fn with_every_project_closed_the_grid_says_how_to_open_one() {
+        let mut app = fixture();
+        let mut state = app.state.clone();
+        state.projects[0].open = false;
+        app.on_event(ServerEvent::State(state));
+        let t = render(&mut app, 60, 10);
+        assert_eq!(row(&t, 0), " termist");
+        assert_eq!(row(&t, 1), "No project open · o opens one");
+    }
+
+    #[test]
+    fn open_project_browser() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('o')));
+        app.listed(
+            std::path::Path::new("/"),
+            Ok(crate::browse::Listing {
+                entries: vec![
+                    crate::browse::DirEntry {
+                        name: "notes".into(),
+                        path: "/notes".into(),
+                        git: false,
+                    },
+                    crate::browse::DirEntry {
+                        name: "orbit-web".into(),
+                        path: "/orbit-web".into(),
+                        git: true,
+                    },
+                ],
+                truncated: false,
+            }),
+        );
         insta::assert_snapshot!(render(&mut app, 70, 16).backend());
     }
 }

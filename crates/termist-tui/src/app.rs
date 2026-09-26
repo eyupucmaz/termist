@@ -1,9 +1,13 @@
+use crate::browse::Listing;
 use crate::encode::{encode_key, encode_paste};
 use crate::list_picker::{ListPicker, Pick};
-use crate::overlay::{self, ModelChoice, ModelPicker, Overlay, QuickPrompt};
+use crate::overlay::{
+    self, BrowseEntry, ModelChoice, ModelPicker, OpenProject, Overlay, QuickPrompt,
+};
 use crate::text_input::{Edit, TextInput};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
@@ -21,11 +25,15 @@ pub enum Mode {
     ConfirmQuit,
     /// `d` was pressed on this session; `y` / Enter kills it, any other key cancels.
     ConfirmKill(SessionId),
+    /// `x` was pressed on this project tab; `y` / Enter closes it.
+    ConfirmClose(ProjectId),
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Send(ClientRequest),
+    /// List a folder off the UI thread; the result comes back through `App::listed`.
+    ListDir(PathBuf),
     Quit,
 }
 
@@ -52,6 +60,14 @@ pub struct App {
     recent_models: HashMap<Harness, Vec<String>>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
+    /// A project asked to be opened (or a folder added); switched to when it arrives.
+    project_pending: Option<ProjectPending>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProjectPending {
+    Known(ProjectId),
+    Path(PathBuf),
 }
 
 impl Default for App {
@@ -85,6 +101,7 @@ impl App {
             recent_models: HashMap::new(),
             focus_next_created: false,
             resume_pending: None,
+            project_pending: None,
         }
     }
 
@@ -129,6 +146,7 @@ impl App {
             ServerEvent::State(state) => {
                 self.state = state;
                 self.connected = true;
+                self.switch_to_pending_project();
                 self.repair_selection();
             }
             ServerEvent::SessionUpdated(info) => {
@@ -182,6 +200,7 @@ impl App {
             ServerEvent::Error { message } => {
                 self.focus_next_created = false;
                 self.resume_pending = None;
+                self.project_pending = None;
                 self.message = Some(message);
             }
             ServerEvent::Harnesses(list) => {
@@ -251,6 +270,13 @@ impl App {
                 }
                 return vec![];
             }
+            Mode::ConfirmClose(project) => {
+                self.mode = Mode::Grid;
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                    return vec![Action::Send(ClientRequest::CloseProject { project })];
+                }
+                return vec![];
+            }
             Mode::Focus => {
                 if ctrl && key.code == KeyCode::Char('a') {
                     self.mode = Mode::FocusPrefix;
@@ -301,10 +327,20 @@ impl App {
                     KeyCode::Char(']') => self.switch_project(1),
                     KeyCode::Char('[') => self.switch_project(-1),
                     KeyCode::Char(c @ '1'..='9') => {
-                        if let Some(p) = self.state.projects.get(c as usize - '1' as usize) {
-                            self.project = Some(p.id);
+                        let tab = self
+                            .open_projects()
+                            .nth(c as usize - '1' as usize)
+                            .map(|p| p.id);
+                        if let Some(id) = tab {
+                            self.project = Some(id);
                             self.selected = None;
                             self.repair_selection();
+                        }
+                    }
+                    KeyCode::Char('o') => actions.extend(self.open_project_browser()),
+                    KeyCode::Char('x') => {
+                        if let Some(project) = self.project {
+                            self.mode = Mode::ConfirmClose(project);
                         }
                     }
                     KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
@@ -386,6 +422,7 @@ impl App {
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
+            Some(Overlay::OpenProject(_)) => self.open_project_key(key),
             None => vec![],
         }
     }
@@ -751,6 +788,79 @@ impl App {
         vec![]
     }
 
+    /// `o`: starts in the folder around the current project, or the home folder.
+    fn open_project_browser(&mut self) -> Vec<Action> {
+        let dir = self
+            .project
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+            .and_then(|p| p.path.parent().map(Path::to_path_buf))
+            .or_else(std::env::home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.overlays.push(Overlay::OpenProject(OpenProject::new(
+            &self.state.projects,
+            dir.clone(),
+        )));
+        vec![Action::ListDir(dir)]
+    }
+
+    /// A folder listing arrived; one for a folder the browser already left is dropped.
+    pub fn listed(&mut self, dir: &Path, listing: Result<Listing, String>) {
+        for o in &mut self.overlays {
+            if let Overlay::OpenProject(open) = o
+                && open.dir == dir
+                && open.loading
+            {
+                open.listed(listing);
+                return;
+            }
+        }
+    }
+
+    /// Enter opens a project or goes into a folder; Tab opens a folder as a project;
+    /// → goes in, ← goes up.
+    fn open_project_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::OpenProject(open)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let chosen = open.list.selected().cloned();
+        match (key.code, chosen) {
+            (KeyCode::Esc, _) => {
+                self.overlays.pop();
+            }
+            (KeyCode::Left, _) => {
+                if let Some(parent) = open.dir.parent().map(Path::to_path_buf) {
+                    open.enter(parent.clone());
+                    return vec![Action::ListDir(parent)];
+                }
+            }
+            (KeyCode::Right | KeyCode::Enter, Some(BrowseEntry::Dir(d))) => {
+                open.enter(d.path.clone());
+                return vec![Action::ListDir(d.path)];
+            }
+            (KeyCode::Tab, Some(BrowseEntry::Dir(d))) => {
+                self.overlays.pop();
+                let path = std::fs::canonicalize(&d.path).unwrap_or(d.path);
+                self.project_pending = Some(ProjectPending::Path(path.clone()));
+                return vec![Action::Send(ClientRequest::AddProject { path })];
+            }
+            (KeyCode::Enter | KeyCode::Tab, Some(BrowseEntry::Project(p))) => {
+                self.overlays.pop();
+                if p.open {
+                    self.project = Some(p.id);
+                    self.selected = None;
+                    self.repair_selection();
+                    return vec![];
+                }
+                self.project_pending = Some(ProjectPending::Known(p.id));
+                return vec![Action::Send(ClientRequest::OpenProject { project: p.id })];
+            }
+            _ => {
+                open.list.key(key);
+            }
+        }
+        vec![]
+    }
+
     /// `r`: the box starts with the name the card shows.
     fn open_rename(&mut self) {
         let Some(info) = self.selected_info() else {
@@ -840,17 +950,39 @@ impl App {
     }
 
     fn switch_project(&mut self, delta: isize) {
-        let n = self.state.projects.len() as isize;
+        let open: Vec<ProjectId> = self.open_projects().map(|p| p.id).collect();
+        let n = open.len() as isize;
         if n == 0 {
             return;
         }
         let pos = self
             .project
-            .and_then(|p| self.state.projects.iter().position(|x| x.id == p))
+            .and_then(|p| open.iter().position(|x| *x == p))
             .unwrap_or(0) as isize;
-        self.project = Some(self.state.projects[((pos + delta).rem_euclid(n)) as usize].id);
+        self.project = Some(open[((pos + delta).rem_euclid(n)) as usize]);
         self.selected = None;
         self.repair_selection();
+    }
+
+    /// After `OpenProject` or `AddProject`, the state that has the project open brings
+    /// its tab to the front.
+    fn switch_to_pending_project(&mut self) {
+        let found = match &self.project_pending {
+            Some(ProjectPending::Known(id)) => {
+                self.state.projects.iter().find(|p| p.id == *id && p.open)
+            }
+            Some(ProjectPending::Path(path)) => self
+                .state
+                .projects
+                .iter()
+                .find(|p| p.path == *path && p.open),
+            None => None,
+        };
+        if let Some(id) = found.map(|p| p.id) {
+            self.project_pending = None;
+            self.project = Some(id);
+            self.selected = None;
+        }
     }
 
     fn select(&mut self, id: SessionId) {
@@ -860,13 +992,14 @@ impl App {
         }
     }
 
-    /// Keeps `project` and `selected` pointing at things that exist.
+    /// Keeps `project` on an open project and `selected` on one of its sessions.
     fn repair_selection(&mut self) {
         if !self
             .project
-            .is_some_and(|p| self.state.projects.iter().any(|x| x.id == p))
+            .is_some_and(|p| self.open_projects().any(|x| x.id == p))
         {
-            self.project = self.state.projects.first().map(|p| p.id);
+            let first = self.open_projects().next().map(|p| p.id);
+            self.project = first;
         }
         let valid = self
             .selected
@@ -1925,5 +2058,196 @@ mod tests {
             Some(s[1].id),
             "and never the closed project's"
         );
+    }
+
+    fn browser(app: &App) -> &OpenProject {
+        match app.overlays.last() {
+            Some(Overlay::OpenProject(open)) => open,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn listing(names: &[(&str, bool)], under: &Path) -> Result<Listing, String> {
+        Ok(Listing {
+            entries: names
+                .iter()
+                .map(|(name, git)| crate::browse::DirEntry {
+                    name: name.to_string(),
+                    path: under.join(name),
+                    git: *git,
+                })
+                .collect(),
+            truncated: false,
+        })
+    }
+
+    fn close_web(app: &mut App) {
+        let mut state = app.state.clone();
+        state.projects[1].open = false;
+        app.on_event(ServerEvent::State(state));
+    }
+
+    #[test]
+    fn o_lists_closed_projects_first_then_the_folders_around_this_one() {
+        let (mut app, _) = app();
+        close_web(&mut app);
+        assert_eq!(
+            app.on_key(k(K::Char('o'))),
+            vec![Action::ListDir(PathBuf::from("/"))]
+        );
+        assert!(browser(&app).loading);
+        app.listed(
+            Path::new("/"),
+            listing(&[("api", true), ("notes", false)], Path::new("/")),
+        );
+        let labels: Vec<String> = browser(&app)
+            .list
+            .visible()
+            .map(|(_, e, _)| e.label())
+            .collect();
+        assert_eq!(labels, ["web", "api", "api", "notes"]);
+        assert!(!browser(&app).loading);
+    }
+
+    #[test]
+    fn enter_on_a_closed_project_opens_it_and_brings_it_to_the_front() {
+        let (mut app, s) = app();
+        close_web(&mut app);
+        app.on_key(k(K::Char('o')));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::OpenProject {
+                project: s[3].project
+            }]
+        );
+        assert!(app.overlays.is_empty());
+        let mut state = app.state.clone();
+        state.projects[1].open = true;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.project, Some(s[3].project));
+    }
+
+    #[test]
+    fn tab_on_a_folder_adds_it_as_a_project_and_brings_it_to_the_front() {
+        let (mut app, _) = app();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("orbit")).unwrap();
+        app.on_key(k(K::Char('o')));
+        app.listed(Path::new("/"), listing(&[("orbit", true)], &root));
+        type_text(&mut app, "orb");
+        let actions = app.on_key(k(K::Tab));
+        let path = root.join("orbit");
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::AddProject { path: path.clone() }]
+        );
+        let mut state = app.state.clone();
+        let added = ProjectInfo {
+            id: ProjectId::new(),
+            name: "orbit".into(),
+            path,
+            open: true,
+        };
+        state.projects.push(added.clone());
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.project, Some(added.id));
+    }
+
+    #[test]
+    fn right_goes_into_a_folder_and_left_comes_back_up() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('o')));
+        app.listed(Path::new("/"), listing(&[("code", false)], Path::new("/")));
+        type_text(&mut app, "code");
+        assert_eq!(
+            app.on_key(k(K::Right)),
+            vec![Action::ListDir(PathBuf::from("/code"))]
+        );
+        assert_eq!(browser(&app).dir, PathBuf::from("/code"));
+        assert_eq!(
+            browser(&app).list.query(),
+            Some(""),
+            "a new folder, a new filter"
+        );
+        assert_eq!(
+            app.on_key(k(K::Left)),
+            vec![Action::ListDir(PathBuf::from("/"))]
+        );
+    }
+
+    // Listing happens off the UI thread: the browser answers keys while it waits, and
+    // an answer for a folder it already left (or after it closed) changes nothing.
+    #[test]
+    fn a_slow_or_failed_listing_never_gets_in_the_way() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('o')));
+        app.listed(Path::new("/"), listing(&[("code", false)], Path::new("/")));
+        type_text(&mut app, "code");
+        app.on_key(k(K::Right));
+        app.listed(Path::new("/"), listing(&[("stale", false)], Path::new("/")));
+        assert!(
+            browser(&app)
+                .list
+                .items()
+                .iter()
+                .all(|e| e.label() != "stale"),
+            "an answer for a folder already left"
+        );
+        assert!(browser(&app).loading, "still waiting for /code");
+        app.on_key(k(K::Esc));
+        app.listed(
+            Path::new("/code"),
+            listing(&[("late", false)], Path::new("/code")),
+        );
+        assert!(app.overlays.is_empty());
+        app.on_key(k(K::Char('o')));
+        app.listed(
+            Path::new("/"),
+            Err("cannot read /: permission denied".into()),
+        );
+        assert_eq!(
+            browser(&app).error.as_deref(),
+            Some("cannot read /: permission denied")
+        );
+        assert_eq!(
+            browser(&app).list.items().len(),
+            2,
+            "the projects are still there"
+        );
+    }
+
+    #[test]
+    fn x_closes_the_project_tab_after_asking() {
+        let (mut app, s) = app();
+        assert!(sent(&app.on_key(k(K::Char('x')))).is_empty());
+        assert_eq!(app.mode, Mode::ConfirmClose(s[0].project));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('y')))),
+            vec![&ClientRequest::CloseProject {
+                project: s[0].project
+            }]
+        );
+        let mut state = app.state.clone();
+        state.projects[0].open = false;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.project, Some(s[3].project), "the next open tab");
+        app.on_key(k(K::Char('x')));
+        app.on_key(k(K::Char('n')));
+        assert_eq!(app.mode, Mode::Grid, "any other key cancels");
+    }
+
+    #[test]
+    fn tabs_and_their_keys_skip_closed_projects() {
+        let (mut app, s) = app();
+        let mut state = app.state.clone();
+        state.projects[0].open = false;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.project, Some(s[3].project));
+        app.on_key(k(K::Char(']')));
+        assert_eq!(app.project, Some(s[3].project));
+        app.on_key(k(K::Char('2')));
+        assert_eq!(app.project, Some(s[3].project), "there is no second tab");
     }
 }

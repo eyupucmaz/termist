@@ -1,7 +1,7 @@
 //! Drawing the overlay stack: each overlay is a box centred over the body, drawn
 //! bottom to top, so a picker opened from the quick prompt sits on top of it.
 use crate::app::App;
-use crate::overlay::{Overlay, QuickPrompt};
+use crate::overlay::{BrowseEntry, Overlay, QuickPrompt};
 use crate::text_input::TextInput;
 use crate::ui::status_style;
 use ratatui::Frame;
@@ -252,6 +252,59 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::OpenProject(open) => {
+            let rows = open
+                .list
+                .visible()
+                .map(|(_, entry, on)| match entry {
+                    BrowseEntry::Project(p) => Line::from(vec![
+                        Span::styled(format!(" {}", p.name), highlighted(Style::default(), on)),
+                        Span::styled(
+                            format!(
+                                "  {}{}",
+                                if p.open { "" } else { "closed · " },
+                                p.path.display()
+                            ),
+                            dim(),
+                        ),
+                    ]),
+                    BrowseEntry::Dir(d) => Line::from(vec![
+                        Span::styled(
+                            if d.git { " ● " } else { "   " },
+                            Style::default().fg(Color::Green),
+                        ),
+                        Span::styled(format!("{}/", d.name), highlighted(Style::default(), on)),
+                    ]),
+                })
+                .collect();
+            let note = if let Some(e) = &open.error {
+                Some(Span::styled(
+                    format!(" {e}"),
+                    Style::default().fg(Color::Red),
+                ))
+            } else if open.loading {
+                Some(Span::styled(" reading…", dim()))
+            } else if open.truncated {
+                Some(Span::styled(
+                    " more folders than shown: type to narrow",
+                    dim(),
+                ))
+            } else {
+                None
+            };
+            draw_list(
+                f,
+                body,
+                ListBox {
+                    title: format!("open project · {}", open.dir.display()),
+                    width: 64,
+                    query: open.list.query().map(str::to_string),
+                    rows,
+                    highlight: open.list.highlight(),
+                    extra: note.map(Line::from).into_iter().collect(),
+                },
+            );
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -294,5 +347,8 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::FollowUp { .. } => "Enter send to the agent · Esc cancel",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
+        Overlay::OpenProject(_) => {
+            "type to filter · Enter open · → in · ← up · Tab open this folder · Esc close"
+        }
     }
 }

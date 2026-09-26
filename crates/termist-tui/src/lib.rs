@@ -1,5 +1,6 @@
 //! The termist terminal UI.
 pub mod app;
+pub mod browse;
 pub mod encode;
 pub mod list_picker;
 pub mod overlay;
