@@ -127,17 +127,27 @@ pub fn spawn(
         let mut tick = tokio::time::interval(Duration::from_millis(16));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut output_open = true;
+        let handle = |events: Vec<TermEvent>| {
+            for event in events {
+                match event {
+                    TermEvent::Reply(reply) => {
+                        let _ = write_tx.send(reply);
+                    }
+                    TermEvent::Title(t) => {
+                        let _ = notes.send(SessionNote::Title(id, t));
+                    }
+                    TermEvent::Bell => {}
+                }
+            }
+        };
         loop {
+            // Ticks run only while someone is attached; otherwise the session wakes up
+            // just for a pending synchronized update's timeout, and only then.
+            let sync_deadline = term.sync_deadline().filter(|_| attached.is_empty());
             tokio::select! {
                 bytes = bytes_rx.recv(), if output_open => match bytes {
                     Some(bytes) => {
-                        for event in term.feed(&bytes) {
-                            match event {
-                                TermEvent::Reply(reply) => { let _ = write_tx.send(reply); }
-                                TermEvent::Title(t) => { let _ = notes.send(SessionNote::Title(id, t)); }
-                                TermEvent::Bell => {}
-                            }
-                        }
+                        handle(term.feed(&bytes));
                         dirty = true;
                         if last_activity_note.elapsed() >= Duration::from_secs(1) {
                             last_activity_note = Instant::now();
@@ -168,8 +178,16 @@ pub fn spawn(
                     }
                     Some(SessionCmd::Detach { client }) => { attached.remove(&client); }
                 },
+                _ = tokio::time::sleep_until(sync_deadline.unwrap_or_else(Instant::now).into()),
+                    if sync_deadline.is_some() => {
+                    if let Some(events) = term.tick(Instant::now()) {
+                        handle(events);
+                        dirty = true;
+                    }
+                }
                 _ = tick.tick(), if !attached.is_empty() => {
-                    if term.tick(Instant::now()) {
+                    if let Some(events) = term.tick(Instant::now()) {
+                        handle(events);
                         dirty = true;
                     }
                     if dirty && !attached.is_empty() {
@@ -263,6 +281,27 @@ mod tests {
         let (notes, _n) = unbounded_channel();
         let cmd = spawn(spec(script), notes).unwrap();
         wait_for_text(&cmd, "answered").await;
+    }
+
+    // Nobody is attached, so the session does not tick; a synchronized update that
+    // never ends must still time out, or the query inside it is never answered.
+    #[tokio::test]
+    async fn an_unattached_session_is_not_stuck_in_a_synchronized_update() {
+        let script = "stty raw -echo; printf '\\033[?2026h\\033[6n'; head -c 6 >/dev/null; stty sane; exit 7";
+        let (notes, mut notes_rx) = unbounded_channel();
+        let s = spec(script);
+        let id = s.id;
+        let _cmd = spawn(s, notes).unwrap();
+        let exited = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(SessionNote::Exited(sid, code)) = notes_rx.recv().await {
+                    return (sid, code);
+                }
+            }
+        })
+        .await
+        .expect("the query inside the synchronized update was never answered");
+        assert_eq!(exited, (id, Some(7)));
     }
 
     #[tokio::test]

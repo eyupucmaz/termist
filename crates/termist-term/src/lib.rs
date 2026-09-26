@@ -112,15 +112,22 @@ impl TermCore {
         out
     }
 
-    /// Drives the DEC 2026 synchronized-update timeout. `true` means the screen may have changed.
-    pub fn tick(&mut self, now: Instant) -> bool {
-        if let Some(deadline) = self.parser.sync_timeout().sync_timeout()
-            && now >= deadline
-        {
+    /// When a pending DEC 2026 synchronized update times out, if one is pending.
+    pub fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Drives the DEC 2026 synchronized-update timeout. `Some` means the held-back
+    /// output was applied (the screen may have changed); its events, such as replies
+    /// to queries inside the update, are handled like those of `feed`.
+    pub fn tick(&mut self, now: Instant) -> Option<Vec<TermEvent>> {
+        if self.sync_deadline().is_some_and(|deadline| now >= deadline) {
             self.parser.stop_sync(&mut self.term);
-            return true;
+            let mut out = Vec::new();
+            self.drain(&mut out);
+            return Some(out);
         }
-        false
+        None
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -247,6 +254,21 @@ mod tests {
         let r = replies(&t.feed(b"ab\x1b[6n\x1b[c"));
         assert!(r.contains(&b"\x1b[1;3R".to_vec()), "{r:?}");
         assert!(r.contains(&b"\x1b[?6c".to_vec()), "{r:?}");
+    }
+
+    #[test]
+    fn a_query_inside_a_timed_out_synchronized_update_is_answered_by_tick() {
+        let mut t = core();
+        let now = Instant::now();
+        assert!(
+            replies(&t.feed(b"\x1b[?2026h\x1b[6n")).is_empty(),
+            "held back"
+        );
+        let deadline = t.sync_deadline().expect("a synchronized update is pending");
+        assert_eq!(t.tick(now), None, "not yet");
+        let events = t.tick(deadline).expect("the update timed out");
+        assert_eq!(replies(&events), vec![b"\x1b[1;1R".to_vec()]);
+        assert_eq!(t.sync_deadline(), None);
     }
 
     #[test]
