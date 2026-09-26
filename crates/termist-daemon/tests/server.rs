@@ -407,6 +407,104 @@ async fn opencode_subagent_events_do_not_move_the_parent_card() {
     );
 }
 
+// `/new` (or picking another session) in OpenCode moves the card to that session.
+#[tokio::test]
+async fn an_opencode_card_follows_a_new_or_switched_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        opencode_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::OpenCode,
+        },
+    )
+    .await;
+    let hook = |event: &'static str, payload: &'static str| {
+        let paths = d.paths.clone();
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::OpenCode, event, payload.into())
+                .await
+                .unwrap()
+        }
+    };
+    hook(
+        "session.created",
+        r#"{"type":"session.created","properties":{"info":{"id":"ses_1"}}}"#,
+    )
+    .await;
+    hook("chat.message", r#"{"sessionID":"ses_1"}"#).await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
+        AgentStatus::Running
+    );
+    hook(
+        "session.idle",
+        r#"{"type":"session.idle","properties":{"sessionID":"ses_1"}}"#,
+    )
+    .await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Unseen
+    );
+
+    // `/new`: a session without a parent
+    hook(
+        "session.created",
+        r#"{"type":"session.created","properties":{"info":{"id":"ses_2"}}}"#,
+    )
+    .await;
+    hook("chat.message", r#"{"sessionID":"ses_2"}"#).await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Unseen).await,
+        AgentStatus::Running
+    );
+    // a subagent of the new session still never moves the card
+    hook(
+        "session.created",
+        r#"{"type":"session.created","properties":{"info":{"id":"ses_child","parentID":"ses_2"}}}"#,
+    )
+    .await;
+    hook(
+        "permission.asked",
+        r#"{"type":"permission.asked","properties":{"sessionID":"ses_child"}}"#,
+    )
+    .await;
+    hook(
+        "session.idle",
+        r#"{"type":"session.idle","properties":{"sessionID":"ses_2"}}"#,
+    )
+    .await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Unseen,
+        "the child's permission.asked was ignored"
+    );
+    let stored = state(&mut ui).await;
+    assert_eq!(
+        stored.sessions[0].agent_session_id.as_deref(),
+        Some("ses_2")
+    );
+
+    // switching to an existing session: its first message moves the card there
+    hook("chat.message", r#"{"sessionID":"ses_3"}"#).await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Unseen).await,
+        AgentStatus::Running
+    );
+    let stored = state(&mut ui).await;
+    assert_eq!(
+        stored.sessions[0].agent_session_id.as_deref(),
+        Some("ses_3")
+    );
+}
+
 #[tokio::test]
 async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
     let tmp = tempfile::tempdir().unwrap();

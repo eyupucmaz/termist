@@ -5,7 +5,7 @@ use crate::transcript::TranscriptTail;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use termist_core::{
@@ -41,6 +41,8 @@ struct Session {
     /// The agent's conversation exists, so Resume may pass its id. Claude's id is
     /// assigned up front, but Claude only creates the conversation with the first prompt.
     resumable: bool,
+    /// OpenCode subagent session ids seen for this card; their events are ignored.
+    opencode_children: HashSet<String>,
 }
 
 impl Session {
@@ -55,6 +57,7 @@ impl Session {
             transcript: None,
             activity_broadcast: None,
             resumable,
+            opencode_children: HashSet::new(),
         }
     }
 }
@@ -330,44 +333,20 @@ impl Registry {
     fn hook(&mut self, id: SessionId, harness: Harness, event: &str, payload: &Value) {
         let signal = match harness {
             Harness::Claude => {
-                if event == "SessionStart"
-                    && let Some(sid) = payload.get("session_id").and_then(Value::as_str)
-                {
-                    self.set_agent_session_id(id, sid);
-                }
+                // Claude's id is known before its conversation exists: not a sign of one.
+                self.capture_session_start(id, event, payload);
                 if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
                     self.watch_transcript(id, Path::new(path));
                 }
                 claude::signal_for(event, payload)
             }
             Harness::Codex => {
-                if event == "SessionStart"
-                    && let Some(sid) = payload.get("session_id").and_then(Value::as_str)
-                {
-                    self.set_agent_session_id(id, sid);
+                if self.capture_session_start(id, event, payload) {
                     self.mark_resumable(id);
                 }
                 codex::signal_for(event, payload)
             }
-            Harness::OpenCode => {
-                if event == "session.created" {
-                    let known = self
-                        .session(id)
-                        .and_then(|s| s.info.agent_session_id.clone());
-                    if known.is_none()
-                        && !opencode::is_child_session(payload)
-                        && let Some(sid) = opencode::event_session(payload)
-                    {
-                        self.set_agent_session_id(id, sid);
-                        self.mark_resumable(id);
-                    }
-                    None
-                } else if self.is_foreign_opencode_event(id, payload) {
-                    None
-                } else {
-                    opencode::signal_for(event, payload)
-                }
-            }
+            Harness::OpenCode => self.opencode_hook(id, event, payload),
         };
         if signal == Some(Signal::PromptSubmitted) {
             self.mark_resumable(id);
@@ -375,6 +354,50 @@ impl Registry {
         if let Some(signal) = signal {
             self.signal(id, signal);
         }
+    }
+
+    /// Takes the agent's id from a `SessionStart` payload; true when there was one.
+    fn capture_session_start(&mut self, id: SessionId, event: &str, payload: &Value) -> bool {
+        match payload.get("session_id").and_then(Value::as_str) {
+            Some(sid) if event == "SessionStart" => {
+                self.set_agent_session_id(id, sid);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The card follows the OpenCode session the user is in: a session created
+    /// without a parent (`/new`) or a message in another session (switching) moves
+    /// it there. Subagent sessions (created with a parent) never move the card.
+    fn opencode_hook(&mut self, id: SessionId, event: &str, payload: &Value) -> Option<Signal> {
+        let sid = opencode::event_session(payload).map(str::to_string);
+        let s = self.session_mut(id)?;
+        if event == "session.created" {
+            match sid {
+                Some(sid) if opencode::is_child_session(payload) => {
+                    s.opencode_children.insert(sid);
+                }
+                Some(sid) => self.adopt_agent_session(id, &sid),
+                None => {}
+            }
+            return None;
+        }
+        if let Some(sid) = sid {
+            if s.opencode_children.contains(&sid) {
+                return None;
+            }
+            if event == "chat.message" {
+                self.adopt_agent_session(id, &sid);
+            }
+        }
+        opencode::signal_for(event, payload)
+    }
+
+    /// An id the agent reported for a conversation it has: resume can use it.
+    fn adopt_agent_session(&mut self, id: SessionId, sid: &str) {
+        self.set_agent_session_id(id, sid);
+        self.mark_resumable(id);
     }
 
     fn mark_resumable(&mut self, id: SessionId) {
@@ -395,14 +418,6 @@ impl Registry {
             self.persist(id);
             self.broadcast(ServerEvent::SessionUpdated(info));
         }
-    }
-
-    /// An OpenCode event about a session other than this card's (a subagent's).
-    fn is_foreign_opencode_event(&self, id: SessionId, payload: &Value) -> bool {
-        let known = self
-            .session(id)
-            .and_then(|s| s.info.agent_session_id.as_deref());
-        matches!((known, opencode::event_session(payload)), (Some(k), Some(e)) if k != e)
     }
 
     fn watch_transcript(&mut self, id: SessionId, path: &Path) {
