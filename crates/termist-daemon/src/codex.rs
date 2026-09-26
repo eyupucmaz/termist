@@ -192,13 +192,13 @@ mod tests {
 
             let entry = format!(
                 "{}={{trusted_hash={}}}",
-                toml_string(&format!("/<session-flags>/config.toml:{}:0:0", snake_case(ev))),
+                toml_string(&format!(
+                    "/<session-flags>/config.toml:{}:0:0",
+                    snake_case(ev)
+                )),
                 toml_string(&trust_hash(ev, &cmd)),
             );
-            assert!(
-                state.contains(&entry),
-                "missing entry {entry} in {state}"
-            );
+            assert!(state.contains(&entry), "missing entry {entry} in {state}");
         }
     }
 
