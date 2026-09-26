@@ -724,20 +724,26 @@ impl App {
         vec![]
     }
 
-    fn is_live(&self, id: SessionId) -> bool {
-        self.state
-            .sessions
-            .iter()
-            .any(|s| s.id == id && s.status.is_live())
+    /// Why a card cannot take a typed instruction now: it is not running, or it waits
+    /// on an answer (a pasted text and Enter would pick the highlighted choice).
+    fn follow_up_refused(&self, id: SessionId) -> Option<&'static str> {
+        match self.state.sessions.iter().find(|s| s.id == id) {
+            Some(s) if s.status == AgentStatus::NeedsFeedback => {
+                Some("waiting for an answer — Enter to open it")
+            }
+            Some(s) if s.status.is_live() => None,
+            _ => Some("not running — Enter resumes"),
+        }
     }
 
-    /// `Space`: only a running card can take an instruction.
+    /// `Space`: only a running card that is not waiting on an answer can take an
+    /// instruction.
     fn open_follow_up(&mut self) {
         let Some(session) = self.selected else {
             return;
         };
-        if !self.is_live(session) {
-            self.message = Some("not running — Enter resumes".into());
+        if let Some(why) = self.follow_up_refused(session) {
+            self.message = Some(why.into());
             return;
         }
         self.overlays.push(Overlay::FollowUp {
@@ -765,8 +771,8 @@ impl App {
         if text.trim().is_empty() {
             return vec![];
         }
-        if !self.is_live(session) {
-            self.message = Some("not running — Enter resumes".into());
+        if let Some(why) = self.follow_up_refused(session) {
+            self.message = Some(why.into());
             return vec![];
         }
         let modes = self
@@ -2052,6 +2058,44 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(exited));
         assert!(sent(&app.on_key(k(K::Enter))).is_empty());
         assert_eq!(app.message.as_deref(), Some("not running — Enter resumes"));
+    }
+
+    // A card waiting on an approval has a select open: a pasted text and Enter would pick
+    // its highlighted answer. The answer is given in the card itself.
+    #[test]
+    fn a_follow_up_to_a_card_waiting_for_an_answer_sends_nothing() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('.')));
+        assert_eq!(app.selected, Some(s[3].id));
+        assert!(sent(&app.on_key(k(K::Char(' ')))).is_empty());
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("waiting for an answer — Enter to open it")
+        );
+
+        let (mut app, s) = self::app();
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "no, use pnpm instead");
+        let mut asking = s[0].clone();
+        asking.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(asking));
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("waiting for an answer — Enter to open it")
+        );
+    }
+
+    #[test]
+    fn a_first_prompt_can_be_typed_into_a_fresh_card() {
+        let (mut app, s) = app();
+        let mut fresh = s[0].clone();
+        fresh.status = AgentStatus::Fresh;
+        app.on_event(ServerEvent::SessionUpdated(fresh));
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "hello");
+        assert_eq!(sent(&app.on_key(k(K::Enter))).len(), 2);
     }
 
     #[test]
