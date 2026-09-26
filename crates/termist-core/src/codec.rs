@@ -58,6 +58,21 @@ impl FrameDecoder {
 mod tests {
     use super::*;
     use crate::protocol::{ClientRequest, ServerEvent};
+
+    /// Shutdown and Ack travel by name, not by position, so daemons and clients of
+    /// different protocol versions still understand each other's.
+    #[test]
+    fn shutdown_and_ack_are_encoded_by_name() {
+        let name = |s: &str| rmp_serde::to_vec(s).unwrap();
+        assert_eq!(
+            encode_frame(&ClientRequest::Shutdown).unwrap()[4..],
+            name("Shutdown")[..]
+        );
+        assert_eq!(
+            encode_frame(&ServerEvent::Ack).unwrap()[4..],
+            name("Ack")[..]
+        );
+    }
     use crate::{Harness, SessionId};
 
     #[test]

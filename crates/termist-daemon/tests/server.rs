@@ -798,6 +798,36 @@ async fn two_daemons_started_together_leave_exactly_one() {
         .unwrap();
 }
 
+// A client of another protocol version is told who refused it, and can still stop
+// this daemon with a bare Shutdown (no Hello), so `termist kill` works across versions.
+#[tokio::test]
+async fn a_client_of_another_version_is_refused_but_can_stop_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path().to_path_buf());
+    let task = run_daemon(&paths, shell_config()).await;
+
+    let mut old = Client::without_handshake(termist_platform::ipc::connect(&paths).await.unwrap());
+    old.send(&ClientRequest::Hello { version: 1 })
+        .await
+        .unwrap();
+    match next_event(&mut old, |_| true).await {
+        ServerEvent::Error { message } => assert!(
+            message.contains(&format!("pid {}", std::process::id())),
+            "{message}"
+        ),
+        other => panic!("{other:?}"),
+    }
+
+    let mut bare = Client::without_handshake(termist_platform::ipc::connect(&paths).await.unwrap());
+    bare.send(&ClientRequest::Shutdown).await.unwrap();
+    next_event(&mut bare, |e| *e == ServerEvent::Ack).await;
+    timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn run_hook_gives_up_quietly_without_a_daemon() {
     let tmp = tempfile::tempdir().unwrap();

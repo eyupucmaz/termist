@@ -124,35 +124,173 @@ async fn kill(paths: &Paths) -> anyhow::Result<()> {
     kill_with(paths, Duration::from_secs(5)).await
 }
 
+/// How to stop a daemon that `termist kill` cannot talk to.
+#[cfg(unix)]
+const STOP_BY_HAND: &str = "stop it with `pkill -f 'termist daemon'`";
+#[cfg(windows)]
+const STOP_BY_HAND: &str = "end its termist.exe process in Task Manager";
+
 async fn kill_with(paths: &Paths, answer_within: Duration) -> anyhow::Result<()> {
-    let Ok(mut client) = Client::connect(paths).await else {
+    let Ok(stream) = termist_platform::ipc::connect(paths).await else {
         println!("termist: no daemon running");
         return Ok(());
     };
-    client.send(&ClientRequest::Shutdown).await?;
-    let acked = tokio::time::timeout(answer_within, async {
+    let refused = match tokio::time::timeout(answer_within, Client::handshake(stream)).await {
+        Err(_) => anyhow::bail!(
+            "the daemon did not answer within {} s",
+            answer_within.as_secs_f32()
+        ),
+        Ok(Ok(mut client)) => {
+            client.send(&ClientRequest::Shutdown).await?;
+            // an Ack, or the daemon going away before it could send one
+            shutdown_answer(client, answer_within).await?;
+            println!("termist: daemon stopped");
+            return Ok(());
+        }
+        Ok(Err(e)) => e,
+    };
+    // Something is listening but refused the handshake: a daemon of another version.
+    // A bare Shutdown (no Hello) stops daemons that accept one; older ones just close
+    // the connection, which is harmless.
+    if let Ok(stream) = termist_platform::ipc::connect(paths).await {
+        let mut client = Client::without_handshake(stream);
+        if client.send(&ClientRequest::Shutdown).await.is_ok()
+            && let Ok(true) = shutdown_answer(client, answer_within).await
+        {
+            println!("termist: daemon stopped");
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "a termist daemon of a different version is running ({refused:#}); {STOP_BY_HAND}"
+    )
+}
+
+/// Waits for the answer to a Shutdown: true for an Ack, false when the daemon closed
+/// the connection without one.
+async fn shutdown_answer(mut client: Client, answer_within: Duration) -> anyhow::Result<bool> {
+    let answer = tokio::time::timeout(answer_within, async {
         while let Some(ev) = client.recv().await? {
             if ev == ServerEvent::Ack {
-                return anyhow::Ok(());
+                return anyhow::Ok(true);
             }
         }
-        anyhow::Ok(())
+        anyhow::Ok(false)
     })
     .await;
-    match acked {
-        Ok(result) => result?,
+    match answer {
+        Ok(result) => result,
         Err(_) => anyhow::bail!(
             "the daemon did not answer within {} s",
             answer_within.as_secs_f32()
         ),
     }
-    println!("termist: daemon stopped");
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use interprocess::local_socket::tokio::prelude::*;
+    use termist_platform::framed::{FramedReader, write_frame};
+
+    fn test_paths(tmp: &tempfile::TempDir) -> Paths {
+        let paths = Paths::under(tmp.path().to_path_buf());
+        paths.ensure().unwrap();
+        paths
+    }
+
+    /// Bounds a `kill_with` call so a hang fails the test instead of stalling it.
+    async fn bounded(paths: &Paths) -> anyhow::Result<()> {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            kill_with(paths, Duration::from_millis(300)),
+        )
+        .await
+        .expect("kill must not hang")
+    }
+
+    /// A stand-in for a daemon of another protocol version: it refuses every Hello
+    /// with an error, and acknowledges a Shutdown sent as the first frame only when
+    /// `obeys_shutdown` (older daemons just close the connection); each obeyed
+    /// Shutdown is reported on the returned channel.
+    fn other_version_daemon(
+        paths: &Paths,
+        obeys_shutdown: bool,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+        let listener = termist_platform::ipc::listen(paths).unwrap();
+        let (stopped, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let conn = listener.accept().await.unwrap();
+                let (r, mut w) = conn.split();
+                let mut reader = FramedReader::new(r);
+                match reader.read::<ClientRequest>().await {
+                    Ok(Some(ClientRequest::Hello { .. })) => {
+                        let message = "protocol 2 is not supported (daemon pid 7 speaks 3)";
+                        let _ = write_frame(
+                            &mut w,
+                            &ServerEvent::Error {
+                                message: message.into(),
+                            },
+                        )
+                        .await;
+                    }
+                    Ok(Some(ClientRequest::Shutdown)) if obeys_shutdown => {
+                        let _ = write_frame(&mut w, &ServerEvent::Ack).await;
+                        let _ = stopped.send(());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        rx
+    }
+
+    #[tokio::test]
+    async fn kill_without_a_daemon_says_so_and_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(bounded(&test_paths(&tmp)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kill_gives_up_when_the_daemon_never_answers_the_hello() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(&tmp);
+        let listener = termist_platform::ipc::listen(&paths).unwrap();
+        tokio::spawn(async move {
+            let _conn = listener.accept().await.unwrap();
+            std::future::pending::<()>().await; // never answer, never close
+        });
+        let err = bounded(&paths).await.unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kill_reports_a_daemon_of_another_version_and_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(&tmp);
+        other_version_daemon(&paths, false);
+        let err = format!("{:#}", bounded(&paths).await.unwrap_err());
+        assert!(err.contains("different version"), "{err}");
+        assert!(
+            err.contains("daemon pid 7"),
+            "the daemon's own words: {err}"
+        );
+        #[cfg(unix)]
+        assert!(err.contains("pkill -f 'termist daemon'"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn kill_stops_a_daemon_of_another_version_that_takes_a_bare_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = test_paths(&tmp);
+        let mut stopped = other_version_daemon(&paths, true);
+        assert!(bounded(&paths).await.is_ok());
+        assert!(
+            stopped.try_recv().is_ok(),
+            "the Shutdown reached the daemon"
+        );
+    }
 
     /// `termist kill` against a daemon that accepts but never answers must give up.
     #[tokio::test]

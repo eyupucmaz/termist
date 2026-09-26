@@ -129,29 +129,29 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
 async fn connection(client: ClientId, conn: Stream, registry: UnboundedSender<Msg>) {
     let (r, mut w) = conn.split();
     let mut reader = FramedReader::new(r);
-    match reader.read::<ClientRequest>().await {
-        Ok(Some(ClientRequest::Hello { version })) if version == PROTOCOL_VERSION => {}
+    let first = match reader.read::<ClientRequest>().await {
+        Ok(Some(ClientRequest::Hello { version })) if version == PROTOCOL_VERSION => {
+            let hello = ServerEvent::Hello {
+                version: PROTOCOL_VERSION,
+                pid: std::process::id(),
+            };
+            if write_frame(&mut w, &hello).await.is_err() {
+                return;
+            }
+            None
+        }
         Ok(Some(ClientRequest::Hello { version })) => {
             let message = format!(
-                "protocol {version} is not supported (daemon speaks {PROTOCOL_VERSION}); run `termist kill` and start again"
+                "protocol {version} is not supported (daemon pid {} speaks {PROTOCOL_VERSION}); run `termist kill` and start again",
+                std::process::id()
             );
             let _ = write_frame(&mut w, &ServerEvent::Error { message }).await;
             return;
         }
+        // No handshake needed: `termist kill` can stop this daemon whatever protocol it speaks.
+        Ok(Some(ClientRequest::Shutdown)) => Some(ClientRequest::Shutdown),
         _ => return,
-    }
-    if write_frame(
-        &mut w,
-        &ServerEvent::Hello {
-            version: PROTOCOL_VERSION,
-            pid: std::process::id(),
-        },
-    )
-    .await
-    .is_err()
-    {
-        return;
-    }
+    };
     let (out_tx, mut out_rx) = unbounded_channel::<ServerEvent>();
     let _ = registry.send(Msg::Connected {
         client,
@@ -164,6 +164,9 @@ async fn connection(client: ClientId, conn: Stream, registry: UnboundedSender<Ms
             }
         }
     });
+    if let Some(req) = first {
+        let _ = registry.send(Msg::Request { client, req });
+    }
     while let Ok(Some(req)) = reader.read::<ClientRequest>().await {
         let _ = registry.send(Msg::Request { client, req });
     }

@@ -1,5 +1,5 @@
 use crate::framed::{FramedReader, write_frame};
-use crate::ipc::{self, RecvHalf, SendHalf};
+use crate::ipc::{self, RecvHalf, SendHalf, Stream};
 use crate::paths::Paths;
 use anyhow::bail;
 use interprocess::local_socket::tokio::prelude::*;
@@ -13,12 +13,12 @@ pub struct Client {
 impl Client {
     /// Connects and performs the Hello handshake.
     pub async fn connect(paths: &Paths) -> anyhow::Result<Client> {
-        let stream = ipc::connect(paths).await?;
-        let (r, w) = stream.split();
-        let mut client = Client {
-            reader: FramedReader::new(r),
-            writer: w,
-        };
+        Self::handshake(ipc::connect(paths).await?).await
+    }
+
+    /// Performs the Hello handshake on a connected stream.
+    pub async fn handshake(stream: Stream) -> anyhow::Result<Client> {
+        let mut client = Self::without_handshake(stream);
         client
             .send(&ClientRequest::Hello {
                 version: PROTOCOL_VERSION,
@@ -30,6 +30,16 @@ impl Client {
                 bail!("daemon refused the connection: {message}")
             }
             other => bail!("unexpected handshake reply: {other:?}"),
+        }
+    }
+
+    /// A connection that skipped the handshake. The only request a daemon takes without
+    /// a Hello is `Shutdown` (daemons older than that rule just close the connection).
+    pub fn without_handshake(stream: Stream) -> Client {
+        let (r, w) = stream.split();
+        Client {
+            reader: FramedReader::new(r),
+            writer: w,
         }
     }
 
