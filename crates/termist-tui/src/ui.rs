@@ -14,11 +14,18 @@ const CARD_H: u16 = 4;
 
 pub struct Areas {
     pub header: Rect,
+    /// Everything between the header and the footer: cards and pane.
+    pub body: Rect,
     pub cards: Rect,
     pub pane: Rect,
     pub pane_inner: Rect,
     pub footer: Rect,
     pub cards_per_row: usize,
+    /// Rows of cards that fit.
+    pub card_rows: usize,
+    /// Not every card fits: the line above and the line below the cards count the
+    /// hidden ones.
+    pub scroll_lines: bool,
 }
 
 pub fn layout(area: Rect, session_count: usize) -> Areas {
@@ -39,10 +46,25 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
     };
     let cards_per_row = (body.width / CARD_W).max(1) as usize;
     let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
-    let cards_h = (card_rows * CARD_H).min(body.height / 2);
-    let cards = Rect {
-        height: cards_h,
-        ..body
+    let room = body.height / 2;
+    let cards_h = (card_rows * CARD_H).min(room);
+    let scroll_lines = card_rows * CARD_H > room;
+    let (cards, visible_rows) = if scroll_lines {
+        let rows = (cards_h.saturating_sub(2) / CARD_H).max(1);
+        let cards = Rect {
+            y: body.y + 1,
+            height: (rows * CARD_H).min(cards_h.saturating_sub(1)),
+            ..body
+        };
+        (cards, rows)
+    } else {
+        (
+            Rect {
+                height: cards_h,
+                ..body
+            },
+            card_rows,
+        )
     };
     let pane = Rect {
         y: body.y + cards_h,
@@ -57,11 +79,14 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
     };
     Areas {
         header,
+        body,
         cards,
         pane,
         pane_inner,
         footer,
         cards_per_row,
+        card_rows: visible_rows as usize,
+        scroll_lines,
     }
 }
 
@@ -91,21 +116,21 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         } else {
             "No sessions yet.  n: new agent  ·  t: new shell"
         };
-        let body = Rect {
-            height: areas.cards.height + areas.pane.height,
-            ..areas.cards
-        };
         f.render_widget(
             Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-            body,
+            areas.body,
         );
     } else {
+        let per_row = areas.cards_per_row.max(1);
+        let first = app.card_scroll;
         for (i, s) in sessions.iter().enumerate() {
-            let col = (i % areas.cards_per_row) as u16;
-            let row = (i / areas.cards_per_row) as u16;
+            let row = i / per_row;
+            if row < first || row >= first + areas.card_rows {
+                continue;
+            }
             let rect = Rect {
-                x: areas.cards.x + col * CARD_W,
-                y: areas.cards.y + row * CARD_H,
+                x: areas.cards.x + (i % per_row) as u16 * CARD_W,
+                y: areas.cards.y + (row - first) as u16 * CARD_H,
                 width: CARD_W,
                 height: CARD_H,
             };
@@ -114,14 +139,33 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             }
             draw_card(f, s, Some(s.id) == app.selected, rect);
         }
+        if areas.scroll_lines {
+            let above = first * per_row;
+            let below = sessions
+                .len()
+                .saturating_sub((first + areas.card_rows) * per_row);
+            let line = |y: u16| Rect {
+                y,
+                height: 1,
+                ..areas.cards
+            };
+            for (n, arrow, rect) in [
+                (above, '↑', line(areas.cards.y.saturating_sub(1))),
+                (below, '↓', line(areas.cards.bottom())),
+            ] {
+                if n > 0 && rect.y < areas.pane.y {
+                    f.render_widget(
+                        Paragraph::new(format!("{arrow} {n} more"))
+                            .style(Style::default().fg(Color::DarkGray)),
+                        rect,
+                    );
+                }
+            }
+        }
         draw_pane(f, app, areas);
     }
-    let body = Rect {
-        height: areas.cards.height + areas.pane.height,
-        ..areas.cards
-    };
     for (i, overlay) in app.overlays.iter().enumerate() {
-        overlay_view::draw(f, app, overlay, body, i + 1 == app.overlays.len());
+        overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
     }
     draw_footer(f, app, areas.footer);
 }
@@ -344,7 +388,7 @@ mod tests {
     fn render(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         let areas = layout(Rect::new(0, 0, w, h), app.project_sessions().len());
-        app.cards_per_row = areas.cards_per_row;
+        app.set_card_window(areas.cards_per_row, areas.card_rows);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
         t
@@ -679,5 +723,26 @@ mod tests {
             }),
         );
         insta::assert_snapshot!(render(&mut app, 70, 16).backend());
+    }
+
+    #[test]
+    fn cards_that_do_not_fit_are_counted_above_and_below() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        let project = app.state.projects[0].id;
+        let mut state = app.state.clone();
+        for i in 3..=7 {
+            let mut s = state.sessions[1].clone();
+            s.id = SessionId::new();
+            s.project = project;
+            s.name = format!("shell-{i}");
+            state.sessions.push(s);
+        }
+        app.on_event(ServerEvent::State(state));
+        render(&mut app, 60, 16);
+        for _ in 0..2 {
+            app.on_key(key(K::Char('j')));
+        }
+        insta::assert_snapshot!(render(&mut app, 60, 16).backend());
     }
 }

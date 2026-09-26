@@ -139,7 +139,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         loop {
             let size = terminal.size()?;
             let areas = ui::layout(Rect::new(0, 0, size.width, size.height), app.project_sessions().len());
-            app.cards_per_row = areas.cards_per_row;
+            app.set_card_window(areas.cards_per_row, areas.card_rows);
             let resize = app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
             if perform(resize, &mut writer, &listing_tx).await? {
                 return Ok(());

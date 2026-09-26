@@ -46,6 +46,9 @@ pub struct App {
     pub attached: Option<SessionId>,
     pub pane: (u16, u16),
     pub cards_per_row: usize,
+    /// Rows of cards that fit on screen, and the first one shown.
+    pub card_rows: usize,
+    pub card_scroll: usize,
     pub message: Option<String>,
     /// Set by the first `State` from the daemon; until then the body says "Connecting…".
     pub connected: bool,
@@ -87,6 +90,8 @@ impl App {
             attached: None,
             pane: (0, 0),
             cards_per_row: 1,
+            card_rows: 1,
+            card_scroll: 0,
             message: None,
             connected: false,
             harnesses: Harness::ALL
@@ -319,6 +324,8 @@ impl App {
                     KeyCode::Char(' ') => self.open_follow_up(),
                     KeyCode::Char('r') => self.open_rename(),
                     KeyCode::Char('/') => self.open_palette(),
+                    KeyCode::Char('d') if ctrl => self.half_page(1),
+                    KeyCode::Char('u') if ctrl => self.half_page(-1),
                     KeyCode::Char('d') => {
                         if let Some(id) = self.selected {
                             self.mode = Mode::ConfirmKill(id);
@@ -949,6 +956,37 @@ impl App {
         self.selected = Some(ids[next]);
     }
 
+    /// Each frame's layout: cards per row and rows that fit. Scrolls just enough to
+    /// keep the selected card on screen.
+    pub fn set_card_window(&mut self, per_row: usize, rows: usize) {
+        self.cards_per_row = per_row.max(1);
+        self.card_rows = rows.max(1);
+        let sessions = self.project_sessions();
+        let total_rows = sessions.len().div_ceil(self.cards_per_row);
+        if let Some(pos) = sessions.iter().position(|s| Some(s.id) == self.selected) {
+            let row = pos / self.cards_per_row;
+            if row < self.card_scroll {
+                self.card_scroll = row;
+            } else if row >= self.card_scroll + self.card_rows {
+                self.card_scroll = row + 1 - self.card_rows;
+            }
+        }
+        self.card_scroll = self
+            .card_scroll
+            .min(total_rows.saturating_sub(self.card_rows));
+    }
+
+    /// Ctrl+D / Ctrl+U: half a screen of cards down or up, selection and view together.
+    fn half_page(&mut self, direction: isize) {
+        let half = (self.card_rows / 2).max(1);
+        self.move_by(direction * (half * self.cards_per_row) as isize);
+        self.card_scroll = self
+            .card_scroll
+            .saturating_add_signed(direction * half as isize);
+        let (per_row, rows) = (self.cards_per_row, self.card_rows);
+        self.set_card_window(per_row, rows);
+    }
+
     fn switch_project(&mut self, delta: isize) {
         let open: Vec<ProjectId> = self.open_projects().map(|p| p.id).collect();
         let n = open.len() as isize;
@@ -1088,7 +1126,7 @@ mod tests {
         ];
         let mut app = App::new();
         app.pane_resized(80, 20);
-        app.cards_per_row = 2;
+        app.set_card_window(2, 4);
         app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![api, web],
             sessions: s.clone(),
@@ -2249,5 +2287,60 @@ mod tests {
         assert_eq!(app.project, Some(s[3].project));
         app.on_key(k(K::Char('2')));
         assert_eq!(app.project, Some(s[3].project), "there is no second tab");
+    }
+
+    /// One project with `n` shell sessions, two cards per row, `rows` rows on screen.
+    fn many(n: usize, rows: usize) -> (App, Vec<SessionInfo>) {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "api".into(),
+            path: "/api".into(),
+            open: true,
+        };
+        let s: Vec<SessionInfo> = (0..n)
+            .map(|i| session(p.id, &format!("s{i}"), AgentStatus::Finished))
+            .collect();
+        let mut app = App::new();
+        app.pane_resized(80, 20);
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        app.set_card_window(2, rows);
+        (app, s)
+    }
+
+    #[test]
+    fn the_view_scrolls_to_keep_the_selected_card_on_screen() {
+        let (mut app, s) = many(10, 2);
+        for _ in 0..3 {
+            app.on_key(k(K::Char('j')));
+        }
+        app.set_card_window(2, 2);
+        assert_eq!(app.selected, Some(s[6].id));
+        assert_eq!(app.card_scroll, 2, "row 3 is the last row on screen");
+        for _ in 0..3 {
+            app.on_key(k(K::Char('k')));
+        }
+        app.set_card_window(2, 2);
+        assert_eq!(app.card_scroll, 0);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_move_half_a_screen_of_cards() {
+        let (mut app, s) = many(20, 4);
+        app.on_key(ctrl('d'));
+        assert_eq!(app.selected, Some(s[4].id), "two rows of two cards down");
+        assert_eq!(app.card_scroll, 2);
+        for _ in 0..5 {
+            app.on_key(ctrl('d'));
+        }
+        assert_eq!(app.selected, Some(s[19].id), "stops at the last card");
+        assert_eq!(app.card_scroll, 6, "the last rows fill the screen");
+        app.on_key(ctrl('u'));
+        assert_eq!(app.selected, Some(s[15].id));
+        assert_eq!(app.card_scroll, 4);
+        assert_eq!(app.mode, Mode::Grid, "Ctrl+D is not d (kill)");
     }
 }
