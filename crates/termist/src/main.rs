@@ -58,6 +58,7 @@ fn main() -> ExitCode {
         }
     };
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let tui = cli.cmd.is_none();
     let result = runtime.block_on(async move {
         match cli.cmd {
             None => termist_tui::run::run(paths).await,
@@ -69,6 +70,10 @@ fn main() -> ExitCode {
             Some(Cmd::Hook { .. }) => unreachable!("handled above"),
         }
     });
+    if tui {
+        // Quitting the TUI never waits on a task stuck in a slow filesystem call.
+        runtime.shutdown_timeout(Duration::from_millis(200));
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

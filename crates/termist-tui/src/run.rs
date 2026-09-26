@@ -204,10 +204,11 @@ async fn perform(
     for action in actions {
         match action {
             Action::Send(req) => write_frame(writer, &req).await?,
-            // A slow or hung folder (a network mount) blocks only that thread.
+            // A slow or hung folder (a network mount) blocks only that thread. It is a
+            // detached thread, not a runtime task, so quitting never waits for it.
             Action::ListDir(dir) => {
                 let listings = listings.clone();
-                tokio::task::spawn_blocking(move || {
+                std::thread::spawn(move || {
                     let listing = browse::list_dir(&dir);
                     let _ = listings.send((dir, listing));
                 });
