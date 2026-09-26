@@ -53,8 +53,42 @@ impl Store {
             Err(e) => {
                 let aside = PathBuf::from(format!("{}.broken-{}", path.display(), now_ms()));
                 tracing::warn!(error = %e, aside = %aside.display(), "database unusable; starting fresh");
-                std::fs::rename(path, &aside)?;
-                Self::try_open(path)
+
+                // Move main file aside
+                if let Err(rename_err) = std::fs::rename(path, &aside) {
+                    tracing::warn!(
+                        error = %rename_err,
+                        "failed to move database aside; using in-memory store"
+                    );
+                    return Ok(Self::open_in_memory());
+                }
+
+                // Move side files aside too (if they still exist)
+                for suffix in &["-journal", "-wal", "-shm"] {
+                    let side_path = PathBuf::from(format!("{}{}", path.display(), suffix));
+                    if side_path.exists() {
+                        let aside_side = PathBuf::from(format!("{}{}", aside.display(), suffix));
+                        if let Err(e) = std::fs::rename(&side_path, &aside_side) {
+                            tracing::warn!(
+                                error = %e,
+                                path = %side_path.display(),
+                                "failed to move database side file aside"
+                            );
+                        }
+                    }
+                }
+
+                // Retry opening with fresh database
+                match Self::try_open(path) {
+                    Ok(store) => Ok(store),
+                    Err(retry_err) => {
+                        tracing::warn!(
+                            error = %retry_err,
+                            "failed to create fresh database; using in-memory store"
+                        );
+                        Ok(Self::open_in_memory())
+                    }
+                }
             }
         }
     }
@@ -70,6 +104,8 @@ impl Store {
 
     fn migrate(conn: Connection) -> anyhow::Result<Store> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Safety probe: a garbage file will fail here
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         match version {
             0 => conn.execute_batch(SCHEMA_V1)?,
@@ -332,5 +368,45 @@ mod tests {
             )
             .unwrap();
         assert!(store.load().unwrap().1.is_empty());
+    }
+
+    // Review Focus 1: leftover journal is handled safely
+    #[test]
+    fn corrupt_database_with_leftover_journal_starts_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        let journal_path = tmp.path().join("termist.db-journal");
+
+        // Create a corrupt database
+        std::fs::write(&path, b"garbage").unwrap();
+        // Create a leftover journal file that would interfere
+        std::fs::write(&journal_path, b"old journal data").unwrap();
+
+        // Open the corrupt database — should recover safely
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store.load().unwrap().0.is_empty(),
+            "fresh store loads empty"
+        );
+
+        // Verify no stale journal remains at original location that could interfere
+        assert!(
+            !journal_path.exists(),
+            "no journal at original location (SQLite auto-cleaned or was moved aside)"
+        );
+
+        // Verify corrupt file was moved aside
+        let files: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            files
+                .iter()
+                .any(|name| name.starts_with("termist.db.broken-")),
+            "corrupt database should be moved aside. Files: {:?}",
+            files
+        );
     }
 }
