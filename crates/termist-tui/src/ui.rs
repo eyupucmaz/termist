@@ -273,7 +273,9 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     if let Some(screen) = app.screens.get(&info.id) {
         render_screen(f.buffer_mut(), areas.pane_inner, screen);
         let c = screen.cursor;
+        // An overlay on top has the keys; a text box places its own cursor.
         if focused
+            && app.overlays.is_empty()
             && screen.modes.show_cursor
             && c.col < areas.pane_inner.width
             && c.row < areas.pane_inner.height
@@ -704,6 +706,27 @@ mod tests {
         let text = screen_text(&render(&mut app, 60, 16));
         assert!(text.contains("◆ mine"));
         assert!(!text.contains("Auto Title"));
+    }
+
+    // A list on top of the focused pane has no text cursor: the pane's must not show
+    // through it. A text box on top shows its own.
+    #[test]
+    fn the_pane_cursor_hides_under_a_list_overlay() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Enter));
+        assert!(render(&mut app, 60, 16).backend().cursor_visible());
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('/')));
+        assert!(!render(&mut app, 60, 16).backend().cursor_visible());
+        app.on_key(key(K::Esc));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('p')));
+        let t = render(&mut app, 60, 16);
+        assert!(
+            t.backend().cursor_visible(),
+            "the quick prompt's own cursor"
+        );
     }
 
     #[test]
