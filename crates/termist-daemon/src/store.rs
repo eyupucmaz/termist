@@ -1,0 +1,336 @@
+//! Persistence (PRD §11.6): projects and sessions in SQLite. Status is not stored:
+//! a stored session has no process in a new daemon, so it loads as Disconnected.
+use rusqlite::{Connection, params};
+use std::path::{Path, PathBuf};
+use termist_core::{
+    AgentStatus, Harness, ProjectId, ProjectInfo, SessionId, SessionInfo, SessionKind, now_ms,
+};
+
+pub const SCHEMA_VERSION: i64 = 1;
+
+const SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    created_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    agent_session_id TEXT,
+    title TEXT,
+    last_activity_ms INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+PRAGMA user_version = 1;
+";
+
+pub struct Store {
+    conn: Connection,
+}
+
+pub fn encode_kind(kind: &SessionKind) -> &'static str {
+    match kind {
+        SessionKind::Shell => "shell",
+        SessionKind::Agent { harness } => harness.id(),
+    }
+}
+
+pub fn decode_kind(s: &str) -> Option<SessionKind> {
+    match s {
+        "shell" => Some(SessionKind::Shell),
+        other => Harness::from_id(other).map(|harness| SessionKind::Agent { harness }),
+    }
+}
+
+impl Store {
+    pub fn open(path: &Path) -> anyhow::Result<Store> {
+        match Self::try_open(path) {
+            Ok(store) => Ok(store),
+            Err(e) => {
+                let aside = PathBuf::from(format!("{}.broken-{}", path.display(), now_ms()));
+                tracing::warn!(error = %e, aside = %aside.display(), "database unusable; starting fresh");
+                std::fs::rename(path, &aside)?;
+                Self::try_open(path)
+            }
+        }
+    }
+
+    pub fn open_in_memory() -> Store {
+        Self::migrate(Connection::open_in_memory().expect("in-memory sqlite"))
+            .expect("fresh schema")
+    }
+
+    fn try_open(path: &Path) -> anyhow::Result<Store> {
+        Self::migrate(Connection::open(path)?)
+    }
+
+    fn migrate(conn: Connection) -> anyhow::Result<Store> {
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        match version {
+            0 => conn.execute_batch(SCHEMA_V1)?,
+            SCHEMA_VERSION => {}
+            newer => anyhow::bail!(
+                "schema version {newer} is newer than this termist ({SCHEMA_VERSION})"
+            ),
+        }
+        Ok(Store { conn })
+    }
+
+    pub fn upsert_project(&self, p: &ProjectInfo) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO projects (id, name, path, created_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path",
+            params![
+                p.id.to_string(),
+                p.name,
+                p.path.to_string_lossy(),
+                now_ms() as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_session(&self, s: &SessionInfo) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_session_id = excluded.agent_session_id,
+               title = excluded.title, last_activity_ms = excluded.last_activity_ms",
+            params![
+                s.id.to_string(),
+                s.project.to_string(),
+                encode_kind(&s.kind),
+                s.name,
+                s.agent_session_id,
+                s.title,
+                s.last_activity_ms as i64,
+                now_ms() as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_session(&self, id: SessionId) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            params![id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load(&self) -> anyhow::Result<(Vec<ProjectInfo>, Vec<SessionInfo>)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, path FROM projects ORDER BY created_ms, rowid")?;
+        let projects = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(|row| row.ok())
+            .filter_map(|(id, name, path)| {
+                Some(ProjectInfo {
+                    id: id.parse::<ProjectId>().ok()?,
+                    name,
+                    path: PathBuf::from(path),
+                })
+            })
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms
+             FROM sessions ORDER BY created_ms, rowid",
+        )?;
+        let sessions = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })?
+            .filter_map(|row| row.ok())
+            .filter_map(|(id, project, kind, name, agent_session_id, title, last)| {
+                Some(SessionInfo {
+                    id: id.parse::<SessionId>().ok()?,
+                    project: project.parse::<ProjectId>().ok()?,
+                    kind: decode_kind(&kind)?,
+                    name,
+                    status: AgentStatus::Disconnected,
+                    agent_session_id,
+                    title,
+                    last_activity_ms: last.max(0) as u64,
+                })
+            })
+            .collect();
+        Ok((projects, sessions))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use termist_core::Harness;
+
+    fn project(path: &str) -> ProjectInfo {
+        ProjectInfo {
+            id: ProjectId::new(),
+            name: "api".into(),
+            path: PathBuf::from(path),
+        }
+    }
+
+    fn session(project: ProjectId, kind: SessionKind, name: &str) -> SessionInfo {
+        SessionInfo {
+            id: SessionId::new(),
+            project,
+            kind,
+            name: name.into(),
+            status: AgentStatus::Running,
+            agent_session_id: Some("agent-1".into()),
+            title: Some("Fix Login".into()),
+            last_activity_ms: 42,
+        }
+    }
+
+    #[test]
+    fn projects_and_sessions_survive_a_reopen_and_come_back_disconnected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        let p = project("/code/api");
+        let a = session(
+            p.id,
+            SessionKind::Agent {
+                harness: Harness::Codex,
+            },
+            "codex-1",
+        );
+        let b = session(p.id, SessionKind::Shell, "shell-2");
+        {
+            let store = Store::open(&path).unwrap();
+            store.upsert_project(&p).unwrap();
+            store.upsert_session(&a).unwrap();
+            store.upsert_session(&b).unwrap();
+        }
+        let (projects, sessions) = Store::open(&path).unwrap().load().unwrap();
+        assert_eq!(projects, vec![p]);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, a.id, "ordered by creation");
+        assert_eq!(
+            sessions[0].kind,
+            SessionKind::Agent {
+                harness: Harness::Codex
+            }
+        );
+        assert_eq!(sessions[0].agent_session_id.as_deref(), Some("agent-1"));
+        assert_eq!(sessions[0].title.as_deref(), Some("Fix Login"));
+        assert!(
+            sessions
+                .iter()
+                .all(|s| s.status == AgentStatus::Disconnected)
+        );
+    }
+
+    #[test]
+    fn upsert_updates_in_place_and_delete_removes() {
+        let store = Store::open_in_memory();
+        let p = project("/code/api");
+        store.upsert_project(&p).unwrap();
+        let mut s = session(p.id, SessionKind::Shell, "shell-1");
+        store.upsert_session(&s).unwrap();
+        s.name = "renamed".into();
+        s.agent_session_id = None;
+        store.upsert_session(&s).unwrap();
+        let (_, sessions) = store.load().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "renamed");
+        assert_eq!(sessions[0].agent_session_id, None);
+        store.delete_session(s.id).unwrap();
+        assert!(store.load().unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn kinds_round_trip_through_their_text_form() {
+        for kind in [
+            SessionKind::Shell,
+            SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+            SessionKind::Agent {
+                harness: Harness::OpenCode,
+            },
+        ] {
+            assert_eq!(decode_kind(encode_kind(&kind)), Some(kind));
+        }
+        assert_eq!(decode_kind("cursor"), None);
+    }
+
+    // Review Focus 1
+    #[test]
+    fn a_corrupt_database_is_moved_aside_and_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        std::fs::write(
+            &path,
+            b"this is not sqlite, just garbage bytes that fill a page",
+        )
+        .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert!(store.load().unwrap().0.is_empty());
+        let aside: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("termist.db.broken-")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1, "the bad file is kept for inspection");
+    }
+
+    // Review Focus 1
+    #[test]
+    fn a_database_from_a_newer_termist_is_moved_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.load().unwrap().1.is_empty());
+        assert!(std::fs::read_dir(tmp.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("termist.db.broken-")
+        }));
+    }
+
+    #[test]
+    fn sessions_of_an_unknown_kind_are_skipped_not_fatal() {
+        let store = Store::open_in_memory();
+        let p = project("/code/api");
+        store.upsert_project(&p).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO sessions (id, project_id, kind, name, last_activity_ms, created_ms) VALUES (?1, ?2, 'cursor', 'x', 0, 0)",
+                rusqlite::params![SessionId::new().to_string(), p.id.to_string()],
+            )
+            .unwrap();
+        assert!(store.load().unwrap().1.is_empty());
+    }
+}

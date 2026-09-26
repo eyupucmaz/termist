@@ -10,4 +10,5 @@ pub mod registry;
 pub mod resolve;
 pub mod server;
 pub mod session;
+pub mod store;
 pub mod transcript;
