@@ -442,9 +442,8 @@ mod tests {
         assert_eq!(status_style(AgentStatus::Running).2, "running");
     }
 
-    // Review Focus: TestBackend's Display is text-only, so no snapshot would
-    // catch a swapped or wrong colour. Pin the full (glyph, Color, word) tuple
-    // for every status against the Global Constraints table.
+    // TestBackend's Display is text-only, so no snapshot would catch a swapped or
+    // wrong colour. Pin the full (glyph, Color, word) tuple for every status.
     #[test]
     fn status_style_matches_the_global_table() {
         assert_eq!(
@@ -519,7 +518,6 @@ mod tests {
         assert_eq!(buf[(0, 15)].fg, Color::Yellow);
     }
 
-    // Review Focus 5
     #[test]
     fn tiny_terminals_do_not_panic() {
         for (w, h) in [(20, 5), (1, 1), (0, 0), (200, 3)] {
@@ -550,7 +548,6 @@ mod tests {
         assert!(text.contains("Enter resumes this session"));
     }
 
-    // Review Focus 4
     #[test]
     fn the_picker_marks_missing_clis() {
         let mut app = fixture();

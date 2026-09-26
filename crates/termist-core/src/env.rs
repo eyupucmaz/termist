@@ -1,9 +1,9 @@
 /// Environment variables removed before spawning an agent: they make agent CLIs think
-/// they run inside tmux, zellij, the host terminal, or a nested Claude Code session
-/// (spike 2026-09-25). Only the nested-session markers of Claude Code are removed
+/// they run inside tmux, zellij, the host terminal, or a nested Claude Code session.
+/// Only the nested-session markers of Claude Code are removed
 /// (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SSE_PORT`); every other
 /// `CLAUDE_CODE_*` variable is user configuration (Bedrock, Vertex, OAuth token, …)
-/// and is passed through (controller ruling R13).
+/// and is passed through.
 pub fn should_scrub(name: &str) -> bool {
     matches!(
         name,

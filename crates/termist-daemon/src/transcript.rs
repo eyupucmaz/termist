@@ -1,5 +1,5 @@
 //! Claude fires no hook when a turn is cancelled (Esc) or a permission is denied; its
-//! transcript gets an "[Request interrupted by user…]" line instead (spike §2.5).
+//! transcript gets an "[Request interrupted by user…]" line instead.
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -106,7 +106,6 @@ mod tests {
         assert!(t.poll());
     }
 
-    /// Review Focus 6
     #[test]
     fn missing_truncated_or_replaced_files_never_panic_or_misfire() {
         let tmp = tempfile::tempdir().unwrap();

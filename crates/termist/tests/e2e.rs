@@ -32,7 +32,6 @@ impl Drop for DaemonGuard {
     }
 }
 
-// Review Focus 2
 #[test]
 fn a_hook_without_a_daemon_exits_zero_quickly() {
     let tmp = tempfile::tempdir().unwrap();
@@ -469,7 +468,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-// Final review F1: the input thread used to start before the keyboard-enhancement
+// The input thread used to start before the keyboard-enhancement
 // query and hold crossterm's event-reader lock, so the query timed out after 2 s: the
 // first frame came 2 s late and DISAMBIGUATE_ESCAPE_CODES was never pushed.
 #[test]

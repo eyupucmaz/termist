@@ -1,5 +1,5 @@
 //! Codex hooks, injected with `-c` flags only: nothing is written to ~/.codex or the
-//! repo (spike 2026-09-25 §3). Our hooks are trusted through a `hooks.state` entry
+//! repo. Our hooks are trusted through a `hooks.state` entry
 //! whose hash Codex recomputes; if the format ever drifts, Codex shows its own review
 //! screen instead, and termist never passes `--dangerously-bypass-hook-trust`.
 use serde_json::{Value, json};
@@ -113,7 +113,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const SPIKE_BIN: &str = "/private/tmp/claude-501/-Users-eyup-Code-termist/b9b40857-4886-479a-9330-5db012e9ab1c/scratchpad/bin/hooklog";
+    /// The hook binary path of the recorded Codex run the golden hashes below come
+    /// from. It is part of the hashed input, so it must stay exactly as it is.
+    const RECORDED_BIN: &str = "/private/tmp/claude-501/-Users-eyup-Code-termist/b9b40857-4886-479a-9330-5db012e9ab1c/scratchpad/bin/hooklog";
 
     #[test]
     fn event_names_become_snake_case() {
@@ -126,17 +128,17 @@ mod tests {
     #[test]
     fn trust_hashes_match_the_ones_codex_computed() {
         assert_eq!(
-            trust_hash("Stop", &format!("{SPIKE_BIN} CX:Stop")),
+            trust_hash("Stop", &format!("{RECORDED_BIN} CX:Stop")),
             "sha256:70ff015721d34c53546596e5d77d7c42975f83eb3f237f65b3be4b6326f987b8"
         );
         assert_eq!(
-            trust_hash("Interrupt", &format!("{SPIKE_BIN} CX:Interrupt")),
+            trust_hash("Interrupt", &format!("{RECORDED_BIN} CX:Interrupt")),
             "sha256:10b00d56b15d8f826906c83db8146c8a792bebb9a223100b31a11f34ad39fe7a",
             "interrupt uses the 1 s timeout"
         );
     }
 
-    /// Review Focus 5: every hook carries its own trust entry, computed from the very
+    /// Every hook carries its own trust entry, computed from the very
     /// same command string, and the bypass flag never appears.
     #[test]
     fn every_hook_is_paired_with_its_trust_entry() {

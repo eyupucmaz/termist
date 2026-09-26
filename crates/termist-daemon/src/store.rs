@@ -357,7 +357,6 @@ mod tests {
         assert_eq!(decode_kind("cursor"), None);
     }
 
-    // Review Focus 1
     #[test]
     fn a_corrupt_database_is_moved_aside_and_replaced() {
         let tmp = tempfile::tempdir().unwrap();
@@ -381,7 +380,6 @@ mod tests {
         assert_eq!(aside.len(), 1, "the bad file is kept for inspection");
     }
 
-    // Review Focus 1
     #[test]
     fn a_database_from_a_newer_termist_is_moved_aside() {
         let tmp = tempfile::tempdir().unwrap();
@@ -440,7 +438,7 @@ mod tests {
         assert!(store.load().unwrap().1.is_empty());
     }
 
-    // Review Focus 1: leftover journal is handled safely
+    // A leftover journal next to a corrupt file must not get in the way of the new one.
     #[test]
     fn corrupt_database_with_leftover_journal_starts_fresh() {
         let tmp = tempfile::tempdir().unwrap();

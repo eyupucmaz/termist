@@ -117,9 +117,9 @@ async fn wait_screen_text(c: &mut Client, id: SessionId, needle: &str) -> Screen
 }
 
 /// Waits for a `SessionUpdated` for `id` whose status differs from `from`, skipping only
-/// duplicate broadcasts of that same `from` status in between (Task 9: PTY activity
-/// broadcasts a `SessionUpdated` that repeats the current, unchanged status, which can
-/// race with a real transition). Unlike filtering for a specific expected status, this
+/// duplicate broadcasts of that same `from` status in between (PTY activity broadcasts
+/// a `SessionUpdated` that repeats the current, unchanged status, which can race with a
+/// real transition). Unlike filtering for a specific expected status, this
 /// still lets a test catch a wrong transition: the caller asserts on the returned status.
 async fn status_change(c: &mut Client, id: SessionId, from: AgentStatus) -> AgentStatus {
     match next_event(
@@ -343,7 +343,6 @@ async fn codex_hooks_drive_status_and_capture_its_session_id() {
     );
 }
 
-// Review Focus 3
 #[tokio::test]
 async fn opencode_subagent_events_do_not_move_the_parent_card() {
     let tmp = tempfile::tempdir().unwrap();
@@ -616,7 +615,6 @@ async fn a_stale_interrupt_line_does_not_cancel_the_next_turn() {
     );
 }
 
-// Review Focus 3
 #[tokio::test]
 async fn a_missing_agent_cli_is_an_error_not_a_crash() {
     let d = start(DaemonConfig {
@@ -712,7 +710,6 @@ async fn a_plugin_that_cannot_be_written_makes_opencode_unavailable() {
     shutdown(&paths, task).await;
 }
 
-// Review Focus 4
 #[tokio::test]
 async fn reattaching_after_a_dropped_client_gets_the_whole_screen() {
     let d = start(shell_config()).await;
@@ -758,7 +755,6 @@ async fn reattaching_after_a_dropped_client_gets_the_whole_screen() {
     assert!((0..10).any(|r| screen.line_text(r).contains("marker-42")));
 }
 
-// Review Focus 1
 #[tokio::test]
 async fn a_second_daemon_refuses_and_a_stale_socket_is_ignored() {
     let tmp = tempfile::tempdir().unwrap();
@@ -789,8 +785,8 @@ async fn a_second_daemon_refuses_and_a_stale_socket_is_ignored() {
         .unwrap();
 }
 
-// Review fix round 1: two daemons racing to start on the same runtime dir must not
-// both bind; exactly one wins and the other bails cleanly.
+// Two daemons racing to start on the same runtime dir must not both bind; exactly
+// one wins and the other bails cleanly.
 #[tokio::test]
 async fn two_daemons_started_together_leave_exactly_one() {
     enum Loser {
@@ -1058,7 +1054,6 @@ async fn a_claude_card_without_a_prompt_resumes_as_a_new_conversation() {
     wait_screen_text(&mut c, s.id, &format!("--resume {new_id}")).await;
 }
 
-// Review Focus 2
 #[tokio::test]
 async fn resuming_without_a_captured_id_starts_fresh() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1078,7 +1073,7 @@ async fn resuming_without_a_captured_id_starts_fresh() {
     )
     .await;
     // The echo agent prints output before it exits, and PTY activity may itself
-    // broadcast a SessionUpdated (Task 9) before the exit is reported; wait for the
+    // broadcast a SessionUpdated before the exit is reported; wait for the
     // first update whose status has moved off Fresh, and check that one instead.
     let exited = match next_event(&mut c, |e| {
         matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && u.status != AgentStatus::Fresh)

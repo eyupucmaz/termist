@@ -1,6 +1,6 @@
 #!/bin/sh
 # Stand-in for `claude`: echoes its arguments, then plays the hook sequence of one
-# real turn with a permission prompt (spike 2026-09-25), waiting for the user's answer.
+# real turn with a permission prompt, waiting for the user's answer.
 # Like Claude Code, it runs the hook command strings from the `--settings` file it was
 # given, with the event JSON on stdin. TERMIST_HOME is removed from the hooks' env so
 # that only TERMIST_RUNTIME_DIR (exported by the daemon) can route them back.

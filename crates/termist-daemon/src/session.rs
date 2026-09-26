@@ -323,7 +323,7 @@ mod tests {
         wait_for_text(&cmd, "bye").await;
     }
 
-    // Final review F3: a child that never reads its input fills the PTY buffer, so a
+    // A child that never reads its input fills the PTY buffer, so a
     // write blocks. That must not block the session task: Kill still has to work.
     // Raw mode matters: in canonical mode macOS discards input past MAX_CANON
     // (IMAXBEL) instead of blocking the writer, so the test would prove nothing.

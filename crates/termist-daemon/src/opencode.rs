@@ -1,5 +1,5 @@
 //! OpenCode status through a plugin that lives in termist's own config dir, which
-//! OpenCode layers on top of the user's config (spike 2026-09-25 §4).
+//! OpenCode layers on top of the user's config.
 use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

@@ -668,7 +668,6 @@ mod tests {
         );
     }
 
-    // Review Focus 4
     #[test]
     fn a_cli_that_is_not_installed_cannot_be_started() {
         let (mut app, _) = app();
@@ -868,7 +867,6 @@ mod tests {
         assert_eq!(app.selected, Some(s[1].id));
     }
 
-    // Review Focus 5
     #[test]
     fn a_zero_sized_pane_never_resizes_or_attaches() {
         let (mut app, _) = app();
