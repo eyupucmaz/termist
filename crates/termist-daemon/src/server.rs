@@ -1,5 +1,5 @@
 use crate::claude;
-use crate::launch::{DaemonConfig, Launcher};
+use crate::launch::{DaemonConfig, HarnessPrograms, Launcher};
 use crate::registry::{self, Msg, Registry};
 use crate::session::ClientId;
 use anyhow::bail;
@@ -73,18 +73,24 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     let listener = ipc::listen(&paths)?;
     let exe = std::env::current_exe()?;
     let claude_settings = claude::write_settings(&paths, &exe)?;
+    let (programs, harnesses) = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || HarnessPrograms::resolve(&config)).await?
+    };
+    tracing::info!(?harnesses, "agent CLIs");
     let (tx, rx) = unbounded_channel();
     let (notes_tx, notes_rx) = unbounded_channel();
     let (stop_tx, mut stop_rx) = oneshot::channel();
     let launcher = Launcher {
         config,
+        programs,
         exe,
         claude_settings,
         runtime_dir: paths.runtime_dir.clone(),
         termist_home: std::env::var_os("TERMIST_HOME").map(PathBuf::from),
     };
     tokio::spawn(registry::run(
-        Registry::new(launcher, notes_tx, stop_tx),
+        Registry::new(launcher, harnesses, notes_tx, stop_tx),
         rx,
         notes_rx,
     ));

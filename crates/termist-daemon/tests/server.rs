@@ -19,7 +19,7 @@ async fn start(config: DaemonConfig) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths::under(tmp.path().to_path_buf());
     let task = tokio::spawn(server::run(paths.clone(), config));
-    for _ in 0..100 {
+    for _ in 0..250 {
         if Client::connect(&paths).await.is_ok() {
             return Daemon {
                 paths,
@@ -35,7 +35,7 @@ async fn start(config: DaemonConfig) -> Daemon {
 fn shell_config() -> DaemonConfig {
     DaemonConfig {
         shell: Some("/bin/sh".into()),
-        claude_bin: None,
+        ..Default::default()
     }
 }
 
@@ -161,6 +161,7 @@ async fn claude_hooks_drive_the_status_dot() {
     let d = start(DaemonConfig {
         shell: None,
         claude_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
     })
     .await;
     let mut ui = Client::connect(&d.paths).await.unwrap();
@@ -222,6 +223,7 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
     let d = start(DaemonConfig {
         shell: None,
         claude_bin: Some("/nonexistent/claude".into()),
+        ..Default::default()
     })
     .await;
     let mut c = Client::connect(&d.paths).await.unwrap();
@@ -254,6 +256,28 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
         |e| matches!(e, ServerEvent::State(s) if s.sessions.is_empty()),
     )
     .await;
+}
+
+#[tokio::test]
+async fn list_state_is_followed_by_harness_availability() {
+    let d = start(DaemonConfig {
+        claude_bin: Some("/bin/sh".into()),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    c.send(&ClientRequest::ListState).await.unwrap();
+    next_event(&mut c, |e| matches!(e, ServerEvent::State(_))).await;
+    match next_event(&mut c, |e| matches!(e, ServerEvent::Harnesses(_))).await {
+        ServerEvent::Harnesses(list) => {
+            assert_eq!(
+                list.iter().map(|h| h.harness).collect::<Vec<_>>(),
+                Harness::ALL.to_vec()
+            );
+            assert!(list[0].available, "a configured claude binary is available");
+        }
+        _ => unreachable!(),
+    }
 }
 
 // Review Focus 4
@@ -311,7 +335,7 @@ async fn a_second_daemon_refuses_and_a_stale_socket_is_ignored() {
     std::fs::write(paths.socket_path(), b"stale").unwrap();
     let first = tokio::spawn(server::run(paths.clone(), shell_config()));
     let mut up = false;
-    for _ in 0..100 {
+    for _ in 0..250 {
         if Client::connect(&paths).await.is_ok() {
             up = true;
             break;

@@ -6,8 +6,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, ProjectId, ProjectInfo, ServerEvent, SessionId,
-    SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, ProjectId, ProjectInfo, ServerEvent,
+    SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -31,6 +31,7 @@ struct Session {
 
 pub struct Registry {
     launcher: Launcher,
+    harnesses: Vec<HarnessInfo>,
     projects: Vec<ProjectInfo>,
     sessions: Vec<Session>,
     clients: HashMap<ClientId, UnboundedSender<ServerEvent>>,
@@ -42,11 +43,13 @@ pub struct Registry {
 impl Registry {
     pub fn new(
         launcher: Launcher,
+        harnesses: Vec<HarnessInfo>,
         notes: UnboundedSender<SessionNote>,
         shutdown: oneshot::Sender<()>,
     ) -> Registry {
         Registry {
             launcher,
+            harnesses,
             projects: vec![],
             sessions: vec![],
             clients: HashMap::new(),
@@ -139,7 +142,10 @@ impl Registry {
                     message: "duplicate hello".into(),
                 },
             ),
-            ClientRequest::ListState => self.send(client, ServerEvent::State(self.state())),
+            ClientRequest::ListState => {
+                self.send(client, ServerEvent::State(self.state()));
+                self.send(client, ServerEvent::Harnesses(self.harnesses.clone()));
+            }
             ClientRequest::AddProject { path } => match self.add_project(path) {
                 Ok(()) => self.broadcast(ServerEvent::State(self.state())),
                 Err(e) => self.send(

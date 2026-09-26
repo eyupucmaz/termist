@@ -193,7 +193,7 @@ async fn a_fake_claude_turn_end_to_end() {
     };
     let paths = Paths::under(home.clone());
     let mut c = None;
-    for _ in 0..150 {
+    for _ in 0..250 {
         if let Ok(client) = Client::connect(&paths).await {
             c = Some(client);
             break;

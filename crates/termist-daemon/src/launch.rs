@@ -1,6 +1,6 @@
 use crate::session::SpawnSpec;
 use std::path::{Path, PathBuf};
-use termist_core::{Harness, SessionId, SessionKind};
+use termist_core::{Harness, HarnessInfo, SessionId, SessionKind};
 
 #[derive(Clone, Debug, Default)]
 pub struct DaemonConfig {
@@ -8,6 +8,10 @@ pub struct DaemonConfig {
     pub shell: Option<String>,
     /// Program for Claude sessions; default `claude` from PATH.
     pub claude_bin: Option<String>,
+    /// Program for Codex sessions; default `codex` from PATH.
+    pub codex_bin: Option<String>,
+    /// Program for OpenCode sessions; default `opencode` from PATH.
+    pub opencode_bin: Option<String>,
 }
 
 impl DaemonConfig {
@@ -15,7 +19,89 @@ impl DaemonConfig {
         DaemonConfig {
             shell: std::env::var("TERMIST_SHELL").ok(),
             claude_bin: std::env::var("TERMIST_CLAUDE_BIN").ok(),
+            codex_bin: std::env::var("TERMIST_CODEX_BIN").ok(),
+            opencode_bin: std::env::var("TERMIST_OPENCODE_BIN").ok(),
         }
+    }
+}
+
+/// The program each harness launches: a configured `TERMIST_*_BIN`, else the path the
+/// resolver found, else the bare name (spawning it then fails with a clear error).
+#[derive(Clone, Debug)]
+pub struct HarnessPrograms {
+    pub claude: String,
+    pub codex: String,
+    pub opencode: String,
+}
+
+impl HarnessPrograms {
+    pub fn get(&self, harness: Harness) -> &str {
+        match harness {
+            Harness::Claude => &self.claude,
+            Harness::Codex => &self.codex,
+            Harness::OpenCode => &self.opencode,
+        }
+    }
+
+    pub fn resolve(config: &DaemonConfig) -> (HarnessPrograms, Vec<HarnessInfo>) {
+        Self::resolve_with(config, crate::resolve::find_program)
+    }
+
+    /// Looks the three CLIs up in parallel: a missing one can cost a login-shell start.
+    pub fn resolve_with(
+        config: &DaemonConfig,
+        find: impl Fn(&str) -> Option<PathBuf> + Sync,
+    ) -> (HarnessPrograms, Vec<HarnessInfo>) {
+        let found: Vec<(String, bool)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = Harness::ALL
+                .iter()
+                .map(|&harness| {
+                    let find = &find;
+                    let configured = configured_bin(config, harness);
+                    scope.spawn(move || match configured {
+                        Some(bin) => (bin.clone(), true),
+                        None => match find(harness.program()) {
+                            Some(path) => (path.display().to_string(), true),
+                            None => (harness.program().to_string(), false),
+                        },
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("resolver thread"))
+                .collect()
+        });
+        let infos = Harness::ALL
+            .iter()
+            .zip(&found)
+            .map(|(&harness, (_, available))| HarnessInfo {
+                harness,
+                available: *available,
+            })
+            .collect();
+        let [claude, codex, opencode]: [String; 3] = found
+            .into_iter()
+            .map(|(program, _)| program)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("one program per harness");
+        (
+            HarnessPrograms {
+                claude,
+                codex,
+                opencode,
+            },
+            infos,
+        )
+    }
+}
+
+fn configured_bin(config: &DaemonConfig, harness: Harness) -> &Option<String> {
+    match harness {
+        Harness::Claude => &config.claude_bin,
+        Harness::Codex => &config.codex_bin,
+        Harness::OpenCode => &config.opencode_bin,
     }
 }
 
@@ -36,6 +122,7 @@ pub struct Launch {
 
 pub struct Launcher {
     pub config: DaemonConfig,
+    pub programs: HarnessPrograms,
     pub exe: PathBuf,
     pub claude_settings: PathBuf,
     /// The daemon's runtime dir, exported as `TERMIST_RUNTIME_DIR` so `termist hook`
@@ -78,17 +165,14 @@ impl Launcher {
                     args.push(p.to_string());
                 }
                 (
-                    self.config
-                        .claude_bin
-                        .clone()
-                        .unwrap_or_else(|| "claude".into()),
+                    self.programs.get(Harness::Claude).to_string(),
                     args,
                     Some(sid),
                 )
             }
             SessionKind::Agent {
                 harness: harness @ (Harness::Codex | Harness::OpenCode),
-            } => (harness.program().to_string(), vec![], None),
+            } => (self.programs.get(*harness).to_string(), vec![], None),
         };
         Launch {
             spec: SpawnSpec {
@@ -124,7 +208,12 @@ mod tests {
         Launcher {
             config: DaemonConfig {
                 shell: Some("/bin/zsh".into()),
-                claude_bin: Some("/fake/claude".into()),
+                ..Default::default()
+            },
+            programs: HarnessPrograms {
+                claude: "/fake/claude".into(),
+                codex: "/fake/codex".into(),
+                opencode: "/fake/opencode".into(),
             },
             exe: PathBuf::from("/usr/local/bin/termist"),
             claude_settings: PathBuf::from("/data/claude-hooks.json"),
@@ -209,13 +298,11 @@ mod tests {
     }
 
     #[test]
-    fn claude_defaults_to_the_binary_on_path() {
-        let mut l = launcher();
-        l.config.claude_bin = None;
+    fn claude_without_a_prompt_has_no_positional_argument() {
         let kind = SessionKind::Agent {
             harness: Harness::Claude,
         };
-        let launch = l.launch(LaunchRequest {
+        let launch = launcher().launch(LaunchRequest {
             id: SessionId::new(),
             kind: &kind,
             prompt: None,
@@ -223,11 +310,47 @@ mod tests {
             cols: 80,
             rows: 24,
         });
-        assert_eq!(launch.spec.program, "claude");
         assert_eq!(
             launch.spec.args.len(),
             4,
             "no prompt means no positional argument"
+        );
+    }
+
+    #[test]
+    fn a_configured_binary_wins_and_missing_clis_are_reported() {
+        use termist_core::HarnessInfo;
+
+        let config = DaemonConfig {
+            claude_bin: Some("/opt/claude".into()),
+            ..Default::default()
+        };
+        let (programs, infos) = HarnessPrograms::resolve_with(&config, |name| {
+            (name == "codex").then(|| PathBuf::from("/usr/local/bin/codex"))
+        });
+        assert_eq!(programs.get(Harness::Claude), "/opt/claude");
+        assert_eq!(programs.get(Harness::Codex), "/usr/local/bin/codex");
+        assert_eq!(
+            programs.get(Harness::OpenCode),
+            "opencode",
+            "unresolved CLIs keep their bare name"
+        );
+        assert_eq!(
+            infos,
+            vec![
+                HarnessInfo {
+                    harness: Harness::Claude,
+                    available: true
+                },
+                HarnessInfo {
+                    harness: Harness::Codex,
+                    available: true
+                },
+                HarnessInfo {
+                    harness: Harness::OpenCode,
+                    available: false
+                },
+            ]
         );
     }
 }

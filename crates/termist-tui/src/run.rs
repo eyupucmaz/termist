@@ -26,7 +26,7 @@ pub async fn connect_or_spawn(paths: &Paths) -> anyhow::Result<Client> {
         Err(_) => {}
     }
     spawn_daemon(paths)?;
-    for _ in 0..150 {
+    for _ in 0..250 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         if let Ok(client) = Client::connect(paths).await {
             return Ok(client);
