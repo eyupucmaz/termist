@@ -100,7 +100,7 @@ impl TextInput {
             }
             KeyCode::Char('b') if alt => self.cursor = self.word_left(),
             KeyCode::Char('f') if alt => self.cursor = self.word_right(),
-            KeyCode::Char(_) if ctrl => return Edit::Ignored,
+            KeyCode::Char(_) if ctrl || alt => return Edit::Ignored,
             KeyCode::Char(c) => self.insert_str(c.encode_utf8(&mut [0u8; 4])),
             KeyCode::Backspace if alt => {
                 let start = self.word_left();
@@ -252,6 +252,16 @@ mod tests {
         assert_eq!(press(&mut t, K::Char('o'), M::CONTROL), Edit::Ignored);
         assert_eq!(press(&mut t, K::Char('p'), M::CONTROL), Edit::Ignored);
         assert_eq!(t.text(), "fix it");
+    }
+
+    // A terminal that sends Option as Meta turns Alt+x into ESC x: it is not text.
+    #[test]
+    fn alt_with_a_letter_types_nothing() {
+        let mut t = typed("fix", false);
+        for c in ['x', 'd', 'A', '.'] {
+            assert_eq!(press(&mut t, K::Char(c), M::ALT), Edit::Ignored, "{c:?}");
+        }
+        assert_eq!(t.text(), "fix");
     }
 
     #[test]
