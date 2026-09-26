@@ -80,6 +80,15 @@ impl Paths {
     pub fn daemon_log_path(&self) -> PathBuf {
         self.data_dir.join("daemon.log")
     }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.data_dir.join("termist.db")
+    }
+
+    /// termist's own OpenCode config dir (layered on top of the user's config).
+    pub fn opencode_config_dir(&self) -> PathBuf {
+        self.data_dir.join("opencode")
+    }
 }
 
 fn default_runtime_dir() -> PathBuf {
@@ -144,5 +153,12 @@ mod tests {
         let p = Paths::under(PathBuf::from(format!("/tmp/{}", "x".repeat(120))));
         let err = p.check_socket_path_len().unwrap_err();
         assert!(err.to_string().contains("too long"));
+    }
+
+    #[test]
+    fn data_files_live_under_the_data_dir() {
+        let p = Paths::under(PathBuf::from("/x"));
+        assert_eq!(p.db_path(), PathBuf::from("/x/data/termist.db"));
+        assert_eq!(p.opencode_config_dir(), PathBuf::from("/x/data/opencode"));
     }
 }

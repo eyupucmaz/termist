@@ -73,6 +73,8 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     let listener = ipc::listen(&paths)?;
     let exe = std::env::current_exe()?;
     let claude_settings = claude::write_settings(&paths, &exe)?;
+    let opencode_config_dir = paths.opencode_config_dir();
+    crate::opencode::write_plugin(&opencode_config_dir)?;
     let (programs, harnesses) = {
         let config = config.clone();
         tokio::task::spawn_blocking(move || HarnessPrograms::resolve(&config)).await?
@@ -86,6 +88,7 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
         programs,
         exe,
         claude_settings,
+        opencode_config_dir,
         runtime_dir: paths.runtime_dir.clone(),
         termist_home: std::env::var_os("TERMIST_HOME").map(PathBuf::from),
     };

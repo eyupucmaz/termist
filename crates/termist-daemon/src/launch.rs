@@ -125,6 +125,7 @@ pub struct Launcher {
     pub programs: HarnessPrograms,
     pub exe: PathBuf,
     pub claude_settings: PathBuf,
+    pub opencode_config_dir: PathBuf,
     /// The daemon's runtime dir, exported as `TERMIST_RUNTIME_DIR` so `termist hook`
     /// reaches this daemon's socket or pipe whatever the agent's environment says.
     pub runtime_dir: PathBuf,
@@ -179,11 +180,17 @@ impl Launcher {
             ),
             SessionKind::Agent {
                 harness: Harness::OpenCode,
-            } => (
-                self.programs.get(Harness::OpenCode).to_string(),
-                vec![],
-                None,
-            ),
+            } => {
+                env.extend(crate::opencode::config_env(
+                    &self.opencode_config_dir,
+                    std::env::var_os("OPENCODE_CONFIG_DIR").as_deref(),
+                ));
+                (
+                    self.programs.get(Harness::OpenCode).to_string(),
+                    crate::opencode::args(None),
+                    None,
+                )
+            }
         };
         Launch {
             spec: SpawnSpec {
@@ -228,6 +235,7 @@ mod tests {
             },
             exe: PathBuf::from("/usr/local/bin/termist"),
             claude_settings: PathBuf::from("/data/claude-hooks.json"),
+            opencode_config_dir: PathBuf::from("/data/opencode"),
             runtime_dir: PathBuf::from("/run/termist"),
             termist_home: None,
         }
@@ -385,5 +393,24 @@ mod tests {
             l.agent_session_id, None,
             "codex reports its id in the first SessionStart hook"
         );
+    }
+
+    #[test]
+    fn opencode_runs_with_our_config_dir() {
+        let kind = SessionKind::Agent {
+            harness: Harness::OpenCode,
+        };
+        let l = launcher().launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &kind,
+            prompt: Some("ignored for now"),
+            cwd: Path::new("/p"),
+            cols: 80,
+            rows: 24,
+        });
+        assert_eq!(l.spec.program, "/fake/opencode");
+        assert!(l.spec.args.is_empty());
+        let dir = env(&l, "OPENCODE_CONFIG_DIR").or_else(|| env(&l, "OPENCODE_CONFIG_CONTENT"));
+        assert!(dir.is_some_and(|d| d.contains("/data/opencode")));
     }
 }
