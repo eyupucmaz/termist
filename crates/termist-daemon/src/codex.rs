@@ -69,12 +69,13 @@ pub fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// `codex [resume <id>] -c hooks.… -c hooks.state.… [prompt]`.
+/// `codex [resume <id>] -c hooks.… -c hooks.state=… [prompt]`.
 pub fn args(exe: &Path, resume: Option<&str>, prompt: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(id) = resume {
         args.extend(["resume".to_string(), id.to_string()]);
     }
+    let mut state_entries = Vec::with_capacity(EVENTS.len());
     for ev in EVENTS {
         let cmd = crate::hookcmd::hook_command(exe, Harness::Codex, ev);
         args.push("-c".into());
@@ -82,13 +83,22 @@ pub fn args(exe: &Path, resume: Option<&str>, prompt: Option<&str>) -> Vec<Strin
             "hooks.{ev}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
             toml_string(&cmd)
         ));
-        args.push("-c".into());
-        args.push(format!(
-            "hooks.state.\"/<session-flags>/config.toml:{}:0:0\".trusted_hash=\"{}\"",
-            snake_case(ev),
-            trust_hash(ev, &cmd)
+        state_entries.push(format!(
+            "{}={{trusted_hash={}}}",
+            toml_string(&format!(
+                "/<session-flags>/config.toml:{}:0:0",
+                snake_case(ev)
+            )),
+            toml_string(&trust_hash(ev, &cmd)),
         ));
     }
+    // One `-c hooks.state={…}` flag holding every trust entry as an inline table:
+    // Codex's `-c` parser splits a dotted key at every `.`, so a per-event
+    // `hooks.state."…config.toml:…".trusted_hash=…` flag gets cut at the `.` inside
+    // `config.toml` and never lands, which is why Codex used to show its own hook
+    // review screen. This form leaves the user's own trust entries untouched.
+    args.push("-c".into());
+    args.push(format!("hooks.state={{{}}}", state_entries.join(", ")));
     if resume.is_none()
         && let Some(p) = prompt.filter(|p| !p.trim().is_empty())
     {
@@ -139,34 +149,56 @@ mod tests {
     }
 
     /// Every hook carries its own trust entry, computed from the very
-    /// same command string, and the bypass flag never appears.
+    /// same command string, and the bypass flag never appears. All the trust
+    /// entries ride in a single `hooks.state=` flag (see the comment in
+    /// `args()`), never in the dotted-key form.
     #[test]
     fn every_hook_is_paired_with_its_trust_entry() {
         let exe = Path::new("/usr/local/bin/termist");
         let args = args(exe, None, Some("fix it"));
         assert!(!args.iter().any(|a| a.contains("dangerously")));
+        assert!(
+            !args.iter().any(|a| a.contains(".trusted_hash=")),
+            "trust entries must not use the dotted-key form: {args:?}"
+        );
         assert_eq!(args.last().map(String::as_str), Some("fix it"));
+
+        let state_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.starts_with("hooks.state="))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            state_positions.len(),
+            1,
+            "expected exactly one hooks.state= flag: {args:?}"
+        );
+        let si = state_positions[0];
+        assert_eq!(args[si - 1], "-c");
+        let state = &args[si];
+
         for ev in EVENTS {
             let cmd = crate::hookcmd::hook_command(exe, Harness::Codex, ev);
             let hook = format!(
                 "hooks.{ev}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
                 toml_string(&cmd)
             );
-            let state = format!(
-                "hooks.state.\"/<session-flags>/config.toml:{}:0:0\".trusted_hash=\"{}\"",
-                snake_case(ev),
-                trust_hash(ev, &cmd)
-            );
             let hi = args
                 .iter()
                 .position(|a| *a == hook)
                 .unwrap_or_else(|| panic!("missing {hook}"));
-            let si = args
-                .iter()
-                .position(|a| *a == state)
-                .unwrap_or_else(|| panic!("missing {state}"));
             assert_eq!(args[hi - 1], "-c");
-            assert_eq!(args[si - 1], "-c");
+
+            let entry = format!(
+                "{}={{trusted_hash={}}}",
+                toml_string(&format!("/<session-flags>/config.toml:{}:0:0", snake_case(ev))),
+                toml_string(&trust_hash(ev, &cmd)),
+            );
+            assert!(
+                state.contains(&entry),
+                "missing entry {entry} in {state}"
+            );
         }
     }
 

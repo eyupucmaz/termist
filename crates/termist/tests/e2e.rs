@@ -363,7 +363,7 @@ async fn a_codex_turn_through_its_real_hook_flags() {
     assert_eq!(info.agent_session_id.as_deref(), Some("codex-e2e-1"));
     let text = screen_text(&screen);
     assert!(
-        text.contains("hooks.state."),
+        text.contains("hooks.state="),
         "trust entries are passed: {text}"
     );
     assert!(!text.contains("dangerously"));
