@@ -679,6 +679,39 @@ async fn list_state_is_followed_by_harness_availability() {
     }
 }
 
+// Without its status plugin OpenCode cannot be followed: the daemon still starts,
+// and reports OpenCode as unavailable.
+#[tokio::test]
+async fn a_plugin_that_cannot_be_written_makes_opencode_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path().join("home"));
+    paths.ensure().unwrap();
+    let blocker = paths.opencode_config_dir();
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "a file where the directory should be").unwrap();
+    let task = run_daemon(
+        &paths,
+        DaemonConfig {
+            claude_bin: Some("/bin/sh".into()),
+            opencode_bin: Some("/bin/sh".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut c = Client::connect(&paths).await.unwrap();
+    c.send(&ClientRequest::ListState).await.unwrap();
+    match next_event(&mut c, |e| matches!(e, ServerEvent::Harnesses(_))).await {
+        ServerEvent::Harnesses(list) => {
+            let available = |h| list.iter().find(|i| i.harness == h).unwrap().available;
+            assert!(available(Harness::Claude));
+            assert!(!available(Harness::OpenCode));
+        }
+        _ => unreachable!(),
+    }
+    drop(c);
+    shutdown(&paths, task).await;
+}
+
 // Review Focus 4
 #[tokio::test]
 async fn reattaching_after_a_dropped_client_gets_the_whole_screen() {

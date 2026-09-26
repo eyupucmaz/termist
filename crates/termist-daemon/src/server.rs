@@ -7,7 +7,7 @@ use interprocess::local_socket::tokio::prelude::*;
 use std::fs::{File, TryLockError};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use termist_core::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
+use termist_core::{ClientRequest, Harness, PROTOCOL_VERSION, ServerEvent};
 use termist_platform::framed::{FramedReader, write_frame};
 use termist_platform::ipc::{self, Stream};
 use termist_platform::{Client, Paths};
@@ -74,11 +74,21 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let claude_settings = claude::write_settings(&paths, &exe)?;
     let opencode_config_dir = paths.opencode_config_dir();
-    crate::opencode::write_plugin(&opencode_config_dir)?;
-    let (programs, harnesses) = {
+    let plugin = crate::opencode::write_plugin(&opencode_config_dir);
+    let (programs, mut harnesses) = {
         let config = config.clone();
         tokio::task::spawn_blocking(move || HarnessPrograms::resolve(&config)).await?
     };
+    if let Err(e) = plugin {
+        // Without its plugin an OpenCode card would never move: offer it as unavailable.
+        tracing::warn!(error = %e, "could not write the OpenCode plugin; OpenCode is unavailable");
+        for h in harnesses
+            .iter_mut()
+            .filter(|h| h.harness == Harness::OpenCode)
+        {
+            h.available = false;
+        }
+    }
     tracing::info!(?harnesses, "agent CLIs");
     let store = crate::store::Store::open(&paths.db_path())?;
     let (tx, rx) = unbounded_channel();
