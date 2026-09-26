@@ -180,7 +180,10 @@ impl Registry {
     pub fn note(&mut self, note: SessionNote) {
         match note {
             SessionNote::Title(id, title) => {
-                if let Some(s) = self.session_mut(id) {
+                // Some agents animate their title; only a real change is stored and sent.
+                if let Some(s) = self.session_mut(id)
+                    && s.info.title != title
+                {
                     s.info.title = title;
                     let info = s.info.clone();
                     self.persist(id);
@@ -661,6 +664,22 @@ mod tests {
         let sessions: Vec<_> = names.iter().map(|n| stored(&p, n)).collect();
         assert_eq!(registry_with(&p, &sessions).created, 3);
         assert_eq!(registry_with(&p, &[]).created, 0);
+    }
+
+    #[test]
+    fn a_repeated_title_is_neither_stored_nor_broadcast_again() {
+        let p = project();
+        let s = stored(&p, "codex-1");
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        let mut rx = connect(&mut reg);
+        for _ in 0..2 {
+            reg.note(SessionNote::Title(s.id, Some("Working".into())));
+        }
+        let mut updates = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            updates.push(ev);
+        }
+        assert_eq!(updates.len(), 1, "{updates:?}");
     }
 
     #[test]

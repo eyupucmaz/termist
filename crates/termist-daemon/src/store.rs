@@ -115,6 +115,11 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // Safety probe: a garbage file will fail here
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+        if conn.path().is_some_and(|p| !p.is_empty()) {
+            // Every status change is a write; WAL with NORMAL sync keeps them cheap.
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
+        }
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         match version {
             0 => conn.execute_batch(SCHEMA_V1)?,
@@ -304,6 +309,17 @@ mod tests {
                 .iter()
                 .all(|s| s.status == AgentStatus::Disconnected)
         );
+    }
+
+    #[test]
+    fn a_database_file_uses_the_write_ahead_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("termist.db")).unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
     }
 
     #[test]
