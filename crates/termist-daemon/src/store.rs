@@ -23,13 +23,22 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_session_id TEXT,
     title TEXT,
     last_activity_ms INTEGER NOT NULL,
-    created_ms INTEGER NOT NULL
+    created_ms INTEGER NOT NULL,
+    resumable INTEGER NOT NULL DEFAULT 0
 );
 PRAGMA user_version = 1;
 ";
 
 pub struct Store {
     conn: Connection,
+}
+
+/// A session as stored. `resumable` is true once the agent's own conversation exists
+/// (a prompt was submitted, or the agent reported its id), so `--resume` can find it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredSession {
+    pub info: SessionInfo,
+    pub resumable: bool,
 }
 
 pub fn encode_kind(kind: &SessionKind) -> &'static str {
@@ -114,6 +123,11 @@ impl Store {
                 "schema version {newer} is newer than this termist ({SCHEMA_VERSION})"
             ),
         }
+        // A table of the right version but the wrong shape is as unusable as garbage.
+        conn.prepare(
+            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms,
+                    created_ms, resumable FROM sessions LIMIT 0",
+        )?;
         Ok(Store { conn })
     }
 
@@ -131,12 +145,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_session(&self, s: &SessionInfo) -> anyhow::Result<()> {
+    pub fn upsert_session(&self, s: &SessionInfo, resumable: bool) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms, created_ms, resumable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_session_id = excluded.agent_session_id,
-               title = excluded.title, last_activity_ms = excluded.last_activity_ms",
+               title = excluded.title, last_activity_ms = excluded.last_activity_ms,
+               resumable = excluded.resumable",
             params![
                 s.id.to_string(),
                 s.project.to_string(),
@@ -145,7 +160,8 @@ impl Store {
                 s.agent_session_id,
                 s.title,
                 s.last_activity_ms as i64,
-                now_ms() as i64
+                now_ms() as i64,
+                resumable
             ],
         )?;
         Ok(())
@@ -159,7 +175,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn load(&self) -> anyhow::Result<(Vec<ProjectInfo>, Vec<SessionInfo>)> {
+    pub fn load(&self) -> anyhow::Result<(Vec<ProjectInfo>, Vec<StoredSession>)> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name, path FROM projects ORDER BY created_ms, rowid")?;
@@ -181,7 +197,7 @@ impl Store {
             })
             .collect();
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms
+            "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms, resumable
              FROM sessions ORDER BY created_ms, rowid",
         )?;
         let sessions = stmt
@@ -194,21 +210,27 @@ impl Store {
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, i64>(6)?,
+                    r.get::<_, bool>(7)?,
                 ))
             })?
             .filter_map(|row| row.ok())
-            .filter_map(|(id, project, kind, name, agent_session_id, title, last)| {
-                Some(SessionInfo {
-                    id: id.parse::<SessionId>().ok()?,
-                    project: project.parse::<ProjectId>().ok()?,
-                    kind: decode_kind(&kind)?,
-                    name,
-                    status: AgentStatus::Disconnected,
-                    agent_session_id,
-                    title,
-                    last_activity_ms: last.max(0) as u64,
-                })
-            })
+            .filter_map(
+                |(id, project, kind, name, agent_session_id, title, last, resumable)| {
+                    Some(StoredSession {
+                        info: SessionInfo {
+                            id: id.parse::<SessionId>().ok()?,
+                            project: project.parse::<ProjectId>().ok()?,
+                            kind: decode_kind(&kind)?,
+                            name,
+                            status: AgentStatus::Disconnected,
+                            agent_session_id,
+                            title,
+                            last_activity_ms: last.max(0) as u64,
+                        },
+                        resumable,
+                    })
+                },
+            )
             .collect();
         Ok((projects, sessions))
     }
@@ -256,10 +278,16 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             store.upsert_project(&p).unwrap();
-            store.upsert_session(&a).unwrap();
-            store.upsert_session(&b).unwrap();
+            store.upsert_session(&a, true).unwrap();
+            store.upsert_session(&b, false).unwrap();
         }
-        let (projects, sessions) = Store::open(&path).unwrap().load().unwrap();
+        let (projects, stored) = Store::open(&path).unwrap().load().unwrap();
+        assert_eq!(
+            stored.iter().map(|s| s.resumable).collect::<Vec<_>>(),
+            vec![true, false],
+            "the resumable flag survives a reopen"
+        );
+        let sessions: Vec<SessionInfo> = stored.into_iter().map(|s| s.info).collect();
         assert_eq!(projects, vec![p]);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, a.id, "ordered by creation");
@@ -284,14 +312,15 @@ mod tests {
         let p = project("/code/api");
         store.upsert_project(&p).unwrap();
         let mut s = session(p.id, SessionKind::Shell, "shell-1");
-        store.upsert_session(&s).unwrap();
+        store.upsert_session(&s, false).unwrap();
         s.name = "renamed".into();
         s.agent_session_id = None;
-        store.upsert_session(&s).unwrap();
+        store.upsert_session(&s, true).unwrap();
         let (_, sessions) = store.load().unwrap();
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "renamed");
-        assert_eq!(sessions[0].agent_session_id, None);
+        assert_eq!(sessions[0].info.name, "renamed");
+        assert_eq!(sessions[0].info.agent_session_id, None);
+        assert!(sessions[0].resumable);
         store.delete_session(s.id).unwrap();
         assert!(store.load().unwrap().1.is_empty());
     }
@@ -347,6 +376,31 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert!(store.load().unwrap().1.is_empty());
+        assert!(std::fs::read_dir(tmp.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("termist.db.broken-")
+        }));
+    }
+
+    #[test]
+    fn a_database_missing_a_column_is_moved_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                &SCHEMA_V1.replace(",\n    resumable INTEGER NOT NULL DEFAULT 0", ""),
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let p = project("/code/api");
+        store.upsert_project(&p).unwrap();
+        store
+            .upsert_session(&session(p.id, SessionKind::Shell, "shell-1"), false)
+            .expect("the fresh database has every column");
         assert!(std::fs::read_dir(tmp.path()).unwrap().any(|e| {
             e.unwrap()
                 .file_name()

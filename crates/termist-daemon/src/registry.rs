@@ -1,6 +1,6 @@
 use crate::launch::{LaunchRequest, Launcher};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
-use crate::store::Store;
+use crate::store::{Store, StoredSession};
 use crate::transcript::TranscriptTail;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
@@ -38,6 +38,25 @@ struct Session {
     transcript: Option<TranscriptTail>,
     /// Last time an `Activity` note was broadcast; throttles `SessionUpdated`.
     activity_broadcast: Option<std::time::Instant>,
+    /// The agent's conversation exists, so Resume may pass its id. Claude's id is
+    /// assigned up front, but Claude only creates the conversation with the first prompt.
+    resumable: bool,
+}
+
+impl Session {
+    fn new(
+        info: SessionInfo,
+        cmd: Option<UnboundedSender<SessionCmd>>,
+        resumable: bool,
+    ) -> Session {
+        Session {
+            info,
+            cmd,
+            transcript: None,
+            activity_broadcast: None,
+            resumable,
+        }
+    }
 }
 
 pub struct Registry {
@@ -72,12 +91,7 @@ impl Registry {
             projects,
             sessions: sessions
                 .into_iter()
-                .map(|info| Session {
-                    info,
-                    cmd: None,
-                    transcript: None,
-                    activity_broadcast: None,
-                })
+                .map(|StoredSession { info, resumable }| Session::new(info, None, resumable))
                 .collect(),
             clients: HashMap::new(),
             notes,
@@ -89,7 +103,7 @@ impl Registry {
     /// Write-through: mirrors a session's current info into the store.
     fn persist(&self, id: SessionId) {
         if let Some(s) = self.session(id)
-            && let Err(e) = self.store.upsert_session(&s.info)
+            && let Err(e) = self.store.upsert_session(&s.info, s.resumable)
         {
             tracing::warn!(session = %id, error = %e, "could not store session");
         }
@@ -331,6 +345,7 @@ impl Registry {
                     && let Some(sid) = payload.get("session_id").and_then(Value::as_str)
                 {
                     self.set_agent_session_id(id, sid);
+                    self.mark_resumable(id);
                 }
                 codex::signal_for(event, payload)
             }
@@ -344,6 +359,7 @@ impl Registry {
                         && let Some(sid) = opencode::event_session(payload)
                     {
                         self.set_agent_session_id(id, sid);
+                        self.mark_resumable(id);
                     }
                     None
                 } else if self.is_foreign_opencode_event(id, payload) {
@@ -353,8 +369,20 @@ impl Registry {
                 }
             }
         };
+        if signal == Some(Signal::PromptSubmitted) {
+            self.mark_resumable(id);
+        }
         if let Some(signal) = signal {
             self.signal(id, signal);
+        }
+    }
+
+    fn mark_resumable(&mut self, id: SessionId) {
+        if let Some(s) = self.session_mut(id)
+            && !s.resumable
+        {
+            s.resumable = true;
+            self.persist(id);
         }
     }
 
@@ -462,12 +490,8 @@ impl Registry {
             title: None,
             last_activity_ms: now_ms(),
         };
-        self.sessions.push(Session {
-            info: info.clone(),
-            cmd: Some(cmd),
-            transcript: None,
-            activity_broadcast: None,
-        });
+        self.sessions
+            .push(Session::new(info.clone(), Some(cmd), false));
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
         Ok(())
@@ -485,7 +509,12 @@ impl Registry {
             bail!("the project of {} is gone", info.name)
         };
         let kind = info.kind.clone();
-        let resume = info.agent_session_id.clone();
+        // Without a conversation to resume (no prompt yet), start the agent fresh.
+        let resume = if self.sessions[pos].resumable {
+            info.agent_session_id.clone()
+        } else {
+            None
+        };
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &kind,
@@ -502,9 +531,8 @@ impl Registry {
         s.cmd = Some(cmd); // dropping the old sender ends the old session task
         s.transcript = None;
         s.info.status = AgentStatus::Fresh;
-        if launch.agent_session_id.is_some() {
-            s.info.agent_session_id = launch.agent_session_id;
-        }
+        s.resumable = resume.is_some();
+        s.info.agent_session_id = launch.agent_session_id;
         s.info.last_activity_ms = now_ms();
         let info = s.info.clone();
         self.persist(id);
@@ -543,7 +571,7 @@ mod tests {
         let store = Store::open_in_memory();
         store.upsert_project(project).unwrap();
         for s in sessions {
-            store.upsert_session(s).unwrap();
+            store.upsert_session(s, false).unwrap();
         }
         let launcher = Launcher {
             config: DaemonConfig::default(),

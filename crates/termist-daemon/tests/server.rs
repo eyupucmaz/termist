@@ -688,6 +688,20 @@ async fn sessions_survive_a_daemon_restart_and_resume_in_place() {
         },
     )
     .await;
+    // a prompt was sent, so Claude's conversation exists and can be resumed
+    hook_client::send_hook(
+        &paths,
+        claude.id,
+        Harness::Claude,
+        "UserPromptSubmit",
+        "{}".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        status_change(&mut c, claude.id, AgentStatus::Fresh).await,
+        AgentStatus::Running
+    );
     let shell = create(&mut c, project, SessionKind::Shell).await;
     c.send(&ClientRequest::KillSession { session: shell.id })
         .await
@@ -736,6 +750,89 @@ async fn sessions_survive_a_daemon_restart_and_resume_in_place() {
     wait_screen_text(&mut c, claude.id, &format!("--resume {sid}")).await;
     drop(c);
     shutdown(&paths, task).await;
+}
+
+/// Waits until `id` has exited (any code), skipping activity broadcasts.
+async fn exited(c: &mut Client, id: SessionId) -> AgentStatus {
+    match next_event(c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(u) if u.id == id && matches!(u.status, AgentStatus::Exited { .. }))
+    })
+    .await
+    {
+        ServerEvent::SessionUpdated(u) => u.status,
+        _ => unreachable!(),
+    }
+}
+
+/// Resumes `id`, returns its info once it is back (Fresh), then waits for the stand-in
+/// agent to exit and attaches to its last screen.
+async fn resume(c: &mut Client, id: SessionId) -> SessionInfo {
+    c.send(&ClientRequest::Resume {
+        session: id,
+        cols: 400,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    let back = match next_event(c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(u) if u.id == id && u.status == AgentStatus::Fresh)
+    })
+    .await
+    {
+        ServerEvent::SessionUpdated(u) => u,
+        _ => unreachable!(),
+    };
+    exited(c, id).await;
+    c.send(&ClientRequest::Attach {
+        session: id,
+        cols: 400,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    back
+}
+
+// Claude creates its conversation only with the first prompt: before that there is
+// nothing for `--resume` to find, so Resume starts a new conversation instead.
+#[tokio::test]
+async fn a_claude_card_without_a_prompt_resumes_as_a_new_conversation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(echo_agent(tmp.path(), "claude", true)),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    let first_id = s.agent_session_id.clone().unwrap();
+    exited(&mut c, s.id).await;
+
+    let back = resume(&mut c, s.id).await;
+    let new_id = back.agent_session_id.clone().unwrap();
+    assert_ne!(new_id, first_id, "a new conversation gets a new id");
+    wait_screen_text(&mut c, s.id, &format!("--session-id {new_id}")).await;
+
+    hook_client::send_hook(
+        &d.paths,
+        s.id,
+        Harness::Claude,
+        "UserPromptSubmit",
+        "{}".into(),
+    )
+    .await
+    .unwrap();
+    let back = resume(&mut c, s.id).await;
+    assert_eq!(back.agent_session_id.as_deref(), Some(new_id.as_str()));
+    wait_screen_text(&mut c, s.id, &format!("--resume {new_id}")).await;
 }
 
 // Review Focus 2
