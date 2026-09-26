@@ -554,6 +554,68 @@ async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
     );
 }
 
+// An interrupt line written while no turn was running (or just before the next prompt)
+// belongs to the turn that ended, never to the new one.
+#[tokio::test]
+async fn a_stale_interrupt_line_does_not_cancel_the_next_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("session.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    let payload = serde_json::json!({ "transcript_path": transcript }).to_string();
+    let hook = |event: &'static str| {
+        let (paths, payload) = (d.paths.clone(), payload.clone());
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::Claude, event, payload)
+                .await
+                .unwrap()
+        }
+    };
+    hook("UserPromptSubmit").await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Fresh).await,
+        AgentStatus::Running
+    );
+    hook("Stop").await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Unseen
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .and_then(|mut f| {
+            std::io::Write::write_all(&mut f, b"{\"text\":\"[Request interrupted by user]\"}\n")
+        })
+        .unwrap();
+    hook("UserPromptSubmit").await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Unseen).await,
+        AgentStatus::Running
+    );
+    tokio::time::sleep(Duration::from_millis(800)).await; // a transcript poll or more
+    hook("Stop").await;
+    assert_eq!(
+        status_change(&mut ui, s.id, AgentStatus::Running).await,
+        AgentStatus::Unseen,
+        "the new turn ran to its end"
+    );
+}
+
 // Review Focus 3
 #[tokio::test]
 async fn a_missing_agent_cli_is_an_error_not_a_crash() {

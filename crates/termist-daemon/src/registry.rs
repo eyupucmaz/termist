@@ -338,6 +338,9 @@ impl Registry {
                 if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
                     self.watch_transcript(id, Path::new(path));
                 }
+                if event == "UserPromptSubmit" {
+                    self.skip_transcript_so_far(id);
+                }
                 claude::signal_for(event, payload)
             }
             Harness::Codex => {
@@ -425,6 +428,14 @@ impl Registry {
             && s.transcript.as_ref().is_none_or(|t| t.path() != path)
         {
             s.transcript = Some(TranscriptTail::new(path.to_path_buf()));
+        }
+    }
+
+    /// A new turn starts: an interrupt line already in the transcript (the previous
+    /// turn's, not read yet because polling only runs mid-turn) must not cancel it.
+    fn skip_transcript_so_far(&mut self, id: SessionId) {
+        if let Some(t) = self.session_mut(id).and_then(|s| s.transcript.as_mut()) {
+            t.poll();
         }
     }
 
