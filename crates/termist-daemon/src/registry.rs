@@ -23,6 +23,9 @@ const ACTIVITY_BROADCAST: Duration = Duration::from_secs(5);
 /// was cancelled before its answer started (Claude sends no hook for that).
 const IDLE_TITLE_CANCEL: Duration = Duration::from_millis(1500);
 
+/// A rescan for missing CLIs can start a login shell; one per this window is enough.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+
 /// The agent CLIs a rescan found, with the program to launch for each.
 #[derive(Debug)]
 pub struct Rescanned(pub Vec<(Harness, PathBuf)>);
@@ -90,6 +93,8 @@ pub struct Registry {
     rescans: UnboundedSender<Rescanned>,
     rescans_rx: Option<UnboundedReceiver<Rescanned>>,
     rescanning: bool,
+    /// When the last rescan started.
+    last_rescan: Option<std::time::Instant>,
     /// Looks a CLI up (PATH, then the login shell).
     find_program: fn(&str) -> Option<PathBuf>,
 }
@@ -131,6 +136,7 @@ impl Registry {
             rescans,
             rescans_rx: Some(rescans_rx),
             rescanning: false,
+            last_rescan: None,
             find_program: crate::resolve::find_program,
         }
     }
@@ -422,7 +428,7 @@ impl Registry {
                 let recent = self.store.recent_models(harness);
                 self.send(client, ServerEvent::Models { harness, recent });
             }
-            ClientRequest::RescanHarnesses => self.rescan(),
+            ClientRequest::RescanHarnesses => self.rescan(std::time::Instant::now()),
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -694,18 +700,23 @@ impl Registry {
     }
 
     /// Looks again, on a blocking thread, for the CLIs that were missing (one rescan at
-    /// a time). OpenCode also needs its plugin, so it is written again when found.
-    fn rescan(&mut self) {
+    /// a time, and none within `RESCAN_INTERVAL` of the last one's start). OpenCode also
+    /// needs its plugin, so it is written again when found.
+    fn rescan(&mut self, now: std::time::Instant) {
         let missing: Vec<Harness> = self
             .harnesses
             .iter()
             .filter(|h| !h.available)
             .map(|h| h.harness)
             .collect();
-        if self.rescanning || missing.is_empty() {
+        let too_soon = self
+            .last_rescan
+            .is_some_and(|t| now.saturating_duration_since(t) < RESCAN_INTERVAL);
+        if self.rescanning || too_soon || missing.is_empty() {
             return;
         }
         self.rescanning = true;
+        self.last_rescan = Some(now);
         let (tx, find) = (self.rescans.clone(), self.find_program);
         let opencode_dir = self.launcher.opencode_config_dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -1232,6 +1243,27 @@ mod tests {
         reg.rescanned(found);
         assert!(rx.try_recv().is_err(), "nothing to tell");
         assert!(!reg.rescanning, "the next rescan may run");
+    }
+
+    // Every `n` and `p` asks for a rescan; with a CLI missing, each would start a login
+    // shell again. One rescan per window is enough.
+    #[tokio::test]
+    async fn a_rescan_runs_at_most_once_per_window() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        missing_codex_and_opencode(&mut reg);
+        reg.find_program = |_| None;
+        let mut results = reg.rescans_rx.take().unwrap();
+        let t0 = std::time::Instant::now();
+        reg.rescan(t0);
+        reg.rescanned(results.recv().await.unwrap());
+        reg.rescan(t0 + Duration::from_secs(10));
+        assert!(!reg.rescanning, "too soon after the last one");
+        tokio::task::yield_now().await;
+        assert!(results.try_recv().is_err());
+        reg.rescan(t0 + RESCAN_INTERVAL);
+        assert!(reg.rescanning, "the window has passed");
+        results.recv().await.unwrap();
     }
 
     fn running_claude(reg: &mut Registry, p: &ProjectInfo) -> SessionId {
