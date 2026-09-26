@@ -44,6 +44,12 @@ pub fn write_settings(paths: &Paths, exe: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Claude Code's terminal title starts with `✳` while it waits for input; while it
+/// works, the first glyph is a spinner frame.
+pub fn title_is_idle(title: &str) -> bool {
+    title.starts_with('✳')
+}
+
 pub fn signal_for(event: &str, payload: &Value) -> Option<Signal> {
     match event {
         "UserPromptSubmit" => Some(Signal::PromptSubmitted),
@@ -128,6 +134,23 @@ mod tests {
                 None,
                 "{t}"
             );
+        }
+    }
+
+    #[test]
+    fn only_the_resting_glyph_marks_an_idle_title() {
+        assert!(title_is_idle("✳ Fix the login redirect"));
+        assert!(title_is_idle("✳ Claude Code"));
+        for working in [
+            "✶ Fix the login redirect",
+            "✻ Fix",
+            "· Fix",
+            "Fix ✳",
+            "",
+            "◐ Kedi adı seçimi",
+            "◑ Kedi adı seçimi",
+        ] {
+            assert!(!title_is_idle(working), "{working:?}");
         }
     }
 

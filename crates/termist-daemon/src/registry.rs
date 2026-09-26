@@ -19,6 +19,10 @@ use tokio::time::MissedTickBehavior;
 /// How often a session's PTY activity is broadcast to clients as `SessionUpdated`.
 const ACTIVITY_BROADCAST: Duration = Duration::from_secs(5);
 
+/// A running Claude card whose title has been idle this long, with no hook in between,
+/// was cancelled before its answer started (Claude sends no hook for that).
+const IDLE_TITLE_CANCEL: Duration = Duration::from_millis(1500);
+
 /// The agent CLIs a rescan found, with the program to launch for each.
 #[derive(Debug)]
 pub struct Rescanned(pub Vec<(Harness, PathBuf)>);
@@ -47,6 +51,8 @@ struct Session {
     resumable: bool,
     /// OpenCode subagent session ids seen for this card; their events are ignored.
     opencode_children: HashSet<String>,
+    /// Claude: since when the title has shown idle while the card is running.
+    idle_title_since: Option<std::time::Instant>,
 }
 
 impl Session {
@@ -62,6 +68,7 @@ impl Session {
             activity_broadcast: None,
             resumable,
             opencode_children: HashSet::new(),
+            idle_title_since: None,
         }
     }
 }
@@ -225,6 +232,18 @@ impl Registry {
                 if let Some(s) = self.session_mut(id)
                     && s.info.title != title
                 {
+                    let idle = s.info.kind
+                        == (SessionKind::Agent {
+                            harness: Harness::Claude,
+                        })
+                        && s.info.status == AgentStatus::Running
+                        && title.as_deref().is_some_and(claude::title_is_idle);
+                    s.idle_title_since = if idle {
+                        s.idle_title_since
+                            .or_else(|| Some(std::time::Instant::now()))
+                    } else {
+                        None
+                    };
                     s.info.title = title;
                     let info = s.info.clone();
                     self.persist(id);
@@ -419,6 +438,10 @@ impl Registry {
     }
 
     fn hook(&mut self, id: SessionId, harness: Harness, event: &str, payload: &Value) {
+        // Any hook means Claude is still talking to us: the title alone decides nothing.
+        if let Some(s) = self.session_mut(id) {
+            s.idle_title_since = None;
+        }
         tracing::debug!(
             session = %id,
             harness = harness.id(),
@@ -597,6 +620,26 @@ impl Registry {
     fn skip_transcript_so_far(&mut self, id: SessionId) {
         if let Some(t) = self.session_mut(id).and_then(|s| s.transcript.as_mut()) {
             t.poll();
+        }
+    }
+
+    /// Claude cards still running with an idle title and no hook for `IDLE_TITLE_CANCEL`:
+    /// the turn was cancelled before its answer started.
+    pub fn poll_idle_titles(&mut self, now: std::time::Instant) {
+        let cancelled: Vec<SessionId> = self
+            .sessions
+            .iter_mut()
+            .filter(|s| s.info.status == AgentStatus::Running)
+            .filter_map(|s| {
+                let since = s.idle_title_since?;
+                (now.duration_since(since) >= IDLE_TITLE_CANCEL).then(|| {
+                    s.idle_title_since = None;
+                    s.info.id
+                })
+            })
+            .collect();
+        for id in cancelled {
+            self.signal(id, Signal::Cancelled);
         }
     }
 
@@ -889,7 +932,10 @@ pub async fn run(
             },
             Some(note) = notes.recv() => reg.note(note),
             Some(found) = rescans.recv() => reg.rescanned(found),
-            _ = transcripts.tick() => reg.poll_transcripts(),
+            _ = transcripts.tick() => {
+                reg.poll_transcripts();
+                reg.poll_idle_titles(std::time::Instant::now());
+            }
         }
     }
 }
@@ -1186,5 +1232,62 @@ mod tests {
         reg.rescanned(found);
         assert!(rx.try_recv().is_err(), "nothing to tell");
         assert!(!reg.rescanning, "the next rescan may run");
+    }
+
+    fn running_claude(reg: &mut Registry, p: &ProjectInfo) -> SessionId {
+        let s = claude(p, "c-1");
+        reg.sessions.push(Session::new(s.clone(), None, true));
+        reg.session_mut(s.id).unwrap().info.status = AgentStatus::Running;
+        s.id
+    }
+
+    fn later(ms: u64) -> std::time::Instant {
+        std::time::Instant::now() + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn an_idle_title_with_no_hook_for_a_while_cancels_a_running_claude_turn() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = running_claude(&mut reg, &p);
+        reg.note(SessionNote::Title(id, Some("✶ Fix login".into())));
+        reg.note(SessionNote::Title(id, Some("✳ Fix login".into())));
+        reg.poll_idle_titles(later(1000));
+        assert_eq!(
+            reg.session(id).unwrap().info.status,
+            AgentStatus::Running,
+            "too early"
+        );
+        reg.poll_idle_titles(later(1600));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Finished);
+    }
+
+    #[test]
+    fn a_hook_or_a_working_title_keeps_the_turn_running() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = running_claude(&mut reg, &p);
+        reg.note(SessionNote::Title(id, Some("✳ Fix login".into())));
+        reg.hook(id, Harness::Claude, "PostToolUse", &Value::Null);
+        reg.poll_idle_titles(later(1600));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+        reg.note(SessionNote::Title(id, Some("✳ Fix login again".into())));
+        reg.note(SessionNote::Title(id, Some("✻ Fix login again".into())));
+        reg.poll_idle_titles(later(1600));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn an_idle_title_while_waiting_for_the_user_cancels_nothing() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = running_claude(&mut reg, &p);
+        reg.session_mut(id).unwrap().info.status = AgentStatus::NeedsFeedback;
+        reg.note(SessionNote::Title(id, Some("✳ Fix login".into())));
+        reg.poll_idle_titles(later(5000));
+        assert_eq!(
+            reg.session(id).unwrap().info.status,
+            AgentStatus::NeedsFeedback
+        );
     }
 }
