@@ -1460,3 +1460,42 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
     drop(c);
     shutdown(&paths, task).await;
 }
+
+// After `/clear`, Claude's new conversation has no transcript until its first prompt:
+// resuming then must start fresh instead of `--resume`-ing an id Claude cannot find.
+#[tokio::test]
+async fn after_claude_clear_a_resume_starts_a_new_conversation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(echo_agent(tmp.path(), "claude", true)),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    let sid = s.agent_session_id.clone().unwrap();
+    for (event, payload) in [
+        ("UserPromptSubmit", format!(r#"{{"session_id":"{sid}"}}"#)),
+        (
+            "SessionStart",
+            r#"{"session_id":"cleared-1","source":"clear"}"#.to_string(),
+        ),
+    ] {
+        hook_client::send_hook(&d.paths, s.id, Harness::Claude, event, payload)
+            .await
+            .unwrap();
+    }
+    exited(&mut c, s.id).await;
+    let back = resume(&mut c, s.id).await;
+    let fresh = back.agent_session_id.unwrap();
+    assert_ne!(fresh, "cleared-1");
+    wait_screen_text(&mut c, s.id, &format!("--session-id {fresh}")).await;
+}

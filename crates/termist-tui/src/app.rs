@@ -100,7 +100,7 @@ impl App {
             }
             ServerEvent::SessionUpdated(info) => {
                 let (id, status) = (info.id, info.status);
-                // You are looking at it (PRD §8): a focused session that finishes is seen.
+                // You are looking at it: a focused session that finishes is seen.
                 let seen_now = info.status == AgentStatus::Unseen
                     && self.selected == Some(id)
                     && self.attached == Some(id)

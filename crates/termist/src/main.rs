@@ -79,7 +79,7 @@ fn main() -> ExitCode {
 }
 
 /// Where a hook sends its event: the daemon that spawned the agent exports its
-/// runtime dir as `TERMIST_RUNTIME_DIR` (PRD §11.4), which picks the socket path and
+/// runtime dir as `TERMIST_RUNTIME_DIR`, which picks the socket path and
 /// the pipe name; without it, the usual `Paths::from_env()`.
 fn hook_paths() -> Option<Paths> {
     let Some(dir) = std::env::var_os("TERMIST_RUNTIME_DIR").filter(|d| !d.is_empty()) else {

@@ -43,6 +43,14 @@ impl HarnessPrograms {
         }
     }
 
+    pub fn set(&mut self, harness: Harness, program: String) {
+        match harness {
+            Harness::Claude => self.claude = program,
+            Harness::Codex => self.codex = program,
+            Harness::OpenCode => self.opencode = program,
+        }
+    }
+
     pub fn resolve(config: &DaemonConfig) -> (HarnessPrograms, Vec<HarnessInfo>) {
         Self::resolve_with(config, crate::resolve::find_program)
     }

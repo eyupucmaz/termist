@@ -13,7 +13,7 @@ pub struct Paths {
 
 impl Paths {
     /// `TERMIST_HOME` puts everything under one directory (tests, isolated setups);
-    /// otherwise XDG-style dirs on every platform (PRD §11.7).
+    /// otherwise XDG-style dirs on every platform.
     pub fn from_env() -> anyhow::Result<Paths> {
         if let Some(home) = std::env::var_os("TERMIST_HOME") {
             return Ok(Paths::under(PathBuf::from(home)));

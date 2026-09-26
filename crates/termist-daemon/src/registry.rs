@@ -19,6 +19,10 @@ use tokio::time::MissedTickBehavior;
 /// How often a session's PTY activity is broadcast to clients as `SessionUpdated`.
 const ACTIVITY_BROADCAST: Duration = Duration::from_secs(5);
 
+/// The agent CLIs a rescan found, with the program to launch for each.
+#[derive(Debug)]
+pub struct Rescanned(pub Vec<(Harness, PathBuf)>);
+
 pub enum Msg {
     Connected {
         client: ClientId,
@@ -74,6 +78,13 @@ pub struct Registry {
     notes: UnboundedSender<SessionNote>,
     shutdown: Option<oneshot::Sender<()>>,
     created: u32,
+    /// A rescan runs on a blocking thread and reports back through this channel;
+    /// `run` takes the receiving end.
+    rescans: UnboundedSender<Rescanned>,
+    rescans_rx: Option<UnboundedReceiver<Rescanned>>,
+    rescanning: bool,
+    /// Looks a CLI up (PATH, then the login shell).
+    find_program: fn(&str) -> Option<PathBuf>,
 }
 
 impl Registry {
@@ -95,6 +106,7 @@ impl Registry {
             .max()
             .unwrap_or(0);
         let last_launch = store.last_launch();
+        let (rescans, rescans_rx) = tokio::sync::mpsc::unbounded_channel();
         Registry {
             launcher,
             harnesses,
@@ -109,6 +121,10 @@ impl Registry {
             notes,
             shutdown: Some(shutdown),
             created,
+            rescans,
+            rescans_rx: Some(rescans_rx),
+            rescanning: false,
+            find_program: crate::resolve::find_program,
         }
     }
 
@@ -387,12 +403,7 @@ impl Registry {
                 let recent = self.store.recent_models(harness);
                 self.send(client, ServerEvent::Models { harness, recent });
             }
-            ClientRequest::RescanHarnesses => self.send(
-                client,
-                ServerEvent::Error {
-                    message: "this daemon does not support that request yet".into(),
-                },
-            ),
+            ClientRequest::RescanHarnesses => self.rescan(),
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -432,8 +443,18 @@ impl Registry {
         );
         let signal = match harness {
             Harness::Claude => {
+                // `/clear` starts a new conversation, which exists only with its first prompt.
+                let cleared = event == "SessionStart"
+                    && payload.get("source").and_then(Value::as_str) == Some("clear")
+                    && payload.get("session_id").and_then(Value::as_str)
+                        != self
+                            .session(id)
+                            .and_then(|s| s.info.agent_session_id.as_deref());
                 // Claude's id is known before its conversation exists: not a sign of one.
                 self.capture_session_start(id, event, payload);
+                if cleared {
+                    self.forget_conversation(id);
+                }
                 if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
                     self.watch_transcript(id, Path::new(path));
                 }
@@ -542,6 +563,16 @@ impl Registry {
         }
     }
 
+    /// Resume starts the agent fresh until the conversation exists again.
+    fn forget_conversation(&mut self, id: SessionId) {
+        if let Some(s) = self.session_mut(id)
+            && s.resumable
+        {
+            s.resumable = false;
+            self.persist(id);
+        }
+    }
+
     fn set_agent_session_id(&mut self, id: SessionId, sid: &str) {
         if let Some(s) = self.session_mut(id)
             && s.info.agent_session_id.as_deref() != Some(sid)
@@ -617,6 +648,57 @@ impl Registry {
             tracing::warn!(error = %e, "could not store project");
         }
         Ok(())
+    }
+
+    /// Looks again, on a blocking thread, for the CLIs that were missing (one rescan at
+    /// a time). OpenCode also needs its plugin, so it is written again when found.
+    fn rescan(&mut self) {
+        let missing: Vec<Harness> = self
+            .harnesses
+            .iter()
+            .filter(|h| !h.available)
+            .map(|h| h.harness)
+            .collect();
+        if self.rescanning || missing.is_empty() {
+            return;
+        }
+        self.rescanning = true;
+        let (tx, find) = (self.rescans.clone(), self.find_program);
+        let opencode_dir = self.launcher.opencode_config_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let found = missing
+                .into_iter()
+                .filter_map(|harness| {
+                    let program = find(harness.program())?;
+                    if harness == Harness::OpenCode
+                        && let Err(e) = opencode::write_plugin(&opencode_dir)
+                    {
+                        tracing::warn!(error = %e, "could not write the OpenCode plugin");
+                        return None;
+                    }
+                    Some((harness, program))
+                })
+                .collect();
+            let _ = tx.send(Rescanned(found));
+        });
+    }
+
+    /// A rescan finished: newly found CLIs become available to every client.
+    pub fn rescanned(&mut self, Rescanned(found): Rescanned) {
+        self.rescanning = false;
+        if found.is_empty() {
+            return;
+        }
+        for (harness, program) in found {
+            self.launcher
+                .programs
+                .set(harness, program.display().to_string());
+            if let Some(h) = self.harnesses.iter_mut().find(|h| h.harness == harness) {
+                h.available = true;
+            }
+        }
+        tracing::info!(harnesses = ?self.harnesses, "agent CLIs after a rescan");
+        self.broadcast(ServerEvent::Harnesses(self.harnesses.clone()));
     }
 
     /// Closing hides the tab; the sessions keep running. Every client gets the new state.
@@ -798,6 +880,7 @@ pub async fn run(
 ) {
     let mut transcripts = tokio::time::interval(Duration::from_millis(500));
     transcripts.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut rescans = reg.rescans_rx.take().expect("a registry runs once");
     loop {
         tokio::select! {
             msg = rx.recv() => match msg {
@@ -805,6 +888,7 @@ pub async fn run(
                 None => break,
             },
             Some(note) = notes.recv() => reg.note(note),
+            Some(found) = rescans.recv() => reg.rescanned(found),
             _ = transcripts.tick() => reg.poll_transcripts(),
         }
     }
@@ -996,5 +1080,111 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(reg.store.load().unwrap().1[0].info.archived, "stored too");
+    }
+
+    fn claude(p: &ProjectInfo, agent_id: &str) -> SessionInfo {
+        let mut s = stored(p, "claude-1");
+        s.kind = SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        s.agent_session_id = Some(agent_id.into());
+        s
+    }
+
+    #[test]
+    fn a_cleared_claude_conversation_is_not_resumable_until_its_first_prompt() {
+        let p = project();
+        let s = claude(&p, "old");
+        let mut reg = registry_with(&p, std::slice::from_ref(&s));
+        reg.session_mut(s.id).unwrap().resumable = true;
+        let start =
+            |sid: &str, source: &str| serde_json::json!({ "session_id": sid, "source": source });
+        reg.hook(
+            s.id,
+            Harness::Claude,
+            "SessionStart",
+            &start("old", "resume"),
+        );
+        assert!(
+            reg.session(s.id).unwrap().resumable,
+            "a resumed conversation is kept"
+        );
+        reg.hook(
+            s.id,
+            Harness::Claude,
+            "SessionStart",
+            &start("new", "clear"),
+        );
+        let cleared = reg.session(s.id).unwrap();
+        assert_eq!(cleared.info.agent_session_id.as_deref(), Some("new"));
+        assert!(!cleared.resumable);
+        assert!(!reg.store.load().unwrap().1[0].resumable, "stored too");
+        reg.hook(s.id, Harness::Claude, "UserPromptSubmit", &Value::Null);
+        assert!(reg.session(s.id).unwrap().resumable);
+    }
+
+    fn missing_codex_and_opencode(reg: &mut Registry) {
+        reg.harnesses = Harness::ALL
+            .into_iter()
+            .map(|harness| HarnessInfo {
+                harness,
+                available: harness == Harness::Claude,
+            })
+            .collect();
+    }
+
+    #[tokio::test]
+    async fn a_rescan_looks_only_for_the_missing_clis_and_tells_every_client() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let tmp = tempfile::tempdir().unwrap();
+        reg.launcher.opencode_config_dir = tmp.path().join("opencode");
+        missing_codex_and_opencode(&mut reg);
+        reg.find_program = |name| Some(PathBuf::from(format!("/new/{name}")));
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::RescanHarnesses,
+        });
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::RescanHarnesses,
+        });
+        let mut results = reg.rescans_rx.take().unwrap();
+        let found = results.recv().await.unwrap();
+        assert!(results.try_recv().is_err(), "one rescan at a time");
+        reg.rescanned(found);
+        match rx.try_recv() {
+            Ok(ServerEvent::Harnesses(list)) => assert!(list.iter().all(|h| h.available)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(reg.launcher.programs.get(Harness::Codex), "/new/codex");
+        assert_eq!(
+            reg.launcher.programs.get(Harness::OpenCode),
+            "/new/opencode"
+        );
+        assert_eq!(
+            reg.launcher.programs.get(Harness::Claude),
+            "claude",
+            "an available CLI is not looked up again"
+        );
+        assert!(tmp.path().join("opencode/plugins/termist.ts").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_rescan_that_finds_nothing_changes_nothing() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        missing_codex_and_opencode(&mut reg);
+        reg.find_program = |_| None;
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::RescanHarnesses,
+        });
+        let found = reg.rescans_rx.as_mut().unwrap().recv().await.unwrap();
+        reg.rescanned(found);
+        assert!(rx.try_recv().is_err(), "nothing to tell");
+        assert!(!reg.rescanning, "the next rescan may run");
     }
 }
