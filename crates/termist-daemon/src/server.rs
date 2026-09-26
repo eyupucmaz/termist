@@ -80,6 +80,7 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
         tokio::task::spawn_blocking(move || HarnessPrograms::resolve(&config)).await?
     };
     tracing::info!(?harnesses, "agent CLIs");
+    let store = crate::store::Store::open(&paths.db_path())?;
     let (tx, rx) = unbounded_channel();
     let (notes_tx, notes_rx) = unbounded_channel();
     let (stop_tx, mut stop_rx) = oneshot::channel();
@@ -93,7 +94,7 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
         termist_home: std::env::var_os("TERMIST_HOME").map(PathBuf::from),
     };
     tokio::spawn(registry::run(
-        Registry::new(launcher, harnesses, notes_tx, stop_tx),
+        Registry::new(launcher, harnesses, store, notes_tx, stop_tx),
         rx,
         notes_rx,
     ));

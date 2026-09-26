@@ -128,6 +128,49 @@ async fn status_update(c: &mut Client, id: SessionId) -> AgentStatus {
     }
 }
 
+/// A stand-in agent that prints its arguments, then stays alive (or exits when `exit` is true).
+fn echo_agent(dir: &std::path::Path, name: &str, exit: bool) -> String {
+    let p = dir.join(name);
+    let tail = if exit { "exit 0" } else { "sleep 30" };
+    std::fs::write(&p, format!("#!/bin/sh\necho \"args: $*\"\n{tail}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p.display().to_string()
+}
+
+async fn run_daemon(
+    paths: &Paths,
+    config: DaemonConfig,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    let task = tokio::spawn(server::run(paths.clone(), config));
+    for _ in 0..250 {
+        if Client::connect(paths).await.is_ok() {
+            return task;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon did not come up");
+}
+
+async fn shutdown(paths: &Paths, task: tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let mut c = Client::connect(paths).await.unwrap();
+    c.send(&ClientRequest::Shutdown).await.unwrap();
+    next_event(&mut c, |e| *e == ServerEvent::Ack).await;
+    timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+async fn state(c: &mut Client) -> StateSnapshot {
+    c.send(&ClientRequest::ListState).await.unwrap();
+    match next_event(c, |e| matches!(e, ServerEvent::State(_))).await {
+        ServerEvent::State(s) => s,
+        _ => unreachable!(),
+    }
+}
+
 async fn info_update(c: &mut Client, id: SessionId) -> SessionInfo {
     match next_event(
         c,
@@ -596,4 +639,155 @@ async fn run_hook_gives_up_quietly_without_a_daemon() {
         )
         .await
     );
+}
+
+#[tokio::test]
+async fn sessions_survive_a_daemon_restart_and_resume_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path().join("home"));
+    let config = DaemonConfig {
+        claude_bin: Some(echo_agent(tmp.path(), "claude", false)),
+        shell: Some("/bin/sh".into()),
+        ..Default::default()
+    };
+
+    let task = run_daemon(&paths, config.clone()).await;
+    let mut c = Client::connect(&paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let claude = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    let shell = create(&mut c, project, SessionKind::Shell).await;
+    c.send(&ClientRequest::KillSession { session: shell.id })
+        .await
+        .unwrap();
+    next_event(&mut c, |e| *e == ServerEvent::SessionRemoved(shell.id)).await;
+    drop(c);
+    shutdown(&paths, task).await;
+
+    let task = run_daemon(&paths, config).await;
+    let mut c = Client::connect(&paths).await.unwrap();
+    let s = state(&mut c).await;
+    assert_eq!(s.projects.len(), 1);
+    assert_eq!(
+        s.sessions.len(),
+        1,
+        "the killed shell is gone, the claude session survives"
+    );
+    let restored = &s.sessions[0];
+    assert_eq!(
+        (restored.id, restored.status),
+        (claude.id, AgentStatus::Disconnected)
+    );
+    assert_eq!(restored.agent_session_id, claude.agent_session_id);
+    assert_eq!(restored.name, claude.name);
+
+    // wide enough that the echoed arguments (a long temp path, then --resume <uuid>) never wrap
+    c.send(&ClientRequest::Resume {
+        session: claude.id,
+        cols: 300,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    assert_eq!(status_update(&mut c, claude.id).await, AgentStatus::Fresh);
+    c.send(&ClientRequest::Attach {
+        session: claude.id,
+        cols: 300,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    let sid = claude.agent_session_id.clone().unwrap();
+    wait_screen_text(&mut c, claude.id, &format!("--resume {sid}")).await;
+    drop(c);
+    shutdown(&paths, task).await;
+}
+
+// Review Focus 2
+#[tokio::test]
+async fn resuming_without_a_captured_id_starts_fresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        codex_bin: Some(echo_agent(tmp.path(), "codex", true)),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Codex,
+        },
+    )
+    .await;
+    // The echo agent prints output before it exits, and PTY activity may itself
+    // broadcast a SessionUpdated (Task 9) before the exit is reported; wait for the
+    // first update whose status has moved off Fresh, and check that one instead.
+    let exited = match next_event(&mut c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(u) if u.id == s.id && u.status != AgentStatus::Fresh)
+    })
+    .await
+    {
+        ServerEvent::SessionUpdated(u) => u.status,
+        _ => unreachable!(),
+    };
+    assert_eq!(exited, AgentStatus::Exited { code: Some(0) });
+    c.send(&ClientRequest::Resume {
+        session: s.id,
+        cols: 4000,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    assert_eq!(status_update(&mut c, s.id).await, AgentStatus::Fresh);
+    c.send(&ClientRequest::Attach {
+        session: s.id,
+        cols: 4000,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    // wide enough that codex's own hook flags (very long under the test binary's own
+    // long exe path) never wrap; "args: -c hooks." can only appear if the arguments
+    // do not start with `resume <id>`
+    wait_screen_text(&mut c, s.id, "args: -c hooks.").await;
+}
+
+#[tokio::test]
+async fn a_running_session_cannot_be_resumed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        claude_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut c,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    c.send(&ClientRequest::Resume {
+        session: s.id,
+        cols: 80,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    match next_event(&mut c, |e| matches!(e, ServerEvent::Error { .. })).await {
+        ServerEvent::Error { message } => assert!(message.contains("still running"), "{message}"),
+        _ => unreachable!(),
+    }
 }

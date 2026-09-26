@@ -112,6 +112,7 @@ pub struct LaunchRequest<'a> {
     pub cwd: &'a Path,
     pub cols: u16,
     pub rows: u16,
+    pub resume: Option<&'a str>,
 }
 
 pub struct Launch {
@@ -155,16 +156,24 @@ impl Launcher {
             SessionKind::Agent {
                 harness: Harness::Claude,
             } => {
-                let sid = uuid::Uuid::new_v4().to_string();
                 let mut args = vec![
                     "--settings".to_string(),
                     self.claude_settings.display().to_string(),
-                    "--session-id".to_string(),
-                    sid.clone(),
                 ];
-                if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
-                    args.push(p.to_string());
-                }
+                let sid = match req.resume {
+                    Some(id) => {
+                        args.extend(["--resume".to_string(), id.to_string()]);
+                        id.to_string()
+                    }
+                    None => {
+                        let sid = uuid::Uuid::new_v4().to_string();
+                        args.extend(["--session-id".to_string(), sid.clone()]);
+                        if let Some(p) = req.prompt.filter(|p| !p.trim().is_empty()) {
+                            args.push(p.to_string());
+                        }
+                        sid
+                    }
+                };
                 (
                     self.programs.get(Harness::Claude).to_string(),
                     args,
@@ -175,8 +184,8 @@ impl Launcher {
                 harness: Harness::Codex,
             } => (
                 self.programs.get(Harness::Codex).to_string(),
-                crate::codex::args(&self.exe, None, req.prompt),
-                None,
+                crate::codex::args(&self.exe, req.resume, req.prompt),
+                req.resume.map(str::to_string),
             ),
             SessionKind::Agent {
                 harness: Harness::OpenCode,
@@ -187,8 +196,8 @@ impl Launcher {
                 ));
                 (
                     self.programs.get(Harness::OpenCode).to_string(),
-                    crate::opencode::args(None),
-                    None,
+                    crate::opencode::args(req.resume),
+                    req.resume.map(str::to_string),
                 )
             }
         };
@@ -259,6 +268,7 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(l.spec.program, "/bin/zsh");
         assert!(l.spec.args.is_empty());
@@ -289,6 +299,7 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(env(&launch, "TERMIST_HOME").as_deref(), Some("/tmp/th"));
     }
@@ -305,6 +316,7 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(l.spec.program, "/fake/claude");
         let a = &l.spec.args;
@@ -328,6 +340,7 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(
             launch.spec.args.len(),
@@ -385,6 +398,7 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(l.spec.program, "/fake/codex");
         assert_eq!(l.spec.args[0], "-c");
@@ -407,10 +421,61 @@ mod tests {
             cwd: Path::new("/p"),
             cols: 80,
             rows: 24,
+            resume: None,
         });
         assert_eq!(l.spec.program, "/fake/opencode");
         assert!(l.spec.args.is_empty());
         let dir = env(&l, "OPENCODE_CONFIG_DIR").or_else(|| env(&l, "OPENCODE_CONFIG_CONTENT"));
         assert!(dir.is_some_and(|d| d.contains("/data/opencode")));
+    }
+
+    fn resumed(kind: SessionKind, id: &str) -> Launch {
+        launcher().launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &kind,
+            prompt: Some("ignored"),
+            cwd: Path::new("/p"),
+            cols: 80,
+            rows: 24,
+            resume: Some(id),
+        })
+    }
+
+    #[test]
+    fn each_harness_resumes_with_its_own_flag() {
+        let c = resumed(
+            SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+            "c-1",
+        );
+        assert_eq!(
+            c.spec.args,
+            ["--settings", "/data/claude-hooks.json", "--resume", "c-1"]
+        );
+        assert_eq!(c.agent_session_id.as_deref(), Some("c-1"));
+
+        let x = resumed(
+            SessionKind::Agent {
+                harness: Harness::Codex,
+            },
+            "x-1",
+        );
+        assert_eq!(&x.spec.args[..2], ["resume", "x-1"]);
+        assert!(!x.spec.args.contains(&"ignored".to_string()));
+        assert_eq!(x.agent_session_id.as_deref(), Some("x-1"));
+
+        let o = resumed(
+            SessionKind::Agent {
+                harness: Harness::OpenCode,
+            },
+            "ses_1",
+        );
+        assert_eq!(o.spec.args, ["--session", "ses_1"]);
+        assert_eq!(o.agent_session_id.as_deref(), Some("ses_1"));
+
+        let s = resumed(SessionKind::Shell, "whatever");
+        assert!(s.spec.args.is_empty());
+        assert_eq!(s.agent_session_id, None);
     }
 }

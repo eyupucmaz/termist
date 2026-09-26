@@ -1,5 +1,6 @@
 use crate::launch::{LaunchRequest, Launcher};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
+use crate::store::Store;
 use crate::transcript::TranscriptTail;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
@@ -29,13 +30,15 @@ pub enum Msg {
 
 struct Session {
     info: SessionInfo,
-    cmd: UnboundedSender<SessionCmd>,
+    /// `None` for a session loaded from the store that has not been resumed yet.
+    cmd: Option<UnboundedSender<SessionCmd>>,
     transcript: Option<TranscriptTail>,
 }
 
 pub struct Registry {
     launcher: Launcher,
     harnesses: Vec<HarnessInfo>,
+    store: Store,
     projects: Vec<ProjectInfo>,
     sessions: Vec<Session>,
     clients: HashMap<ClientId, UnboundedSender<ServerEvent>>,
@@ -48,18 +51,41 @@ impl Registry {
     pub fn new(
         launcher: Launcher,
         harnesses: Vec<HarnessInfo>,
+        store: Store,
         notes: UnboundedSender<SessionNote>,
         shutdown: oneshot::Sender<()>,
     ) -> Registry {
+        let (projects, sessions) = store.load().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not load stored sessions");
+            (vec![], vec![])
+        });
+        let created = sessions.len() as u32;
         Registry {
             launcher,
             harnesses,
-            projects: vec![],
-            sessions: vec![],
+            store,
+            projects,
+            sessions: sessions
+                .into_iter()
+                .map(|info| Session {
+                    info,
+                    cmd: None,
+                    transcript: None,
+                })
+                .collect(),
             clients: HashMap::new(),
             notes,
             shutdown: Some(shutdown),
-            created: 0,
+            created,
+        }
+    }
+
+    /// Write-through: mirrors a session's current info into the store.
+    fn persist(&self, id: SessionId) {
+        if let Some(s) = self.session(id)
+            && let Err(e) = self.store.upsert_session(&s.info)
+        {
+            tracing::warn!(session = %id, error = %e, "could not store session");
         }
     }
 
@@ -102,6 +128,7 @@ impl Registry {
         s.info.status = next;
         s.info.last_activity_ms = now_ms();
         let info = s.info.clone();
+        self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
     }
 
@@ -113,7 +140,9 @@ impl Registry {
             Msg::Disconnected(client) => {
                 self.clients.remove(&client);
                 for s in &self.sessions {
-                    let _ = s.cmd.send(SessionCmd::Detach { client });
+                    if let Some(cmd) = &s.cmd {
+                        let _ = cmd.send(SessionCmd::Detach { client });
+                    }
                 }
             }
             Msg::Request { client, req } => self.request(client, req),
@@ -126,6 +155,7 @@ impl Registry {
                 if let Some(s) = self.session_mut(id) {
                     s.info.title = title;
                     let info = s.info.clone();
+                    self.persist(id);
                     self.broadcast(ServerEvent::SessionUpdated(info));
                 }
             }
@@ -180,22 +210,28 @@ impl Registry {
                 cols,
                 rows,
             } => {
-                if let (Some(s), Some(out)) = (self.session(session), self.clients.get(&client)) {
-                    let _ = s.cmd.send(SessionCmd::Resize { cols, rows });
-                    let _ = s.cmd.send(SessionCmd::Attach {
+                if let (Some(s), Some(out)) = (self.session(session), self.clients.get(&client))
+                    && let Some(cmd) = &s.cmd
+                {
+                    let _ = cmd.send(SessionCmd::Resize { cols, rows });
+                    let _ = cmd.send(SessionCmd::Attach {
                         client,
                         out: out.clone(),
                     });
                 }
             }
             ClientRequest::Detach { session } => {
-                if let Some(s) = self.session(session) {
-                    let _ = s.cmd.send(SessionCmd::Detach { client });
+                if let Some(s) = self.session(session)
+                    && let Some(cmd) = &s.cmd
+                {
+                    let _ = cmd.send(SessionCmd::Detach { client });
                 }
             }
             ClientRequest::Input { session, data } => {
-                if let Some(s) = self.session(session) {
-                    let _ = s.cmd.send(SessionCmd::Input(data));
+                if let Some(s) = self.session(session)
+                    && let Some(cmd) = &s.cmd
+                {
+                    let _ = cmd.send(SessionCmd::Input(data));
                 }
                 self.signal(session, Signal::UserTyped);
             }
@@ -204,15 +240,22 @@ impl Registry {
                 cols,
                 rows,
             } => {
-                if let Some(s) = self.session(session) {
-                    let _ = s.cmd.send(SessionCmd::Resize { cols, rows });
+                if let Some(s) = self.session(session)
+                    && let Some(cmd) = &s.cmd
+                {
+                    let _ = cmd.send(SessionCmd::Resize { cols, rows });
                 }
             }
             ClientRequest::MarkSeen { session } => self.signal(session, Signal::Seen),
             ClientRequest::KillSession { session } => {
                 if let Some(pos) = self.sessions.iter().position(|s| s.info.id == session) {
                     let s = self.sessions.remove(pos);
-                    let _ = s.cmd.send(SessionCmd::Kill);
+                    if let Some(cmd) = &s.cmd {
+                        let _ = cmd.send(SessionCmd::Kill);
+                    }
+                    if let Err(e) = self.store.delete_session(session) {
+                        tracing::warn!(session = %session, error = %e, "could not delete session");
+                    }
                     self.broadcast(ServerEvent::SessionRemoved(session));
                 }
             }
@@ -226,15 +269,25 @@ impl Registry {
                 self.hook(session, harness, &event, &payload);
                 self.send(client, ServerEvent::Ack);
             }
-            ClientRequest::Resume { .. } => self.send(
-                client,
-                ServerEvent::Error {
-                    message: "resume is not supported yet".into(),
-                },
-            ),
+            ClientRequest::Resume {
+                session,
+                cols,
+                rows,
+            } => {
+                if let Err(e) = self.resume(session, cols, rows) {
+                    self.send(
+                        client,
+                        ServerEvent::Error {
+                            message: format!("{e:#}"),
+                        },
+                    );
+                }
+            }
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
-                    let _ = s.cmd.send(SessionCmd::Kill);
+                    if let Some(cmd) = &s.cmd {
+                        let _ = cmd.send(SessionCmd::Kill);
+                    }
                 }
                 self.send(client, ServerEvent::Ack);
                 if let Some(tx) = self.shutdown.take() {
@@ -295,6 +348,7 @@ impl Registry {
         {
             s.info.agent_session_id = Some(sid.to_string());
             let info = s.info.clone();
+            self.persist(id);
             self.broadcast(ServerEvent::SessionUpdated(info));
         }
     }
@@ -351,6 +405,9 @@ impl Registry {
             name,
             path,
         });
+        if let Err(e) = self.store.upsert_project(self.projects.last().unwrap()) {
+            tracing::warn!(error = %e, "could not store project");
+        }
         Ok(())
     }
 
@@ -373,6 +430,7 @@ impl Registry {
             cwd: &proj.path,
             cols,
             rows,
+            resume: None,
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.notes.clone())
@@ -390,9 +448,49 @@ impl Registry {
         };
         self.sessions.push(Session {
             info: info.clone(),
-            cmd,
+            cmd: Some(cmd),
             transcript: None,
         });
+        self.persist(id);
+        self.broadcast(ServerEvent::SessionUpdated(info));
+        Ok(())
+    }
+
+    fn resume(&mut self, id: SessionId, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let Some(pos) = self.sessions.iter().position(|s| s.info.id == id) else {
+            bail!("unknown session")
+        };
+        let info = &self.sessions[pos].info;
+        if info.status.is_live() {
+            bail!("{} is still running", info.name);
+        }
+        let Some(project) = self.projects.iter().find(|p| p.id == info.project) else {
+            bail!("the project of {} is gone", info.name)
+        };
+        let kind = info.kind.clone();
+        let resume = info.agent_session_id.clone();
+        let launch = self.launcher.launch(LaunchRequest {
+            id,
+            kind: &kind,
+            prompt: None,
+            cwd: &project.path,
+            cols,
+            rows,
+            resume: resume.as_deref(),
+        });
+        let program = launch.spec.program.clone();
+        let cmd = session::spawn(launch.spec, self.notes.clone())
+            .with_context(|| format!("could not start {} ({program})", kind.label()))?;
+        let s = &mut self.sessions[pos];
+        s.cmd = Some(cmd); // dropping the old sender ends the old session task
+        s.transcript = None;
+        s.info.status = AgentStatus::Fresh;
+        if launch.agent_session_id.is_some() {
+            s.info.agent_session_id = launch.agent_session_id;
+        }
+        s.info.last_activity_ms = now_ms();
+        let info = s.info.clone();
+        self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
         Ok(())
     }
