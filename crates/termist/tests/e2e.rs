@@ -1,8 +1,9 @@
 #![cfg(unix)]
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use termist_core::*;
 use termist_platform::{Client, Paths};
@@ -571,4 +572,237 @@ fn the_tui_draws_its_first_frame_at_once_and_enables_keyboard_enhancement() {
         seen.contains_key("push"),
         "DISAMBIGUATE_ESCAPE_CODES (ESC[>1u) was never pushed; saw {seen:?}"
     );
+}
+
+/// The real `termist` TUI in a PTY, playing a terminal that answers the device
+/// attributes query (and not the keyboard-protocol one, so keys go as plain bytes).
+struct Tui {
+    output: Arc<Mutex<Vec<u8>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    _child: KillOnDrop,
+}
+
+impl Tui {
+    fn spawn(home: &Path, cwd: &Path, envs: &[(&str, &Path)]) -> Tui {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::Read;
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 110,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(BIN);
+        cmd.cwd(cwd);
+        cmd.env("TERMIST_HOME", home);
+        cmd.env("TERM", "xterm-256color");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let child = KillOnDrop(pair.slave.spawn_command(cmd).unwrap());
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (out, answers) = (output.clone(), writer.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(3).any(|w| w == b"\x1b[c") {
+                    let mut w = answers.lock().unwrap();
+                    let _ = w.write_all(b"\x1b[?62;22c");
+                    let _ = w.flush();
+                }
+                out.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Tui {
+            output,
+            writer,
+            _master: pair.master,
+            _child: child,
+        }
+    }
+
+    /// Types `bytes` into the TUI.
+    fn keys(&self, bytes: &[u8]) {
+        let mut w = self.writer.lock().unwrap();
+        w.write_all(bytes).unwrap();
+        w.flush().unwrap();
+    }
+
+    /// How much output there is so far; `wait_for` looks only past such a mark.
+    fn mark(&self) -> usize {
+        self.output.lock().unwrap().len()
+    }
+
+    /// Waits until the output after `from` contains `needle`.
+    fn wait_for(&self, needle: &str, from: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = String::from_utf8_lossy(&self.output.lock().unwrap()[from..]).into_owned();
+            if text.contains(needle) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the TUI never showed {needle:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// Attaches to `id` and waits until its screen shows every one of `needles`.
+async fn screen_shows(c: &mut Client, id: SessionId, needles: &[&str]) {
+    c.send(&ClientRequest::Attach {
+        session: id,
+        cols: 110,
+        rows: 30,
+    })
+    .await
+    .unwrap();
+    let mut screen = Snapshot::default();
+    recv_until(c, |e| {
+        if let ServerEvent::Screen { session, update } = e
+            && *session == id
+        {
+            screen.apply(update);
+        }
+        let text = screen_text(&screen);
+        needles.iter().all(|n| text.contains(n))
+    })
+    .await;
+}
+
+// The quick prompt and the follow-up, driven through the real TUI with keys: the
+// prompt, a typed model name with a space and an effort reach the agent CLI as
+// arguments, and `Space` types one line into the running agent.
+#[tokio::test]
+async fn quick_prompt_and_follow_up_through_the_real_tui() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = fixture(tmp.path(), "fake-argv.sh");
+    let home = tmp.path().join("home");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let _daemon = DaemonGuard {
+        home: home.clone(),
+        child: None,
+    };
+    let tui = Tui::spawn(&home, &project_dir, &[("TERMIST_CLAUDE_BIN", &agent)]);
+    tui.wait_for(" project ", 0);
+
+    let mark = tui.mark();
+    tui.keys(b"p");
+    tui.wait_for("new task", mark);
+    tui.keys(b"fix the login redirect");
+    // Ctrl+O, "type a model…", effort three steps right (high), Enter
+    tui.keys(b"\x0fjlll\r");
+    tui.keys(b"my model\r");
+    let mark = tui.mark();
+    tui.keys(b"\r");
+    tui.wait_for("typing", mark);
+
+    let paths = Paths::under(home.clone());
+    let mut c = Client::connect(&paths).await.unwrap();
+    c.send(&ClientRequest::ListState).await.unwrap();
+    let ServerEvent::State(state) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    else {
+        unreachable!()
+    };
+    let session = state.sessions[0].clone();
+    assert_eq!(session.model.as_deref(), Some("my model"));
+    assert_eq!(session.effort.as_deref(), Some("high"));
+    screen_shows(
+        &mut c,
+        session.id,
+        &[
+            "[--model]\n[my model]",
+            "[--effort]\n[high]",
+            "[fix the login redirect]",
+        ],
+    )
+    .await;
+
+    // leave the pane (C-a q), then Space: one line for the agent, from the grid
+    let mark = tui.mark();
+    tui.keys(b"\x01q");
+    tui.wait_for("p new task", mark);
+    let mark = tui.mark();
+    tui.keys(b" ");
+    tui.wait_for("follow-up", mark);
+    tui.keys(b"run the tests\r");
+    screen_shows(&mut c, session.id, &["follow-up: run the tests"]).await;
+
+    c.send(&ClientRequest::ListPromptHistory { limit: 5 })
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_until(&mut c, |e| matches!(e, ServerEvent::PromptHistory(_))).await,
+        ServerEvent::PromptHistory(vec!["fix the login redirect".into()])
+    );
+}
+
+#[tokio::test]
+async fn an_archived_session_survives_a_restart_and_resumes_when_restored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fixture(tmp.path(), "fake-claude.sh");
+    let home = tmp.path().join("home");
+    let session = {
+        let (_paths, mut c, _guard) = daemon(&home, &[("TERMIST_CLAUDE_BIN", &bin)]).await;
+        let (info, _, _) = play_turn(
+            &mut c,
+            tmp.path(),
+            SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+        )
+        .await;
+        c.send(&ClientRequest::ArchiveSession { session: info.id })
+            .await
+            .unwrap();
+        recv_until(&mut c, |e| {
+            matches!(e, ServerEvent::SessionUpdated(u)
+                if u.id == info.id && u.archived && matches!(u.status, AgentStatus::Exited { .. }))
+        })
+        .await;
+        info
+        // _guard drops here: the daemon exits, the archived record stays
+    };
+    let (_paths, mut c, _guard) = daemon(&home, &[("TERMIST_CLAUDE_BIN", &bin)]).await;
+    c.send(&ClientRequest::ListState).await.unwrap();
+    let ServerEvent::State(state) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::State(_))).await
+    else {
+        unreachable!()
+    };
+    let stored = state
+        .sessions
+        .iter()
+        .find(|s| s.id == session.id)
+        .expect("the archived session was kept");
+    assert!(stored.archived);
+    assert_eq!(stored.status, AgentStatus::Disconnected);
+    c.send(&ClientRequest::UnarchiveSession {
+        session: session.id,
+    })
+    .await
+    .unwrap();
+    recv_until(
+        &mut c,
+        |e| matches!(e, ServerEvent::SessionUpdated(u) if u.id == session.id && !u.archived),
+    )
+    .await;
+    c.send(&ClientRequest::Resume {
+        session: session.id,
+        cols: 110,
+        rows: 30,
+    })
+    .await
+    .unwrap();
+    screen_shows(&mut c, session.id, &["--resume fake-session"]).await;
 }
