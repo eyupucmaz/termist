@@ -177,7 +177,7 @@ fn draw_card(f: &mut Frame, s: &termist_core::SessionInfo, selected: bool, rect:
             BorderType::Rounded
         })
         .border_style(border);
-    let name = s.title.as_deref().unwrap_or(&s.name);
+    let name = s.display_name();
     let lines = vec![
         Line::from(vec![
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
@@ -198,7 +198,7 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     let focused = matches!(app.mode, Mode::Focus | Mode::FocusPrefix);
     let title = format!(
         " {} — {}{} ",
-        info.name,
+        info.display_name(),
         info.kind.label(),
         if focused { " · typing" } else { "" }
     );
@@ -291,8 +291,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .sessions
                 .iter()
                 .find(|s| s.id == id)
-                .map(|s| s.name.as_str())
-                .unwrap_or("this session");
+                .map_or("this session", |s| s.display_name());
             (
                 format!("Kill {name}? It stops the process.  y / Enter: kill · any key: cancel"),
                 Style::default().fg(Color::Yellow),
@@ -604,5 +603,20 @@ mod tests {
         let text = screen_text(&render(&mut app, 80, 20));
         assert!(text.contains("model · opencode"));
         assert!(!text.contains("effort"), "OpenCode has no effort flag");
+    }
+
+    #[test]
+    fn a_name_the_user_gave_wins_over_the_agents_title() {
+        let mut app = fixture();
+        let mut info = app.selected_info().unwrap().clone();
+        info.title = Some("Auto Title".into());
+        app.on_event(ServerEvent::SessionUpdated(info.clone()));
+        assert!(screen_text(&render(&mut app, 60, 16)).contains("Auto Title"));
+        info.name = "mine".into();
+        info.user_named = true;
+        app.on_event(ServerEvent::SessionUpdated(info));
+        let text = screen_text(&render(&mut app, 60, 16));
+        assert!(text.contains("◆ mine"));
+        assert!(!text.contains("Auto Title"));
     }
 }

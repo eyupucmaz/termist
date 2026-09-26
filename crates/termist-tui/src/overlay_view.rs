@@ -206,6 +206,16 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             );
         }
         Overlay::ModelName(input) => text_box(f, body, "model name", 48, input, top),
+        Overlay::FollowUp { session, input } => {
+            let name = app
+                .state
+                .sessions
+                .iter()
+                .find(|s| s.id == *session)
+                .map_or("?", |s| s.display_name());
+            text_box(f, body, &format!("follow-up · {name}"), 64, input, top);
+        }
+        Overlay::Rename { input, .. } => text_box(f, body, "rename", 48, input, top),
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -245,5 +255,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Model(_) => "j/k model · h/l effort · Enter choose · Esc back",
         Overlay::ModelName(_) => "Enter use this model · Esc back",
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
+        Overlay::FollowUp { .. } => "Enter send to the agent · Esc cancel",
+        Overlay::Rename { .. } => "Enter rename · Esc cancel",
     }
 }

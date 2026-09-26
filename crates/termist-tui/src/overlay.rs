@@ -3,7 +3,7 @@
 //! the quick prompt returns to it with the text still there.
 use crate::list_picker::ListPicker;
 use crate::text_input::TextInput;
-use termist_core::{Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo};
+use termist_core::{Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo, SessionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -17,6 +17,16 @@ pub enum Overlay {
     ModelName(TextInput),
     /// Ctrl+P in the quick prompt: the project to start in.
     Project(ListPicker<ProjectInfo>),
+    /// `Space`: the next instruction for a card's agent, sent without entering the card.
+    FollowUp {
+        session: SessionId,
+        input: TextInput,
+    },
+    /// `r`: a new name for a card.
+    Rename {
+        session: SessionId,
+        input: TextInput,
+    },
 }
 
 impl Overlay {
@@ -31,7 +41,9 @@ impl Overlay {
     pub fn text_input_mut(&mut self) -> Option<&mut TextInput> {
         match self {
             Overlay::QuickPrompt(q) => Some(&mut q.input),
-            Overlay::ModelName(input) => Some(input),
+            Overlay::ModelName(input)
+            | Overlay::FollowUp { input, .. }
+            | Overlay::Rename { input, .. } => Some(input),
             _ => None,
         }
     }

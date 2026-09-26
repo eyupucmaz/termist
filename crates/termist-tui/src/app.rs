@@ -271,6 +271,8 @@ impl App {
                     KeyCode::Char('n') => actions.extend(self.open_picker()),
                     KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
                     KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
+                    KeyCode::Char(' ') => self.open_follow_up(),
+                    KeyCode::Char('r') => self.open_rename(),
                     KeyCode::Char('d') => {
                         if let Some(id) = self.selected {
                             self.mode = Mode::ConfirmKill(id);
@@ -361,6 +363,8 @@ impl App {
             Some(Overlay::Model(_)) => self.model_key(key),
             Some(Overlay::ModelName(_)) => self.model_name_key(key),
             Some(Overlay::Project(_)) => self.project_key(key),
+            Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
+            Some(Overlay::Rename { .. }) => self.rename_key(key),
             None => vec![],
         }
     }
@@ -618,6 +622,102 @@ impl App {
             }
         }
         vec![]
+    }
+
+    fn is_live(&self, id: SessionId) -> bool {
+        self.state
+            .sessions
+            .iter()
+            .any(|s| s.id == id && s.status.is_live())
+    }
+
+    /// `Space`: only a running card can take an instruction.
+    fn open_follow_up(&mut self) {
+        let Some(session) = self.selected else {
+            return;
+        };
+        if !self.is_live(session) {
+            self.message = Some("not running — Enter resumes".into());
+            return;
+        }
+        self.overlays.push(Overlay::FollowUp {
+            session,
+            input: TextInput::new(false),
+        });
+    }
+
+    /// Enter types the text into the card's agent and presses Enter. The text goes as
+    /// a paste (bracketed when the agent asked for that), so a multi-line text arrives
+    /// as one message and an agent that treats fast typing as a paste still submits.
+    fn follow_up_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::FollowUp { session, input }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if input.key(key) != Edit::Submit {
+            return vec![];
+        }
+        let (session, text) = (*session, input.text().to_string());
+        self.overlays.pop();
+        if text.trim().is_empty() {
+            return vec![];
+        }
+        if !self.is_live(session) {
+            self.message = Some("not running — Enter resumes".into());
+            return vec![];
+        }
+        let modes = self
+            .screens
+            .get(&session)
+            .map(|s| s.modes)
+            .unwrap_or_default();
+        vec![
+            Action::Send(ClientRequest::Input {
+                session,
+                data: encode_paste(&text, &modes),
+            }),
+            Action::Send(ClientRequest::Input {
+                session,
+                data: b"\r".to_vec(),
+            }),
+        ]
+    }
+
+    /// `r`: the box starts with the name the card shows.
+    fn open_rename(&mut self) {
+        let Some(info) = self.selected_info() else {
+            return;
+        };
+        let (session, input) = (info.id, TextInput::with_text(info.display_name(), false));
+        self.overlays.push(Overlay::Rename { session, input });
+    }
+
+    fn rename_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Rename { session, input }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if input.key(key) != Edit::Submit {
+            return vec![];
+        }
+        let name = input
+            .text()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if name.is_empty() {
+            self.message = Some("a name cannot be empty".into());
+            return vec![];
+        }
+        let session = *session;
+        self.overlays.pop();
+        vec![Action::Send(ClientRequest::RenameSession { session, name })]
     }
 
     /// Enter on a card: focus a live session, resume a stopped one.
@@ -1573,5 +1673,110 @@ mod tests {
         app.on_key(k(K::Esc));
         assert!(app.overlays.is_empty());
         assert_eq!(app.mode, Mode::Focus, "Esc returns to the focused pane");
+    }
+
+    #[test]
+    fn space_types_one_instruction_into_the_card_and_presses_enter() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "run the tests");
+        let actions = app.on_key(k(K::Enter));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::Grid, "the grid stays");
+        assert_eq!(
+            sent(&actions),
+            vec![
+                &ClientRequest::Input {
+                    session: s[0].id,
+                    data: b"run the tests".to_vec()
+                },
+                &ClientRequest::Input {
+                    session: s[0].id,
+                    data: b"\r".to_vec()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_multi_line_follow_up_arrives_as_one_pasted_message() {
+        let (mut app, s) = app();
+        let mut screen = Snapshot::blank(10, 2);
+        screen.modes.bracketed_paste = true;
+        app.screens.insert(s[0].id, screen);
+        app.on_key(k(K::Char(' ')));
+        app.on_paste("first line\nsecond line");
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions)[0],
+            &ClientRequest::Input {
+                session: s[0].id,
+                data: b"\x1b[200~first line\nsecond line\x1b[201~".to_vec()
+            }
+        );
+    }
+
+    // A follow-up must never reach a card whose agent is not running, not even one that
+    // stopped while the box was open.
+    #[test]
+    fn a_follow_up_to_a_card_that_is_not_running_sends_nothing() {
+        let (mut app, s) = app();
+        let mut stopped = s[0].clone();
+        stopped.status = AgentStatus::Disconnected;
+        app.on_event(ServerEvent::SessionUpdated(stopped.clone()));
+        assert!(sent(&app.on_key(k(K::Char(' ')))).is_empty());
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.message.as_deref(), Some("not running — Enter resumes"));
+
+        let (mut app, s) = self::app();
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "too late");
+        let mut exited = s[0].clone();
+        exited.status = AgentStatus::Exited { code: Some(0) };
+        app.on_event(ServerEvent::SessionUpdated(exited));
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        assert_eq!(app.message.as_deref(), Some("not running — Enter resumes"));
+    }
+
+    #[test]
+    fn an_empty_follow_up_sends_nothing() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "  ");
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn r_renames_starting_from_the_name_the_card_shows() {
+        let (mut app, s) = app();
+        let mut titled = s[0].clone();
+        titled.title = Some("Fix Login".into());
+        app.on_event(ServerEvent::SessionUpdated(titled));
+        app.on_key(k(K::Char('r')));
+        match app.overlays.last() {
+            Some(Overlay::Rename { input, .. }) => assert_eq!(input.text(), "Fix Login"),
+            other => panic!("{other:?}"),
+        }
+        app.on_key(ctrl('u'));
+        type_text(&mut app, "login bug");
+        assert_eq!(
+            sent(&app.on_key(k(K::Enter))),
+            vec![&ClientRequest::RenameSession {
+                session: s[0].id,
+                name: "login bug".into()
+            }]
+        );
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn an_empty_name_is_refused_and_the_box_stays_open() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('r')));
+        app.on_key(ctrl('u'));
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty());
+        assert_eq!(app.message.as_deref(), Some("a name cannot be empty"));
+        assert_eq!(app.overlays.len(), 1);
     }
 }
