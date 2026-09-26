@@ -101,11 +101,10 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn touch(dir: &std::path::Path, name: &str, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join(name);
@@ -113,7 +112,6 @@ mod tests {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn finds_executables_on_a_path_and_skips_plain_files() {
         let a = tempfile::tempdir().unwrap();
@@ -125,7 +123,6 @@ mod tests {
         assert_eq!(find_in_path("opencode", &path), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn the_login_shell_can_find_a_program_and_refuses_odd_names() {
         let found =

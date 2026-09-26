@@ -20,11 +20,10 @@ fn quote(s: &str) -> String {
     format!("\"{s}\"")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn every_harness_uses_the_same_quoted_form() {
         let exe = Path::new("/a b/it's/termist");
