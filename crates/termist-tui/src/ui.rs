@@ -86,7 +86,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         } else if app.state.projects.is_empty() {
             "No project yet: run termist inside a project folder."
         } else {
-            "No sessions yet.  n: new claude  ·  t: new shell"
+            "No sessions yet.  n: new agent  ·  t: new shell"
         };
         let body = Rect {
             height: areas.cards.height + areas.pane.height,
