@@ -1840,6 +1840,7 @@ dependencies = [
  "interprocess",
  "portable-pty",
  "serde_json",
+ "sha2",
  "tempfile",
  "termist-core",
  "termist-platform",

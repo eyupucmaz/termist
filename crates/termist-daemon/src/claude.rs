@@ -22,20 +22,7 @@ const ATTENTION_NOTIFICATIONS: &[&str] = &[
 ];
 
 pub fn hook_command(exe: &Path, event: &str) -> String {
-    format!(
-        "{} hook --harness claude {event}",
-        quote(&exe.display().to_string())
-    )
-}
-
-#[cfg(unix)]
-fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-#[cfg(windows)]
-fn quote(s: &str) -> String {
-    format!("\"{s}\"")
+    crate::hookcmd::hook_command(exe, termist_core::Harness::Claude, event)
 }
 
 /// The file passed with `claude --settings`. Claude merges these hooks with the

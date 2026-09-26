@@ -171,8 +171,19 @@ impl Launcher {
                 )
             }
             SessionKind::Agent {
-                harness: harness @ (Harness::Codex | Harness::OpenCode),
-            } => (self.programs.get(*harness).to_string(), vec![], None),
+                harness: Harness::Codex,
+            } => (
+                self.programs.get(Harness::Codex).to_string(),
+                crate::codex::args(&self.exe, None, req.prompt),
+                None,
+            ),
+            SessionKind::Agent {
+                harness: Harness::OpenCode,
+            } => (
+                self.programs.get(Harness::OpenCode).to_string(),
+                vec![],
+                None,
+            ),
         };
         Launch {
             spec: SpawnSpec {
@@ -351,6 +362,28 @@ mod tests {
                     available: false
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn codex_gets_hook_flags_and_no_preassigned_id() {
+        let kind = SessionKind::Agent {
+            harness: Harness::Codex,
+        };
+        let l = launcher().launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &kind,
+            prompt: None,
+            cwd: Path::new("/p"),
+            cols: 80,
+            rows: 24,
+        });
+        assert_eq!(l.spec.program, "/fake/codex");
+        assert_eq!(l.spec.args[0], "-c");
+        assert!(l.spec.args.iter().any(|a| a.starts_with("hooks.Stop=")));
+        assert_eq!(
+            l.agent_session_id, None,
+            "codex reports its id in the first SessionStart hook"
         );
     }
 }
