@@ -1,16 +1,19 @@
-use crate::claude;
 use crate::launch::{LaunchRequest, Launcher};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
+use crate::transcript::TranscriptTail;
+use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, ProjectId, ProjectInfo, ServerEvent,
     SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
+use tokio::time::MissedTickBehavior;
 
 pub enum Msg {
     Connected {
@@ -27,6 +30,7 @@ pub enum Msg {
 struct Session {
     info: SessionInfo,
     cmd: UnboundedSender<SessionCmd>,
+    transcript: Option<TranscriptTail>,
 }
 
 pub struct Registry {
@@ -219,21 +223,7 @@ impl Registry {
                 payload_json,
             } => {
                 let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-                if event == "SessionStart"
-                    && let (Some(s), Some(sid)) = (
-                        self.session_mut(session),
-                        payload.get("session_id").and_then(Value::as_str),
-                    )
-                {
-                    s.info.agent_session_id = Some(sid.to_string());
-                }
-                let signal = match harness {
-                    Harness::Claude => claude::signal_for(&event, &payload),
-                    Harness::Codex | Harness::OpenCode => None,
-                };
-                if let Some(signal) = signal {
-                    self.signal(session, signal);
-                }
+                self.hook(session, harness, &event, &payload);
                 self.send(client, ServerEvent::Ack);
             }
             ClientRequest::Resume { .. } => self.send(
@@ -251,6 +241,95 @@ impl Registry {
                     let _ = tx.send(());
                 }
             }
+        }
+    }
+
+    fn hook(&mut self, id: SessionId, harness: Harness, event: &str, payload: &Value) {
+        let signal = match harness {
+            Harness::Claude => {
+                if event == "SessionStart"
+                    && let Some(sid) = payload.get("session_id").and_then(Value::as_str)
+                {
+                    self.set_agent_session_id(id, sid);
+                }
+                if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
+                    self.watch_transcript(id, Path::new(path));
+                }
+                claude::signal_for(event, payload)
+            }
+            Harness::Codex => {
+                if event == "SessionStart"
+                    && let Some(sid) = payload.get("session_id").and_then(Value::as_str)
+                {
+                    self.set_agent_session_id(id, sid);
+                }
+                codex::signal_for(event, payload)
+            }
+            Harness::OpenCode => {
+                if event == "session.created" {
+                    let known = self
+                        .session(id)
+                        .and_then(|s| s.info.agent_session_id.clone());
+                    if known.is_none()
+                        && !opencode::is_child_session(payload)
+                        && let Some(sid) = opencode::event_session(payload)
+                    {
+                        self.set_agent_session_id(id, sid);
+                    }
+                    None
+                } else if self.is_foreign_opencode_event(id, payload) {
+                    None
+                } else {
+                    opencode::signal_for(event, payload)
+                }
+            }
+        };
+        if let Some(signal) = signal {
+            self.signal(id, signal);
+        }
+    }
+
+    fn set_agent_session_id(&mut self, id: SessionId, sid: &str) {
+        if let Some(s) = self.session_mut(id)
+            && s.info.agent_session_id.as_deref() != Some(sid)
+        {
+            s.info.agent_session_id = Some(sid.to_string());
+            let info = s.info.clone();
+            self.broadcast(ServerEvent::SessionUpdated(info));
+        }
+    }
+
+    /// An OpenCode event about a session other than this card's (a subagent's).
+    fn is_foreign_opencode_event(&self, id: SessionId, payload: &Value) -> bool {
+        let known = self
+            .session(id)
+            .and_then(|s| s.info.agent_session_id.as_deref());
+        matches!((known, opencode::event_session(payload)), (Some(k), Some(e)) if k != e)
+    }
+
+    fn watch_transcript(&mut self, id: SessionId, path: &Path) {
+        if let Some(s) = self.session_mut(id)
+            && s.transcript.as_ref().is_none_or(|t| t.path() != path)
+        {
+            s.transcript = Some(TranscriptTail::new(path.to_path_buf()));
+        }
+    }
+
+    /// Claude sessions that are mid-turn and whose transcript shows an interrupt.
+    pub fn poll_transcripts(&mut self) {
+        let mut cancelled = Vec::new();
+        for s in &mut self.sessions {
+            if matches!(
+                s.info.status,
+                AgentStatus::Running | AgentStatus::NeedsFeedback
+            ) && let Some(t) = s.transcript.as_mut()
+                && t.poll()
+            {
+                cancelled.push(s.info.id);
+            }
+        }
+        for id in cancelled {
+            self.signal(id, Signal::Cancelled);
         }
     }
 
@@ -312,6 +391,7 @@ impl Registry {
         self.sessions.push(Session {
             info: info.clone(),
             cmd,
+            transcript: None,
         });
         self.broadcast(ServerEvent::SessionUpdated(info));
         Ok(())
@@ -323,11 +403,16 @@ pub async fn run(
     mut rx: UnboundedReceiver<Msg>,
     mut notes: UnboundedReceiver<SessionNote>,
 ) {
+    let mut transcripts = tokio::time::interval(Duration::from_millis(500));
+    transcripts.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            Some(msg) = rx.recv() => reg.handle(msg),
+            msg = rx.recv() => match msg {
+                Some(msg) => reg.handle(msg),
+                None => break,
+            },
             Some(note) = notes.recv() => reg.note(note),
-            else => break,
+            _ = transcripts.tick() => reg.poll_transcripts(),
         }
     }
 }

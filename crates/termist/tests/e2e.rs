@@ -244,7 +244,7 @@ async fn a_fake_claude_turn_end_to_end() {
         loop {
             match c.recv().await.unwrap().unwrap() {
                 ServerEvent::SessionUpdated(info) if info.id == s.id => {
-                    if statuses.last() != Some(&info.status) {
+                    if statuses.last() != Some(&info.status) && info.status != AgentStatus::Fresh {
                         statuses.push(info.status);
                     }
                     if info.status == AgentStatus::NeedsFeedback && !answered {

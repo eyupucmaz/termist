@@ -128,6 +128,18 @@ async fn status_update(c: &mut Client, id: SessionId) -> AgentStatus {
     }
 }
 
+async fn info_update(c: &mut Client, id: SessionId) -> SessionInfo {
+    match next_event(
+        c,
+        |e| matches!(e, ServerEvent::SessionUpdated(s) if s.id == id),
+    )
+    .await
+    {
+        ServerEvent::SessionUpdated(s) => s,
+        _ => unreachable!(),
+    }
+}
+
 #[tokio::test]
 async fn a_shell_session_round_trip() {
     let d = start(shell_config()).await;
@@ -213,6 +225,164 @@ async fn claude_hooks_drive_the_status_dot() {
     assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Unseen);
     ui.send(&ClientRequest::MarkSeen { session: s.id })
         .await
+        .unwrap();
+    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Finished);
+}
+
+#[tokio::test]
+async fn codex_hooks_drive_status_and_capture_its_session_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        codex_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Codex,
+        },
+    )
+    .await;
+    assert_eq!(s.agent_session_id, None);
+    let hook = |event: &'static str, payload: &'static str| {
+        let paths = d.paths.clone();
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::Codex, event, payload.into())
+                .await
+                .unwrap()
+        }
+    };
+    hook(
+        "SessionStart",
+        r#"{"session_id":"019a-codex","source":"startup"}"#,
+    )
+    .await;
+    assert_eq!(
+        info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
+        Some("019a-codex")
+    );
+    hook("UserPromptSubmit", "{}").await;
+    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    hook("PermissionRequest", "{}").await;
+    assert_eq!(
+        status_update(&mut ui, s.id).await,
+        AgentStatus::NeedsFeedback
+    );
+    hook("Interrupt", "{}").await;
+    assert_eq!(
+        status_update(&mut ui, s.id).await,
+        AgentStatus::Finished,
+        "Interrupt = cancelled or denied"
+    );
+}
+
+// Review Focus 3
+#[tokio::test]
+async fn opencode_subagent_events_do_not_move_the_parent_card() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        opencode_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::OpenCode,
+        },
+    )
+    .await;
+    let hook = |event: &'static str, payload: &'static str| {
+        let paths = d.paths.clone();
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::OpenCode, event, payload.into())
+                .await
+                .unwrap()
+        }
+    };
+    hook(
+        "session.created",
+        r#"{"type":"session.created","properties":{"info":{"id":"ses_parent"}}}"#,
+    )
+    .await;
+    assert_eq!(
+        info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
+        Some("ses_parent")
+    );
+    hook(
+        "session.created",
+        r#"{"type":"session.created","properties":{"info":{"id":"ses_child","parentID":"ses_parent"}}}"#,
+    )
+    .await;
+    hook("chat.message", r#"{"sessionID":"ses_parent"}"#).await;
+    assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Running);
+    // a subagent asks for permission: the parent card must not turn red
+    hook(
+        "permission.asked",
+        r#"{"type":"permission.asked","properties":{"sessionID":"ses_child"}}"#,
+    )
+    .await;
+    hook(
+        "session.idle",
+        r#"{"type":"session.idle","properties":{"sessionID":"ses_parent"}}"#,
+    )
+    .await;
+    assert_eq!(
+        status_update(&mut ui, s.id).await,
+        AgentStatus::Unseen,
+        "the child's permission.asked was ignored"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_claude_turn_is_read_from_its_transcript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let transcript = tmp.path().join("session.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"text\":\"[Request interrupted by user]\"}\n",
+    )
+    .unwrap(); // old history
+    let d = start(DaemonConfig {
+        claude_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+    )
+    .await;
+    let payload = serde_json::json!({ "transcript_path": transcript }).to_string();
+    hook_client::send_hook(&d.paths, s.id, Harness::Claude, "UserPromptSubmit", payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        status_update(&mut ui, s.id).await,
+        AgentStatus::Running,
+        "history must not cancel"
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .and_then(|mut f| {
+            std::io::Write::write_all(
+                &mut f,
+                b"{\"text\":\"[Request interrupted by user for tool use]\"}\n",
+            )
+        })
         .unwrap();
     assert_eq!(status_update(&mut ui, s.id).await, AgentStatus::Finished);
 }
