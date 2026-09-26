@@ -336,7 +336,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
     match overlay {
         Overlay::Harness(_) => "j/k choose · Enter start · 1-3 pick · Esc cancel",
         Overlay::QuickPrompt(_) => {
-            "Enter start · Shift+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"
+            "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"
         }
         Overlay::Model(m) if m.harness.efforts().is_empty() => {
             "j/k model · Enter choose · Esc back"
