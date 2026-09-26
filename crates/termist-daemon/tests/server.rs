@@ -11,8 +11,7 @@ use tokio::time::timeout;
 struct Daemon {
     paths: Paths,
     // Kept alive so the daemon task isn't dropped/aborted; only read in one test.
-    #[allow(dead_code)]
-    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    _task: tokio::task::JoinHandle<anyhow::Result<()>>,
     _tmp: tempfile::TempDir,
 }
 
@@ -24,7 +23,7 @@ async fn start(config: DaemonConfig) -> Daemon {
         if Client::connect(&paths).await.is_ok() {
             return Daemon {
                 paths,
-                task,
+                _task: task,
                 _tmp: tmp,
             };
         }

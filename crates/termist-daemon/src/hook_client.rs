@@ -20,10 +20,10 @@ pub async fn send_hook(
         .await?;
     while let Some(ev) = client.recv().await? {
         if ev == ServerEvent::Ack {
-            break;
+            return Ok(());
         }
     }
-    Ok(())
+    anyhow::bail!("the daemon closed the connection before acknowledging the hook")
 }
 
 /// What `termist hook` does. Never errors and never outlives `limit`: a hook must not

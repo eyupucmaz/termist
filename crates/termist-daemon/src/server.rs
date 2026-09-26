@@ -6,13 +6,43 @@ use anyhow::bail;
 use interprocess::local_socket::tokio::prelude::*;
 use std::fs::{File, TryLockError};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use termist_core::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 use termist_platform::framed::{FramedReader, write_frame};
 use termist_platform::ipc::{self, Stream};
 use termist_platform::{Client, Paths};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
+
+/// Lets one log line through per `window`; counts what it swallowed in between.
+pub struct LogThrottle {
+    window: Duration,
+    last: Option<Instant>,
+    suppressed: u32,
+}
+
+impl LogThrottle {
+    pub fn new(window: Duration) -> LogThrottle {
+        LogThrottle {
+            window,
+            last: None,
+            suppressed: 0,
+        }
+    }
+
+    pub fn allow(&mut self, now: Instant) -> Option<u32> {
+        match self.last {
+            Some(last) if now.duration_since(last) < self.window => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                self.last = Some(now);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        }
+    }
+}
 
 pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     paths.ensure()?;
@@ -60,6 +90,7 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
     ));
 
     let mut next = 0u64;
+    let mut accept_errors = LogThrottle::new(Duration::from_secs(1));
     loop {
         tokio::select! {
             conn = listener.accept() => match conn {
@@ -71,7 +102,9 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
                 // Windows, …) must not take every session down with the daemon: log it
                 // (stderr is the daemon log), back off briefly and keep serving.
                 Err(e) => {
-                    eprintln!("termist daemon: accept failed: {e}");
+                    if let Some(suppressed) = accept_errors.allow(Instant::now()) {
+                        tracing::warn!(error = %e, suppressed, "accept failed");
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             },
@@ -126,4 +159,22 @@ async fn connection(client: ClientId, conn: Stream, registry: UnboundedSender<Ms
     }
     let _ = registry.send(Msg::Disconnected(client));
     writer.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogThrottle;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_storm_of_errors_logs_once_per_window_and_counts_the_rest() {
+        let t0 = Instant::now();
+        let mut t = LogThrottle::new(Duration::from_secs(1));
+        assert_eq!(t.allow(t0), Some(0));
+        for i in 1..=19 {
+            assert_eq!(t.allow(t0 + Duration::from_millis(50 * i)), None);
+        }
+        assert_eq!(t.allow(t0 + Duration::from_millis(1001)), Some(19));
+        assert_eq!(t.allow(t0 + Duration::from_millis(1002)), None);
+    }
 }

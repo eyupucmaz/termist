@@ -81,6 +81,7 @@ pub fn spawn(
     let mut reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
     let master = pair.master;
+    let id = spec.id;
 
     // Reader first: see "Behaviour to keep".
     let (bytes_tx, mut bytes_rx) = unbounded_channel::<Vec<u8>>();
@@ -103,16 +104,12 @@ pub fn spawn(
     let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         for data in write_rx {
-            if writer
-                .write_all(&data)
-                .and_then(|()| writer.flush())
-                .is_err()
-            {
+            if let Err(e) = writer.write_all(&data).and_then(|()| writer.flush()) {
+                tracing::warn!(session = %id, error = %e, "pty write failed; dropping further input");
                 break;
             }
         }
     });
-    let id = spec.id;
     let exit_notes = notes.clone();
     std::thread::spawn(move || {
         let code = child.wait().ok().map(|s| s.exit_code() as i32);
@@ -157,7 +154,9 @@ pub fn spawn(
                     Some(SessionCmd::Input(data)) => { let _ = write_tx.send(data); }
                     Some(SessionCmd::Resize { cols, rows }) => {
                         if cols > 0 && rows > 0 && (cols, rows) != term.size() {
-                            let _ = master.resize(pty_size(cols, rows));
+                            if let Err(e) = master.resize(pty_size(cols, rows)) {
+                                tracing::warn!(session = %id, error = %e, "pty resize failed");
+                            }
                             term.resize(cols, rows);
                             dirty = true;
                         }

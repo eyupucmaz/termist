@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         // An agent CLI treats exit 2 from a hook as "block": a malformed
         // `termist hook …` line must exit 0 silently, like every other hook failure.
-        Err(_) if std::env::args().nth(1).as_deref() == Some("hook") => {
+        Err(_) if std::env::args_os().nth(1).is_some_and(|a| a == "hook") => {
             return ExitCode::SUCCESS;
         }
         Err(err) => err.exit(),
@@ -61,7 +61,10 @@ fn main() -> ExitCode {
     let result = runtime.block_on(async move {
         match cli.cmd {
             None => termist_tui::run::run(paths).await,
-            Some(Cmd::Daemon) => termist_daemon::server::run(paths, DaemonConfig::from_env()).await,
+            Some(Cmd::Daemon) => {
+                termist_daemon::logging::init();
+                termist_daemon::server::run(paths, DaemonConfig::from_env()).await
+            }
             Some(Cmd::Kill) => kill(&paths).await,
             Some(Cmd::Hook { .. }) => unreachable!("handled above"),
         }
@@ -118,16 +121,69 @@ fn hook(paths: &Paths, harness: &str, event: &str) {
 }
 
 async fn kill(paths: &Paths) -> anyhow::Result<()> {
+    kill_with(paths, Duration::from_secs(5)).await
+}
+
+async fn kill_with(paths: &Paths, answer_within: Duration) -> anyhow::Result<()> {
     let Ok(mut client) = Client::connect(paths).await else {
         println!("termist: no daemon running");
         return Ok(());
     };
     client.send(&ClientRequest::Shutdown).await?;
-    while let Some(ev) = client.recv().await? {
-        if ev == ServerEvent::Ack {
-            break;
+    let acked = tokio::time::timeout(answer_within, async {
+        while let Some(ev) = client.recv().await? {
+            if ev == ServerEvent::Ack {
+                return anyhow::Ok(());
+            }
         }
+        anyhow::Ok(())
+    })
+    .await;
+    match acked {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!(
+            "the daemon did not answer within {} s",
+            answer_within.as_secs_f32()
+        ),
     }
     println!("termist: daemon stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `termist kill` against a daemon that accepts but never answers must give up.
+    #[tokio::test]
+    async fn kill_gives_up_when_the_daemon_never_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        paths.ensure().unwrap();
+        let listener = termist_platform::ipc::listen(&paths).unwrap();
+        tokio::spawn(async move {
+            use interprocess::local_socket::tokio::prelude::*;
+            let conn = listener.accept().await.unwrap();
+            let (r, mut w) = conn.split();
+            let mut reader = termist_platform::framed::FramedReader::new(r);
+            let _hello: Option<ClientRequest> = reader.read().await.unwrap();
+            termist_platform::framed::write_frame(
+                &mut w,
+                &ServerEvent::Hello {
+                    version: termist_core::PROTOCOL_VERSION,
+                    pid: 1,
+                },
+            )
+            .await
+            .unwrap();
+            let _shutdown: Option<ClientRequest> = reader.read().await.unwrap();
+            std::future::pending::<()>().await; // never Ack, never close
+        });
+        let started = std::time::Instant::now();
+        let err = kill_with(&paths, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 }

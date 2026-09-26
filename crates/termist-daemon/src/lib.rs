@@ -2,6 +2,7 @@
 pub mod claude;
 pub mod hook_client;
 pub mod launch;
+pub mod logging;
 pub mod registry;
 pub mod server;
 pub mod session;

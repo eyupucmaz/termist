@@ -21,5 +21,6 @@ clap.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+interprocess.workspace = true
 portable-pty.workspace = true
 tempfile.workspace = true
