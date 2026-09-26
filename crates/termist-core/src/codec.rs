@@ -155,4 +155,48 @@ mod tests {
         dec.push(&encode_frame(&req).unwrap());
         assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
     }
+
+    #[test]
+    fn the_interaction_messages_round_trip() {
+        use crate::model::{Harness, LaunchOptions};
+        let mut dec = FrameDecoder::default();
+        let requests = [
+            ClientRequest::CreateSession {
+                project: crate::ProjectId::new(),
+                kind: crate::SessionKind::Agent {
+                    harness: Harness::Codex,
+                },
+                prompt: Some("fix it".into()),
+                model: Some("gpt 5 \"x\"".into()),
+                effort: Some("high".into()),
+                cols: 80,
+                rows: 24,
+            },
+            ClientRequest::SetLastLaunch(LaunchOptions {
+                harness: Harness::Claude,
+                model: None,
+                effort: Some("max".into()),
+            }),
+            ClientRequest::RenameSession {
+                session: SessionId::new(),
+                name: "login bug".into(),
+            },
+            ClientRequest::RescanHarnesses,
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let events = [
+            ServerEvent::PromptHistory(vec!["b".into(), "a".into()]),
+            ServerEvent::Models {
+                harness: Harness::OpenCode,
+                recent: vec!["anthropic/claude-sonnet-4-5".into()],
+            },
+        ];
+        for ev in events {
+            dec.push(&encode_frame(&ev).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        }
+    }
 }

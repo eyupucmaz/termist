@@ -29,6 +29,24 @@ impl Harness {
     pub fn from_id(s: &str) -> Option<Harness> {
         Harness::ALL.into_iter().find(|h| h.id() == s)
     }
+
+    /// The reasoning-effort levels the CLI takes as a flag; empty when it has none.
+    pub fn efforts(self) -> &'static [&'static str] {
+        match self {
+            Harness::Claude => &["low", "medium", "high", "xhigh", "max"],
+            Harness::Codex => &["low", "medium", "high"],
+            Harness::OpenCode => &[],
+        }
+    }
+}
+
+/// What a new agent session starts with. `None` leaves the choice to the CLI: no
+/// flag is passed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchOptions {
+    pub harness: Harness,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Whether the daemon found a harness's CLI when it started.
@@ -59,6 +77,8 @@ pub struct ProjectInfo {
     pub id: ProjectId,
     pub name: String,
     pub path: PathBuf,
+    /// Shown as a tab. Closing a project hides it; its sessions keep running.
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,12 +93,32 @@ pub struct SessionInfo {
     /// Terminal title set by the child (OSC 0/2), used as auto-title later.
     pub title: Option<String>,
     pub last_activity_ms: u64,
+    /// The model and effort it was started with; `None` is the CLI's default.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Renamed by the user: the name wins over the terminal title from then on.
+    pub user_named: bool,
+    /// Hidden from the grid, the palette and the attention order; the record stays.
+    pub archived: bool,
+}
+
+impl SessionInfo {
+    /// The name a card shows: the user's own name, else the agent's terminal title,
+    /// else the generated name.
+    pub fn display_name(&self) -> &str {
+        if self.user_named {
+            return &self.name;
+        }
+        self.title.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSnapshot {
     pub projects: Vec<ProjectInfo>,
     pub sessions: Vec<SessionInfo>,
+    /// The quick prompt's last choice, remembered across restarts.
+    pub last_launch: Option<LaunchOptions>,
 }
 
 #[cfg(test)]
@@ -104,5 +144,39 @@ mod tests {
             .label(),
             "codex"
         );
+    }
+
+    #[test]
+    fn only_claude_and_codex_take_an_effort_flag() {
+        assert_eq!(
+            Harness::Claude.efforts(),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(Harness::Codex.efforts(), ["low", "medium", "high"]);
+        assert!(Harness::OpenCode.efforts().is_empty());
+    }
+
+    #[test]
+    fn a_user_name_wins_over_the_title_and_the_title_over_the_generated_name() {
+        let mut s = SessionInfo {
+            id: SessionId::new(),
+            project: ProjectId::new(),
+            kind: SessionKind::Shell,
+            name: "shell-1".into(),
+            status: AgentStatus::Fresh,
+            agent_session_id: None,
+            title: None,
+            last_activity_ms: 0,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
+        };
+        assert_eq!(s.display_name(), "shell-1");
+        s.title = Some("Fix Login".into());
+        assert_eq!(s.display_name(), "Fix Login");
+        s.name = "login bug".into();
+        s.user_named = true;
+        assert_eq!(s.display_name(), "login bug");
     }
 }

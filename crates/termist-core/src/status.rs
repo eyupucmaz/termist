@@ -174,6 +174,10 @@ mod tests {
             agent_session_id: None,
             title: None,
             last_activity_ms: last,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         }
     }
 

@@ -198,6 +198,7 @@ impl Store {
                     id: id.parse::<ProjectId>().ok()?,
                     name,
                     path: PathBuf::from(path),
+                    open: true,
                 })
             })
             .collect();
@@ -231,6 +232,10 @@ impl Store {
                             agent_session_id,
                             title,
                             last_activity_ms: last.max(0) as u64,
+                            model: None,
+                            effort: None,
+                            user_named: false,
+                            archived: false,
                         },
                         resumable,
                     })
@@ -251,6 +256,7 @@ mod tests {
             id: ProjectId::new(),
             name: "api".into(),
             path: PathBuf::from(path),
+            open: true,
         }
     }
 
@@ -264,6 +270,10 @@ mod tests {
             agent_session_id: Some("agent-1".into()),
             title: Some("Fix Login".into()),
             last_activity_ms: 42,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         }
     }
 

@@ -121,6 +121,7 @@ impl Registry {
         StateSnapshot {
             projects: self.projects.clone(),
             sessions: self.sessions.iter().map(|s| s.info.clone()).collect(),
+            last_launch: None,
         }
     }
 
@@ -234,6 +235,8 @@ impl Registry {
                 project,
                 kind,
                 prompt,
+                model: _,
+                effort: _,
                 cols,
                 rows,
             } => {
@@ -324,6 +327,20 @@ impl Registry {
                     );
                 }
             }
+            ClientRequest::RenameSession { .. }
+            | ClientRequest::ArchiveSession { .. }
+            | ClientRequest::UnarchiveSession { .. }
+            | ClientRequest::CloseProject { .. }
+            | ClientRequest::OpenProject { .. }
+            | ClientRequest::ListPromptHistory { .. }
+            | ClientRequest::SetLastLaunch(_)
+            | ClientRequest::ListModels { .. }
+            | ClientRequest::RescanHarnesses => self.send(
+                client,
+                ServerEvent::Error {
+                    message: "this daemon does not support that request yet".into(),
+                },
+            ),
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -535,6 +552,7 @@ impl Registry {
             id: ProjectId::new(),
             name,
             path,
+            open: true,
         });
         if let Err(e) = self.store.upsert_project(self.projects.last().unwrap()) {
             tracing::warn!(error = %e, "could not store project");
@@ -576,6 +594,10 @@ impl Registry {
             agent_session_id: launch.agent_session_id,
             title: None,
             last_activity_ms: now_ms(),
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         };
         self.sessions
             .push(Session::new(info.clone(), Some(cmd), false));
@@ -685,6 +707,7 @@ mod tests {
             id: ProjectId::new(),
             name: "api".into(),
             path: std::env::temp_dir(),
+            open: true,
         }
     }
 
@@ -698,6 +721,10 @@ mod tests {
             agent_session_id: None,
             title: None,
             last_activity_ms: 1,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         }
     }
 

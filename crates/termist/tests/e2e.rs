@@ -228,6 +228,8 @@ async fn play_turn(
         project: state.projects[0].id,
         kind,
         prompt: None,
+        model: None,
+        effort: None,
         cols: 300,
         rows: 20,
     })

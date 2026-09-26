@@ -340,6 +340,7 @@ mod tests {
             id: ProjectId::new(),
             name: "orbit-api".into(),
             path: "/x".into(),
+            open: true,
         };
         let mk = |name: &str, kind: SessionKind, status| SessionInfo {
             id: SessionId::new(),
@@ -350,6 +351,10 @@ mod tests {
             agent_session_id: None,
             title: None,
             last_activity_ms: 0,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         };
         let waiting = mk(
             "claude-1",
@@ -363,6 +368,7 @@ mod tests {
         app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![p],
             sessions: vec![waiting.clone(), done],
+            ..StateSnapshot::default()
         }));
         let mut snap = Snapshot::blank(10, 2);
         for (i, ch) in "hello".chars().enumerate() {
@@ -389,8 +395,9 @@ mod tests {
                 id: ProjectId::new(),
                 name: "web".into(),
                 path: "/w".into(),
+                open: true,
             }],
-            sessions: vec![],
+            ..StateSnapshot::default()
         }));
         insta::assert_snapshot!(render(&mut app, 60, 10).backend());
     }

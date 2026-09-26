@@ -80,6 +80,8 @@ async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> Sessio
         project,
         kind,
         prompt: None,
+        model: None,
+        effort: None,
         cols: 60,
         rows: 10,
     })
@@ -710,6 +712,8 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
             harness: Harness::Claude,
         },
         prompt: None,
+        model: None,
+        effort: None,
         cols: 60,
         rows: 10,
     })

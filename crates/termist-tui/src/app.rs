@@ -161,6 +161,7 @@ impl App {
                 }
                 self.harnesses = list;
             }
+            ServerEvent::PromptHistory(_) | ServerEvent::Models { .. } => {}
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
@@ -301,6 +302,8 @@ impl App {
             project,
             kind,
             prompt: None,
+            model: None,
+            effort: None,
             cols: cols.max(20),
             rows: rows.max(5),
         })]
@@ -500,6 +503,10 @@ mod tests {
             agent_session_id: None,
             title: None,
             last_activity_ms: 1,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
         }
     }
 
@@ -509,11 +516,13 @@ mod tests {
             id: ProjectId::new(),
             name: "api".into(),
             path: "/api".into(),
+            open: true,
         };
         let web = ProjectInfo {
             id: ProjectId::new(),
             name: "web".into(),
             path: "/web".into(),
+            open: true,
         };
         let s = vec![
             session(api.id, "a1", AgentStatus::Finished),
@@ -527,6 +536,7 @@ mod tests {
         app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![api, web],
             sessions: s.clone(),
+            ..StateSnapshot::default()
         }));
         (app, s)
     }
@@ -561,10 +571,12 @@ mod tests {
             id: s[0].project,
             name: "api".into(),
             path: "/api".into(),
+            open: true,
         };
         let actions = app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![p],
             sessions: s[..3].to_vec(),
+            ..StateSnapshot::default()
         }));
         assert_eq!(app.selected, Some(s[0].id));
         assert_eq!(
@@ -675,6 +687,8 @@ mod tests {
                     harness: Harness::Claude
                 },
                 prompt: None,
+                model: None,
+                effort: None,
                 cols: 80,
                 rows: 20
             }]
@@ -704,6 +718,8 @@ mod tests {
                     harness: Harness::Codex
                 },
                 prompt: None,
+                model: None,
+                effort: None,
                 cols: 80,
                 rows: 20
             }]
@@ -957,10 +973,12 @@ mod tests {
             id: s[0].project,
             name: "api".into(),
             path: "/api".into(),
+            open: true,
         };
         let actions = fresh.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![p],
             sessions: s[..1].to_vec(),
+            ..StateSnapshot::default()
         }));
         assert!(sent(&actions).is_empty());
     }

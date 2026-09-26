@@ -1,11 +1,11 @@
-use crate::model::{Harness, HarnessInfo, SessionInfo, SessionKind, StateSnapshot};
+use crate::model::{Harness, HarnessInfo, LaunchOptions, SessionInfo, SessionKind, StateSnapshot};
 use crate::screen::ScreenUpdate;
 use crate::{ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -17,10 +17,14 @@ pub enum ClientRequest {
         path: PathBuf,
     },
     ListState,
+    /// `model` and `effort` are passed to the CLI as flags; `None` passes none. A
+    /// non-empty prompt goes into the prompt history, a model into the recent models.
     CreateSession {
         project: ProjectId,
         kind: SessionKind,
         prompt: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
         cols: u16,
         rows: u16,
     },
@@ -62,6 +66,39 @@ pub enum ClientRequest {
         event: String,
         payload_json: String,
     },
+    /// The name then stays: terminal titles no longer replace it.
+    RenameSession {
+        session: SessionId,
+        name: String,
+    },
+    /// Stops a live session and hides its card; the record and the conversation stay.
+    ArchiveSession {
+        session: SessionId,
+    },
+    /// Shows the card again; resuming it is a separate `Resume`.
+    UnarchiveSession {
+        session: SessionId,
+    },
+    /// Hides a project's tab; its sessions keep running.
+    CloseProject {
+        project: ProjectId,
+    },
+    OpenProject {
+        project: ProjectId,
+    },
+    /// Answered with `PromptHistory`.
+    ListPromptHistory {
+        limit: u32,
+    },
+    /// Remembers the quick prompt's choice; `State` carries it back.
+    SetLastLaunch(LaunchOptions),
+    /// Answered with `Models`.
+    ListModels {
+        harness: Harness,
+    },
+    /// Looks again for the agent CLIs that were missing; every client gets the
+    /// result as `Harnesses`.
+    RescanHarnesses,
     Shutdown,
 }
 
@@ -83,6 +120,13 @@ pub enum ServerEvent {
     },
     Error {
         message: String,
+    },
+    /// Earlier prompts, newest first.
+    PromptHistory(Vec<String>),
+    /// Models recently started with `harness`, most recent first.
+    Models {
+        harness: Harness,
+        recent: Vec<String>,
     },
     Ack,
 }
