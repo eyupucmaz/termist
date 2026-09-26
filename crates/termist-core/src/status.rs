@@ -52,12 +52,14 @@ impl AgentStatus {
         }
     }
 
-    /// Lower sorts first: what needs the user most.
+    /// Lower sorts first: what needs the user most. A crash wants a look; a clean
+    /// exit ("closed") wants nothing, like a disconnected session.
     pub fn attention_rank(self) -> u8 {
         match self {
             AgentStatus::NeedsFeedback => 0,
             AgentStatus::Running => 1,
             AgentStatus::Unseen => 2,
+            AgentStatus::Exited { code: Some(0) } => 6,
             AgentStatus::Exited { .. } => 3,
             AgentStatus::Fresh => 4,
             AgentStatus::Finished => 5,
@@ -195,6 +197,35 @@ mod tests {
         );
         // most recent first within a rank
         assert_eq!(order[1], v[4].id);
+    }
+
+    #[test]
+    fn a_crash_asks_for_attention_but_a_clean_exit_goes_last() {
+        let v = vec![
+            info(Exited { code: Some(0) }, 9),
+            info(Disconnected, 8),
+            info(Finished, 1),
+            info(Fresh, 1),
+            info(Exited { code: Some(2) }, 1),
+            info(Exited { code: None }, 1),
+            info(Unseen, 1),
+        ];
+        let statuses: Vec<_> = attention_order(&v)
+            .iter()
+            .map(|id| v.iter().find(|s| s.id == *id).unwrap().status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                Unseen,
+                Exited { code: Some(2) },
+                Exited { code: None },
+                Fresh,
+                Finished,
+                Exited { code: Some(0) },
+                Disconnected,
+            ]
+        );
     }
 
     #[test]
