@@ -339,6 +339,28 @@ impl Registry {
     }
 
     fn hook(&mut self, id: SessionId, harness: Harness, event: &str, payload: &Value) {
+        tracing::debug!(
+            session = %id,
+            harness = harness.id(),
+            event,
+            session_id = payload.get("session_id").and_then(serde_json::Value::as_str),
+            source = payload.get("source").and_then(serde_json::Value::as_str),
+            transcript_path = payload.get("transcript_path").and_then(serde_json::Value::as_str),
+            hook_event_name = payload
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str),
+            turn_id = payload.get("turn_id").and_then(serde_json::Value::as_str),
+            opencode_session_id = payload
+                .pointer("/properties/sessionID")
+                .and_then(serde_json::Value::as_str),
+            opencode_info_id = payload
+                .pointer("/properties/info/id")
+                .and_then(serde_json::Value::as_str),
+            opencode_info_parent_id = payload
+                .pointer("/properties/info/parentID")
+                .and_then(serde_json::Value::as_str),
+            "received hook"
+        );
         let signal = match harness {
             Harness::Claude => {
                 // Claude's id is known before its conversation exists: not a sign of one.
