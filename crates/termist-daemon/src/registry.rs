@@ -56,6 +56,9 @@ struct Session {
     opencode_children: HashSet<String>,
     /// Claude: since when the title has shown idle while the card is running.
     idle_title_since: Option<std::time::Instant>,
+    /// Claude: the card is `Finished` only because its title looked idle. That is a
+    /// guess; a turn that goes on after it undoes it.
+    title_cancelled: bool,
 }
 
 impl Session {
@@ -72,6 +75,7 @@ impl Session {
             resumable,
             opencode_children: HashSet::new(),
             idle_title_since: None,
+            title_cancelled: false,
         }
     }
 }
@@ -203,10 +207,20 @@ impl Registry {
         let Some(s) = self.session_mut(id) else {
             return;
         };
-        let next = s.info.status.apply(signal);
+        // A turn that goes on after a title cancel was never cancelled.
+        let from = match (s.info.status, signal) {
+            (AgentStatus::Finished, Signal::ToolDone | Signal::TurnStopped)
+                if s.title_cancelled =>
+            {
+                AgentStatus::Running
+            }
+            (status, _) => status,
+        };
+        let next = from.apply(signal);
         if next == s.info.status {
             return;
         }
+        s.title_cancelled = false;
         s.info.status = next;
         s.info.last_activity_ms = now_ms();
         let info = s.info.clone();
@@ -250,10 +264,19 @@ impl Registry {
                     } else {
                         None
                     };
+                    // A working title after a title cancel: the turn is still going.
+                    let resumed = s.title_cancelled
+                        && s.info.status == AgentStatus::Finished
+                        && title
+                            .as_deref()
+                            .is_some_and(|t| !t.is_empty() && !claude::title_is_idle(t));
                     s.info.title = title;
                     let info = s.info.clone();
                     self.persist(id);
                     self.broadcast(ServerEvent::SessionUpdated(info));
+                    if resumed {
+                        self.signal(id, Signal::ToolDone);
+                    }
                 }
             }
             SessionNote::Activity(id) => {
@@ -275,6 +298,7 @@ impl Registry {
                 // The idle title was the exited process's; it says nothing about the next.
                 if let Some(s) = self.session_mut(id) {
                     s.idle_title_since = None;
+                    s.title_cancelled = false;
                 }
                 self.signal(id, Signal::ProcessExited { code })
             }
@@ -652,6 +676,9 @@ impl Registry {
             .collect();
         for id in cancelled {
             self.signal(id, Signal::Cancelled);
+            if let Some(s) = self.session_mut(id) {
+                s.title_cancelled = true;
+            }
         }
     }
 
@@ -922,6 +949,7 @@ impl Registry {
         s.transcript = None;
         s.activity_broadcast = None;
         s.idle_title_since = None;
+        s.title_cancelled = false;
         s.info.title = None; // the new process sets its own
         s.info.status = AgentStatus::Fresh;
         s.resumable = resume.is_some();
@@ -1336,6 +1364,72 @@ mod tests {
         reg.session_mut(id).unwrap().info.status = AgentStatus::Running;
         reg.poll_idle_titles(later(5000));
         assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    fn cancelled_by_title(reg: &mut Registry, p: &ProjectInfo) -> SessionId {
+        let id = running_claude(reg, p);
+        reg.note(SessionNote::Title(id, Some("✳ Fix login".into())));
+        reg.poll_idle_titles(later(1600));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Finished);
+        id
+    }
+
+    // The idle title can be wrong: a turn that goes on after it undoes the cancel.
+    #[test]
+    fn a_tool_or_a_stop_after_a_title_cancel_undoes_it() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = cancelled_by_title(&mut reg, &p);
+        reg.hook(id, Harness::Claude, "PostToolUse", &Value::Null);
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+        reg.hook(id, Harness::Claude, "Stop", &Value::Null);
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Unseen);
+
+        let id = cancelled_by_title(&mut reg, &p);
+        reg.hook(id, Harness::Claude, "Stop", &Value::Null);
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Unseen);
+    }
+
+    #[test]
+    fn a_working_title_after_a_title_cancel_undoes_it() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = cancelled_by_title(&mut reg, &p);
+        reg.note(SessionNote::Title(id, Some("◐ Fix login".into())));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    // An idle or cleared title is no sign that the turn goes on.
+    #[test]
+    fn an_idle_or_empty_title_after_a_title_cancel_undoes_nothing() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = cancelled_by_title(&mut reg, &p);
+        reg.note(SessionNote::Title(id, Some("✳ Fix login again".into())));
+        reg.note(SessionNote::Title(id, None));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Finished);
+    }
+
+    #[test]
+    fn a_late_hook_after_a_real_cancel_does_nothing() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let id = running_claude(&mut reg, &p);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        std::fs::write(&path, "").unwrap();
+        reg.watch_transcript(id, &path);
+        std::fs::write(
+            &path,
+            "{\"message\":{\"content\":\"[Request interrupted by user]\"}}\n",
+        )
+        .unwrap();
+        reg.poll_transcripts();
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Finished);
+        reg.hook(id, Harness::Claude, "PostToolUse", &Value::Null);
+        reg.hook(id, Harness::Claude, "Stop", &Value::Null);
+        reg.note(SessionNote::Title(id, Some("◐ Fix login".into())));
+        assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Finished);
     }
 
     #[test]
