@@ -29,7 +29,19 @@ async fn start(config: DaemonConfig) -> Daemon {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("daemon did not come up");
+    gave_up(task).await
+}
+
+/// Says why a daemon never answered: it stopped (and with what), or it was still starting.
+async fn gave_up(task: tokio::task::JoinHandle<anyhow::Result<()>>) -> ! {
+    if task.is_finished() {
+        match task.await {
+            Ok(Ok(())) => panic!("daemon did not come up: it stopped without an error"),
+            Ok(Err(e)) => panic!("daemon did not come up: {e:#}"),
+            Err(e) => panic!("daemon did not come up: its task failed: {e}"),
+        }
+    }
+    panic!("daemon did not come up: still starting after 5 s");
 }
 
 fn shell_config() -> DaemonConfig {
@@ -156,7 +168,7 @@ async fn run_daemon(
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("daemon did not come up");
+    gave_up(task).await
 }
 
 async fn shutdown(paths: &Paths, task: tokio::task::JoinHandle<anyhow::Result<()>>) {
