@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""A stand-in coding agent for recording termist's demo.
+
+termist launches it as `claude`, `codex` or `opencode` (see the wrappers next to it). It
+prints a plausible turn, sets its terminal title, and reports its status through the same
+`termist hook` command the real agents' hooks call, so the cards change colour exactly as
+they do with the real CLIs. It never touches the network or any file.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+HARNESS = sys.argv[1]
+ARGS = sys.argv[2:]
+BIN = os.environ.get("TERMIST_BIN", "termist")
+SESSION = "demo-" + os.environ.get("TERMIST_SESSION_ID", "0")[:8]
+
+DIM, BOLD, GREEN, RED, YELLOW, CYAN, RESET = (
+    "\033[2m", "\033[1m", "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m")
+
+
+def prompt():
+    for i, a in enumerate(ARGS):
+        if a.startswith("--prompt="):
+            return a[len("--prompt="):]
+        if a == "--" and i + 1 < len(ARGS):
+            return ARGS[i + 1].strip()
+    return ""
+
+
+def hook(event, payload=None):
+    subprocess.run([BIN, "hook", "--harness", HARNESS, event],
+                   input=json.dumps(payload or {}).encode(), check=False)
+
+
+def started():
+    if HARNESS == "opencode":
+        hook("session.created", {"type": "session.created", "properties": {"info": {"id": SESSION}}})
+        hook("chat.message", {"sessionID": SESSION})
+    else:
+        hook("SessionStart", {"session_id": SESSION, "source": "startup"})
+        hook("UserPromptSubmit", {"session_id": SESSION})
+
+
+def asking():
+    if HARNESS == "opencode":
+        hook("permission.asked", {"type": "permission.asked", "properties": {"sessionID": SESSION}})
+    else:
+        hook("PermissionRequest", {"session_id": SESSION})
+
+
+def answered():
+    if HARNESS == "opencode":
+        hook("permission.replied",
+             {"type": "permission.replied", "properties": {"sessionID": SESSION, "reply": "once"}})
+    else:
+        hook("PostToolUse", {"session_id": SESSION})
+
+
+def finished():
+    if HARNESS == "opencode":
+        hook("session.idle", {"type": "session.idle", "properties": {"sessionID": SESSION}})
+    else:
+        hook("Stop", {"session_id": SESSION})
+
+
+def say(line, pause=0.45):
+    print(line, flush=True)
+    time.sleep(pause)
+
+
+def title(text):
+    sys.stdout.write(f"\033]0;{text}\007")
+    sys.stdout.flush()
+
+
+def step(verb, what, pause=0.6):
+    say(f"{CYAN}●{RESET} {BOLD}{verb}{RESET} {what}", pause)
+
+
+def work(steps):
+    for verb, what in steps:
+        step(verb, what)
+
+
+SCENES = {
+    "login": ("Fix login redirect", [
+        ("Read", "src/auth/session.rs"),
+        ("Read", "src/auth/redirect.rs"),
+        ("Search", "\"return_to\" in src/"),
+        ("Think", "the cookie is cleared before the redirect is built"),
+        ("Edit", "src/auth/redirect.rs  +12 −4"),
+        ("Run", "cargo test auth::"),
+    ]),
+    "rate": ("Rate limit uploads", [
+        ("Read", "src/api/upload.rs"),
+        ("Plan", "token bucket per API key, 20 req/min"),
+    ]),
+    "tests": ("Billing tests", [
+        ("Read", "src/billing/invoice.rs"),
+        ("Write", "tests/billing_invoice.rs  +84"),
+        ("Run", "cargo test billing"),
+    ]),
+}
+
+
+def main():
+    text = prompt()
+    key = next((k for k in SCENES if k in text.lower()), None)
+    name, steps = SCENES.get(key, ("Split session store", [
+        ("Read", "src/store.rs"),
+        ("Plan", "split the store into sessions.rs and projects.rs"),
+        ("Edit", "src/store.rs  +40 −112"),
+        ("Run", "cargo test store"),
+    ]))
+    title(name)
+    say(f"{DIM}{HARNESS} · demo agent{RESET}", 0.2)
+    if text:
+        say(f"{BOLD}›{RESET} {text}", 0.8)
+    started()
+    work(steps)
+
+    if key == "login":
+        while True:  # keeps working for the whole recording
+            say(f"{DIM}  running 214 tests…{RESET}", 2.5)
+    if key == "rate":
+        say(f"{YELLOW}?{RESET} Add dependency {BOLD}governor 0.6{RESET} to Cargo.toml?  (y/n)", 0.1)
+        asking()
+        answer = sys.stdin.readline().strip()
+        answered()
+        if answer.lower().startswith("y"):
+            step("Edit", "Cargo.toml  +1")
+            step("Edit", "src/api/upload.rs  +31 −2")
+            step("Run", "cargo test api::upload")
+        else:
+            say("Skipped the dependency.")
+    say(f"{GREEN}✓{RESET} Done. {DIM}All tests pass.{RESET}", 0.2)
+    finished()
+    time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()

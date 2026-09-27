@@ -2,20 +2,77 @@
 
 **terminal istanbul** — mission control for your coding agents.
 
-Run Claude Code, Codex and OpenCode across every project and git worktree from one terminal tab.
-Every session is a card with a status dot — running, done, or waiting on you — and a background daemon
-keeps them alive when you close the TUI. Written in Rust for macOS, Linux and Windows, in Istanbul.
+Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.
+Every session is a card with a status dot — running, waiting on you, or done — and a background
+daemon keeps the agents alive when you close the TUI or your terminal. Written in Rust for macOS,
+Linux and Windows, in Istanbul.
 
-> **Status:** early development — a first working build, no releases yet.
+![termist: three agents at work, one waiting for an answer](docs/demo.gif)
 
-## Try it (development build)
+> **Status: alpha.** `v0.1.0-alpha.1` is the first public build. It is used every day by its author,
+> but expect rough edges; notifications, sounds, themes and settings come next.
+
+## Install
+
+**macOS and Linux**
 
 ```sh
-cargo run --release -p termist          # TUI; starts the daemon on first run
-cargo run -p termist -- kill            # stop the daemon and its sessions
+curl -LsSf https://eyupucmaz.github.io/termist/install.sh | sh
 ```
 
-`n` new Claude session · `t` shell · `Enter` type into it · `Ctrl+a Esc` back to the grid · `.` next session that needs you · `q` quit (sessions keep running).
+**Windows** (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/eyupucmaz/termist/releases/download/v0.1.0-alpha.1/termist-installer.ps1 | iex"
+```
+
+Both put `termist` in `~/.cargo/bin`. Prebuilt archives for every platform are on the
+[releases page](https://github.com/eyupucmaz/termist/releases). From source:
+`cargo install --git https://github.com/eyupucmaz/termist termist`.
+
+termist runs the agent CLIs you already have: install at least one of
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or
+[OpenCode](https://opencode.ai). It never writes into your repositories or your agents' own config.
+
+## Use
+
+Open a terminal in a project and run `termist`. The daemon starts on its own; the folder becomes a project tab.
+
+| Key | Does |
+|---|---|
+| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, `^P` project |
+| `n` / `t` | new agent session / new shell |
+| `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
+| `Space` | send a follow-up to a card without entering it |
+| `.` / `,` | next / previous session that needs you, across all projects |
+| `/` | find any session |
+| `o` / `x` | open a project / close its tab (sessions keep running) |
+| `r` / `a` / `A` | rename / archive / show archived |
+| `d` | stop a session (asks first) |
+| `q` | quit the TUI; the agents keep running |
+
+`termist kill` stops the daemon and every session. Sessions survive a restart: after a reboot they come
+back as `○ disconnected`, and `Enter` resumes each one where it left off.
+
+### Status dots
+
+| | |
+|---|---|
+| `●` yellow | running |
+| `◆` red | waiting for you (a permission or a question) |
+| `✓` blue | done, not seen yet |
+| `●` green | done, seen |
+| `✗` magenta | exited with an error |
+| `○` grey | not running; `Enter` resumes it |
+
+Status comes from each agent's own hooks, passed on the command line or through termist's own config
+directory — never through files in your project.
+
+## Contributing
+
+Issues and pull requests are welcome. Please read the [code of conduct](CODE_OF_CONDUCT.md) first.
+The demo above is recorded with stand-in agents: `vhs assets/demo/demo.tape` after
+`cargo build --release -p termist`.
 
 ## License
 
