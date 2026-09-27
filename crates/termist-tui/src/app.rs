@@ -1076,6 +1076,10 @@ impl App {
     }
 
     fn set_archive_view(&mut self, on: bool) {
+        if on {
+            // The archive is of this tab: a tab still on its way must not replace it.
+            self.project_pending = None;
+        }
         self.archive_view = on;
         self.selected = None;
         self.card_scroll = 0;
@@ -2802,6 +2806,16 @@ mod tests {
         assert_eq!(app.project, Some(s[0].project), "opened by someone else");
         let orbit = opened(&mut app, "/orbit");
         assert_eq!(app.project, Some(orbit));
+    }
+
+    #[test]
+    fn opening_the_archive_view_drops_the_switch_to_a_folder_being_added() {
+        let (mut app, s) = app();
+        add_orbit(&mut app);
+        app.on_key(k(K::Char('A')));
+        opened(&mut app, "/orbit");
+        assert_eq!(app.project, Some(s[0].project));
+        assert!(app.archive_view);
     }
 
     #[test]
