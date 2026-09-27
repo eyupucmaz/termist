@@ -63,6 +63,8 @@ pub struct App {
     pub overlays: Vec<Overlay>,
     /// Earlier prompts, newest first, as the daemon last sent them.
     prompt_history: Vec<String>,
+    /// The text of a quick prompt closed without starting it; the next one opens on it.
+    prompt_draft: Option<String>,
     /// Recently used models per harness, as the daemon last sent them.
     recent_models: HashMap<Harness, Vec<String>>,
     focus_next_created: bool,
@@ -112,6 +114,7 @@ impl App {
                 .collect(),
             overlays: Vec::new(),
             prompt_history: Vec::new(),
+            prompt_draft: None,
             recent_models: HashMap::new(),
             focus_next_created: false,
             resume_pending: None,
@@ -268,7 +271,11 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('q') {
             // Ctrl+Q always gets you out: every overlay closes and focus mode ends.
-            self.overlays.clear();
+            for o in std::mem::take(&mut self.overlays) {
+                if let Overlay::QuickPrompt(q) = o {
+                    self.keep_draft(&q);
+                }
+            }
             self.mode = Mode::Grid;
             return vec![];
         }
@@ -549,7 +556,7 @@ impl App {
                 model: None,
                 effort: None,
             });
-        let mut input = TextInput::new(true);
+        let mut input = TextInput::with_text(self.prompt_draft.as_deref().unwrap_or(""), true);
         input.set_history(self.prompt_history.clone());
         self.overlays.push(Overlay::QuickPrompt(QuickPrompt {
             input,
@@ -571,7 +578,9 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => {
-                self.overlays.pop();
+                if let Some(Overlay::QuickPrompt(q)) = self.overlays.pop() {
+                    self.keep_draft(&q);
+                }
             }
             KeyCode::Tab => {
                 let current = q.launch.harness;
@@ -609,6 +618,12 @@ impl App {
         vec![]
     }
 
+    /// A quick prompt closed without starting: its text, unless blank, waits for the next.
+    fn keep_draft(&mut self, q: &QuickPrompt) {
+        let text = q.input.text();
+        self.prompt_draft = (!text.trim().is_empty()).then(|| text.to_string());
+    }
+
     /// Starts the task. An empty prompt starts the CLI bare; a CLI that is not
     /// installed starts nothing and the prompt stays open.
     fn submit_quick_prompt(&mut self) -> Vec<Action> {
@@ -628,6 +643,7 @@ impl App {
         };
         let text = q.input.text();
         let prompt = (!text.trim().is_empty()).then(|| text.to_string());
+        self.prompt_draft = None;
         self.focus_next_created = true;
         let (cols, rows) = self.pane;
         vec![
@@ -2054,6 +2070,7 @@ mod tests {
         ]));
         app.on_key(k(K::Up));
         assert_eq!(quick_prompt(&app).input.text(), "the last one");
+        app.on_key(ctrl('u'));
         app.on_key(k(K::Esc));
         app.on_key(k(K::Char('p')));
         app.on_key(k(K::Up));
@@ -2062,6 +2079,54 @@ mod tests {
             "the last one",
             "remembered for the next prompt"
         );
+    }
+
+    // Esc is often a slip: the text waits for the next `p`, cursor at its end.
+    #[test]
+    fn esc_keeps_the_quick_prompt_text_for_the_next_p() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        type_text(&mut app, "fix the bug");
+        app.on_key(KeyEvent::new(K::Enter, M::SHIFT));
+        type_text(&mut app, "and test it");
+        app.on_key(k(K::Esc));
+        assert!(app.overlays.is_empty());
+        app.on_key(k(K::Char('p')));
+        let input = &quick_prompt(&app).input;
+        assert_eq!(input.text(), "fix the bug\nand test it");
+        assert_eq!(input.cursor_line_col(), (1, 11), "the cursor at the end");
+        app.on_event(ServerEvent::PromptHistory(vec!["older".into()]));
+        app.on_key(k(K::Up));
+        assert_eq!(
+            quick_prompt(&app).input.text(),
+            "fix the bug\nand test it",
+            "the history never replaces the draft"
+        );
+
+        // from focus mode too, and Ctrl+Q keeps it as well
+        app.on_key(ctrl('q'));
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Char('p')));
+        assert_eq!(quick_prompt(&app).input.text(), "fix the bug\nand test it");
+    }
+
+    #[test]
+    fn a_started_or_blank_quick_prompt_leaves_no_draft() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        type_text(&mut app, "  ");
+        app.on_key(KeyEvent::new(K::Enter, M::SHIFT));
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('p')));
+        assert!(quick_prompt(&app).input.is_empty(), "only blanks");
+        type_text(&mut app, "ship it");
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('p')));
+        app.on_key(k(K::Enter));
+        assert!(app.overlays.is_empty());
+        app.on_key(k(K::Char('p')));
+        assert!(quick_prompt(&app).input.is_empty(), "started, so gone");
     }
 
     #[test]
