@@ -644,6 +644,8 @@ impl App {
         let text = q.input.text();
         let prompt = (!text.trim().is_empty()).then(|| text.to_string());
         self.prompt_draft = None;
+        // The daemon stores it without sending the state again: keep our copy current.
+        self.state.last_launch = Some(q.launch.clone());
         self.focus_next_created = true;
         let (cols, rows) = self.pane;
         vec![
@@ -1917,6 +1919,32 @@ mod tests {
             quick_prompt(&app).launch,
             launch(Harness::Codex, None, Some("high"))
         );
+    }
+
+    // The daemon keeps the launch line but does not send the state again; the next
+    // quick prompt must not open on the old one (and send that back).
+    #[test]
+    fn the_next_quick_prompt_opens_on_the_launch_just_used() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_key(k(K::Tab));
+        app.on_key(k(K::Char('2')));
+        app.on_key(ctrl('o'));
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Codex,
+            recent: vec!["gpt-5".into()],
+        });
+        for key in [K::Char('j'), K::Char('l'), K::Char('l'), K::Enter] {
+            app.on_key(k(key));
+        }
+        let used = quick_prompt(&app).launch.clone();
+        assert_eq!(used.harness, Harness::Codex);
+        assert_eq!(used.model.as_deref(), Some("gpt-5"));
+        assert!(used.effort.is_some());
+        app.on_key(k(K::Enter));
+        assert!(app.overlays.is_empty());
+        app.on_key(k(K::Char('p')));
+        assert_eq!(quick_prompt(&app).launch, used);
     }
 
     #[test]
