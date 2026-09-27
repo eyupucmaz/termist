@@ -23,7 +23,7 @@ curl -LsSf https://eyupucmaz.github.io/termist/install.sh | sh
 **Windows** (PowerShell)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/eyupucmaz/termist/releases/download/v0.1.0-alpha.1/termist-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://eyupucmaz.github.io/termist/install.ps1 | iex"
 ```
 
 Both put `termist` in `~/.cargo/bin`. Prebuilt archives for every platform are on the
