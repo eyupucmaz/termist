@@ -213,6 +213,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+    // Agents waiting in closed projects; the first thing to go when space is short.
+    let waiting = app.waiting_in_closed_projects().len();
+    if waiting > 0 {
+        let (glyph, color, _) = status_style(AgentStatus::NeedsFeedback);
+        let marker = [
+            Span::styled("  closed ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{glyph}{waiting}"), Style::default().fg(color)),
+        ];
+        let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+        if width(&spans) + width(&marker) <= area.width as usize {
+            spans.extend(marker);
+        }
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -744,7 +757,7 @@ mod tests {
         state.projects[0].open = false;
         app.on_event(ServerEvent::State(state));
         let t = render(&mut app, 60, 10);
-        assert_eq!(row(&t, 0), " termist");
+        assert_eq!(row(&t, 0), " termist   closed ◆1", "its agent still waits");
         assert_eq!(row(&t, 1), "No project open · o opens one");
     }
 
@@ -813,6 +826,56 @@ mod tests {
         );
         app.on_key(key(K::Char('A')));
         insta::assert_snapshot!(render(&mut app, 60, 16).backend());
+    }
+
+    /// The fixture plus a closed project "notes" with two agents waiting, one running
+    /// and one archived while waiting.
+    fn with_a_closed_project() -> App {
+        let mut app = fixture();
+        let mut state = app.state.clone();
+        let notes = ProjectInfo {
+            id: ProjectId::new(),
+            name: "notes".into(),
+            path: "/notes".into(),
+            open: false,
+        };
+        for (status, archived) in [
+            (AgentStatus::NeedsFeedback, false),
+            (AgentStatus::NeedsFeedback, false),
+            (AgentStatus::Running, false),
+            (AgentStatus::NeedsFeedback, true),
+        ] {
+            let mut s = state.sessions[0].clone();
+            s.id = SessionId::new();
+            s.project = notes.id;
+            s.status = status;
+            s.archived = archived;
+            state.sessions.push(s);
+        }
+        state.projects.push(notes);
+        app.on_event(ServerEvent::State(state));
+        app
+    }
+
+    #[test]
+    fn waiting_agents_of_closed_projects_are_counted_at_the_end_of_the_tab_bar() {
+        let mut app = with_a_closed_project();
+        let t = render(&mut app, 60, 16);
+        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1  closed ◆2");
+        let buf = t.backend().buffer();
+        assert_eq!(buf[(27, 0)].fg, Color::DarkGray, "the word is dimmed");
+        assert_eq!(buf[(34, 0)].fg, Color::Red, "the diamond is red");
+        insta::assert_snapshot!(t.backend());
+    }
+
+    #[test]
+    fn a_narrow_tab_bar_drops_the_closed_marker_before_any_tab() {
+        let mut app = with_a_closed_project();
+        let t = render(&mut app, 30, 16);
+        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1");
+        let mut app = fixture();
+        let t = render(&mut app, 60, 16);
+        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1", "none waiting");
     }
 
     #[test]

@@ -75,7 +75,11 @@ pub struct App {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProjectPending {
-    Known(ProjectId),
+    /// A known project being opened, and the card to select once it is.
+    Known {
+        project: ProjectId,
+        select: Option<SessionId>,
+    },
     /// A folder added under its real path; the project comes with exactly that path.
     Path(PathBuf),
 }
@@ -146,6 +150,25 @@ impl App {
                         .projects
                         .iter()
                         .any(|p| p.id == s.project && p.open)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Agents waiting on the user in closed projects: counted in the tab bar and
+    /// reachable with `.` / `,`.
+    pub fn waiting_in_closed_projects(&self) -> Vec<SessionInfo> {
+        self.state
+            .sessions
+            .iter()
+            .filter(|s| {
+                !s.archived
+                    && s.status == AgentStatus::NeedsFeedback
+                    && self
+                        .state
+                        .projects
+                        .iter()
+                        .any(|p| p.id == s.project && !p.open)
             })
             .cloned()
             .collect()
@@ -342,7 +365,9 @@ impl App {
                     }
                     KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
                     KeyCode::Char('/') if !ctrl => self.open_palette(),
-                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
+                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => {
+                        actions.extend(self.navigate(c))
+                    }
                     _ => {}
                 }
             }
@@ -389,7 +414,9 @@ impl App {
                             self.mode = Mode::ConfirmClose(project);
                         }
                     }
-                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
+                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => {
+                        actions.extend(self.navigate(c))
+                    }
                     _ => {}
                 }
             }
@@ -921,7 +948,10 @@ impl App {
                     self.go_to_project(p.id);
                     return vec![];
                 }
-                self.project_pending = Some(ProjectPending::Known(p.id));
+                self.project_pending = Some(ProjectPending::Known {
+                    project: p.id,
+                    select: None,
+                });
                 return vec![Action::Send(ClientRequest::OpenProject { project: p.id })];
             }
             _ => {
@@ -990,14 +1020,29 @@ impl App {
         vec![]
     }
 
-    fn navigate(&mut self, c: char) {
+    /// `.` / `,` also reach an agent waiting in a closed project: its project is opened
+    /// and the card selected when it arrives.
+    fn navigate(&mut self, c: char) -> Vec<Action> {
         match c {
             '.' | ',' => {
                 // Going somewhere yourself outranks a tab still on its way.
                 self.project_pending = None;
-                let visible = self.visible_sessions();
-                if let Some(id) = next_in_attention(&visible, self.selected, c == '.') {
-                    self.select(id);
+                let waiting = self.waiting_in_closed_projects();
+                let mut reachable = self.visible_sessions();
+                reachable.extend(waiting.iter().cloned());
+                let Some(id) = next_in_attention(&reachable, self.selected, c == '.') else {
+                    return vec![];
+                };
+                let closed = waiting.iter().find(|s| s.id == id).map(|s| s.project);
+                match closed {
+                    Some(project) => {
+                        self.project_pending = Some(ProjectPending::Known {
+                            project,
+                            select: Some(id),
+                        });
+                        return vec![Action::Send(ClientRequest::OpenProject { project })];
+                    }
+                    None => self.select(id),
                 }
             }
             'h' => self.move_by(-1),
@@ -1006,6 +1051,7 @@ impl App {
             'k' => self.move_by(-(self.cards_per_row.max(1) as isize)),
             _ => {}
         }
+        vec![]
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -1046,7 +1092,7 @@ impl App {
             KeyCode::Char('q') if !ctrl => self.mode = Mode::ConfirmQuit,
             KeyCode::Char(']') => self.switch_project(1),
             KeyCode::Char('[') => self.switch_project(-1),
-            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.navigate(c),
+            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => return self.navigate(c),
             _ => {}
         }
         vec![]
@@ -1123,16 +1169,22 @@ impl App {
     /// its tab to the front.
     fn switch_to_pending_project(&mut self) {
         let found = match &self.project_pending {
-            Some(ProjectPending::Known(id)) => {
-                self.state.projects.iter().find(|p| p.id == *id && p.open)
-            }
+            Some(ProjectPending::Known { project, .. }) => self
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == *project && p.open),
             Some(ProjectPending::Path(path)) => self.open_projects().find(|p| p.path == *path),
             None => None,
         };
         if let Some(id) = found.map(|p| p.id) {
-            self.project_pending = None;
+            let select = match self.project_pending.take() {
+                Some(ProjectPending::Known { select, .. }) => select,
+                _ => None,
+            };
             self.project = Some(id);
-            self.selected = None;
+            // `repair_selection` falls back to the first card if this one is gone.
+            self.selected = select;
         }
     }
 
@@ -2390,7 +2442,8 @@ mod tests {
     }
 
     // An archived card whose hooks keep coming (it may still be finishing) and the
-    // sessions of a closed project are out of reach of the palette and of `.` / `,`.
+    // sessions of a closed project are out of reach of the palette and of `.` / `,`
+    // (unless one waits on the user; see below).
     #[test]
     fn archived_and_closed_sessions_are_left_out_of_the_palette_and_the_attention_order() {
         let (mut app, s) = app();
@@ -2404,6 +2457,9 @@ mod tests {
         app.on_key(k(K::Char('/')));
         assert_eq!(palette(&app), vec![s[1].id, s[0].id]);
         app.on_key(k(K::Esc));
+        let mut answered = s[3].clone();
+        answered.status = AgentStatus::Running;
+        app.on_event(ServerEvent::SessionUpdated(answered));
         app.on_key(k(K::Char('.')));
         assert_eq!(
             app.selected,
@@ -2418,6 +2474,92 @@ mod tests {
             Some(s[1].id),
             "and never the closed project's"
         );
+    }
+
+    /// `app()` with "web" closed; besides its waiting "w1" it has a running "w2".
+    fn web_closed() -> (App, Vec<SessionInfo>) {
+        let (mut app, mut s) = app();
+        let mut w2 = session(s[3].project, "w2", AgentStatus::Running);
+        w2.last_activity_ms = 0;
+        app.on_event(ServerEvent::SessionUpdated(w2.clone()));
+        s.push(w2);
+        close_web(&mut app);
+        (app, s)
+    }
+
+    #[test]
+    fn waiting_agents_of_closed_projects_are_counted() {
+        let (mut app, s) = web_closed();
+        assert_eq!(app.waiting_in_closed_projects().len(), 1);
+        app.on_event(ServerEvent::SessionUpdated(archived(
+            &s[3],
+            AgentStatus::NeedsFeedback,
+        )));
+        assert!(
+            app.waiting_in_closed_projects().is_empty(),
+            "not archived ones"
+        );
+    }
+
+    // A closed project's agent waiting on the user is still reachable: landing on it
+    // opens its project, and the card is selected once the project is open.
+    #[test]
+    fn dot_reaches_a_waiting_agent_of_a_closed_project_and_opens_it() {
+        let (mut app, s) = web_closed();
+        assert_eq!(app.selected, Some(s[0].id));
+        let actions = app.on_key(k(K::Char('.')));
+        assert_eq!(
+            sent(&actions),
+            vec![&ClientRequest::OpenProject {
+                project: s[3].project
+            }]
+        );
+        assert_eq!(app.project, Some(s[0].project), "not until it is open");
+        let mut state = app.state.clone();
+        state.projects[1].open = true;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(
+            (app.project, app.selected),
+            (Some(s[3].project), Some(s[3].id))
+        );
+    }
+
+    #[test]
+    fn other_sessions_of_a_closed_project_stay_out_of_reach() {
+        let (mut app, s) = web_closed();
+        // backwards from a1: a2, a3, then w1; w2 (running, before a2) is skipped
+        app.on_key(k(K::Char(',')));
+        assert_eq!(app.selected, Some(s[1].id));
+        let actions = app.on_key(k(K::Char(',')));
+        assert_eq!(app.selected, Some(s[2].id));
+        assert!(
+            !sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::OpenProject { .. }))
+        );
+    }
+
+    #[test]
+    fn prefix_dot_to_a_closed_projects_waiting_agent_focuses_it_once_open() {
+        let (mut app, s) = web_closed();
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('.')))),
+            vec![&ClientRequest::OpenProject {
+                project: s[3].project
+            }]
+        );
+        assert_eq!((app.selected, app.mode), (Some(s[0].id), Mode::Focus));
+        let mut state = app.state.clone();
+        state.projects[1].open = true;
+        let actions = app.on_event(ServerEvent::State(state));
+        assert_eq!((app.selected, app.mode), (Some(s[3].id), Mode::Focus));
+        assert!(sent(&actions).contains(&&ClientRequest::Attach {
+            session: s[3].id,
+            cols: 80,
+            rows: 20
+        }));
     }
 
     fn browser(app: &App) -> &OpenProject {
