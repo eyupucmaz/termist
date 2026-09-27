@@ -64,10 +64,21 @@ pub fn write_plugin(config_dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// A `file://` URL for `path`, percent-encoded as an RFC 3986 path: a space or a `#`
-/// in the data dir must not end the path. A Windows drive path gets its own `/`.
+/// in the data dir must not end the path. A Windows drive path gets its own `/`, a UNC
+/// path (`\\server\share`) names its server as the host, and the verbatim `\\?\`
+/// prefix is dropped.
 fn file_url(path: &Path) -> String {
     let s = path.display().to_string().replace('\\', "/");
-    let mut url = String::from(if s.starts_with('/') {
+    let s = match s.strip_prefix("//?/") {
+        Some(rest) => match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        },
+        None => s,
+    };
+    let mut url = String::from(if s.starts_with("//") {
+        "file:"
+    } else if s.starts_with('/') {
         "file://"
     } else {
         "file:///"
@@ -283,6 +294,24 @@ mod tests {
         assert_eq!(
             file_url(std::path::Path::new("/tmp/ü?%.ts")),
             "file:///tmp/%C3%BC%3F%25.ts"
+        );
+    }
+
+    // A data dir on a network share, or given in Windows' verbatim `\\?\` form.
+    #[test]
+    fn unc_and_verbatim_windows_paths_become_file_urls() {
+        let url = |p: &str| file_url(std::path::Path::new(p));
+        assert_eq!(
+            url(r"\\server\share\My Data\termist.ts"),
+            "file://server/share/My%20Data/termist.ts"
+        );
+        assert_eq!(
+            url(r"\\?\C:\Users\Me\termist.ts"),
+            "file:///C:/Users/Me/termist.ts"
+        );
+        assert_eq!(
+            url(r"\\?\UNC\server\share\termist.ts"),
+            "file://server/share/termist.ts"
         );
     }
 
