@@ -530,6 +530,14 @@ impl Registry {
                 }
                 claude::signal_for(event, payload)
             }
+            Harness::Codex if !self.codex_event_is_ours(id, payload) => {
+                tracing::debug!(
+                    session = %id,
+                    event,
+                    "ignored a hook from an unsaved Codex session"
+                );
+                None
+            }
             Harness::Codex => {
                 if self.capture_codex_session_start(id, event, payload) {
                     self.mark_resumable(id);
@@ -563,6 +571,26 @@ impl Registry {
     /// SessionStart while the user's turn is still running; a genuine switch to a new
     /// Codex conversation can only happen between turns, so this can't mistake one
     /// for the other. The SessionStart itself carries no status signal for Codex.
+    /// Codex runs sessions of its own after a turn (they inherit the hook flags) that it
+    /// never saves: their hooks carry no `transcript_path`. Only the card's own session, the
+    /// first one it sees, or a saved session the user switched to may move the card.
+    fn codex_event_is_ours(&self, id: SessionId, payload: &Value) -> bool {
+        let Some(sid) = payload.get("session_id").and_then(Value::as_str) else {
+            return true;
+        };
+        match self
+            .session(id)
+            .and_then(|s| s.info.agent_session_id.as_deref())
+        {
+            None => true,
+            Some(known) if known == sid => true,
+            Some(_) => payload
+                .get("transcript_path")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.is_empty()),
+        }
+    }
+
     fn capture_codex_session_start(&mut self, id: SessionId, event: &str, payload: &Value) -> bool {
         let Some(sid) = payload.get("session_id").and_then(Value::as_str) else {
             return false;

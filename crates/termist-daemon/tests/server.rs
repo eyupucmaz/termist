@@ -430,15 +430,87 @@ async fn codex_ignores_a_mid_turn_session_start_for_another_session() {
         Some("session-a"),
         "mid-turn SessionStart for another session must not overwrite the card's id"
     );
-    // Between turns, a real SessionStart for a new conversation is adopted.
+    // Between turns, a real (saved) SessionStart for a new conversation is adopted.
     hook(
         "SessionStart",
-        r#"{"session_id":"session-c","source":"startup"}"#,
+        r#"{"session_id":"session-c","source":"startup","transcript_path":"/tmp/rollout-c.jsonl"}"#,
     )
     .await;
     assert_eq!(
         info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
         Some("session-c")
+    );
+}
+
+#[tokio::test]
+async fn an_unsaved_codex_session_never_moves_the_card_or_takes_its_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        codex_bin: Some(sleeping_agent(tmp.path())),
+        ..Default::default()
+    })
+    .await;
+    let mut ui = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut ui, tmp.path().to_path_buf()).await;
+    let s = create(
+        &mut ui,
+        project,
+        SessionKind::Agent {
+            harness: Harness::Codex,
+        },
+    )
+    .await;
+    let hook = |event: &'static str, payload: &'static str| {
+        let paths = d.paths.clone();
+        async move {
+            hook_client::send_hook(&paths, s.id, Harness::Codex, event, payload.into())
+                .await
+                .unwrap()
+        }
+    };
+    // Codex does not always save a conversation, so the card's first session is taken
+    // even without a transcript.
+    hook(
+        "SessionStart",
+        r#"{"session_id":"saved","source":"startup"}"#,
+    )
+    .await;
+    hook("UserPromptSubmit", r#"{"session_id":"saved"}"#).await;
+    hook("Stop", r#"{"session_id":"saved"}"#).await;
+    // A session Codex runs on its own after the turn: it inherits the hook flags but is
+    // never saved, so its hooks carry no transcript_path.
+    hook(
+        "SessionStart",
+        r#"{"session_id":"internal","source":"startup"}"#,
+    )
+    .await;
+    hook("UserPromptSubmit", r#"{"session_id":"internal"}"#).await;
+    hook("PostToolUse", r#"{"session_id":"internal"}"#).await;
+    let card = state(&mut ui)
+        .await
+        .sessions
+        .into_iter()
+        .find(|c| c.id == s.id)
+        .unwrap();
+    assert_eq!(
+        card.status,
+        AgentStatus::Unseen,
+        "the internal session moved the card"
+    );
+    assert_eq!(
+        card.agent_session_id.as_deref(),
+        Some("saved"),
+        "the internal session took the card's id"
+    );
+    // A saved session the user switches to between turns is followed.
+    hook(
+        "SessionStart",
+        r#"{"session_id":"switched","source":"startup","transcript_path":"/tmp/rollout-switched.jsonl"}"#,
+    )
+    .await;
+    assert_eq!(
+        info_update(&mut ui, s.id).await.agent_session_id.as_deref(),
+        Some("switched")
     );
 }
 
