@@ -2203,12 +2203,17 @@ mod tests {
             "the history never replaces the draft"
         );
 
-        // from focus mode too, and Ctrl+Q keeps it as well
+        // Ctrl+Q keeps the text as it is then (↑ moved to the first line), and `C-a p`
+        // opens on it too
+        type_text(&mut app, " now");
         app.on_key(ctrl('q'));
         app.on_key(k(K::Enter));
         app.on_key(ctrl('a'));
         app.on_key(k(K::Char('p')));
-        assert_eq!(quick_prompt(&app).input.text(), "fix the bug\nand test it");
+        assert_eq!(
+            quick_prompt(&app).input.text(),
+            "fix the bug now\nand test it"
+        );
     }
 
     #[test]
