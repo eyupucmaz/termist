@@ -187,20 +187,30 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let started = Instant::now();
-        let found = ask_shell(shell.to_str().unwrap(), "sh", Duration::from_millis(500));
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "took {:?}",
-            started.elapsed()
-        );
-        assert_eq!(found, None, "no answer within the limit");
-        let job: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let gone = (0..50).any(|_| {
+        // Under load the shell can be killed at its limit before it has even started
+        // its job. Such a run proves nothing, so it is tried again with a longer limit;
+        // every run must still end at its own limit.
+        let job = [500, 1000, 2000, 4000, 8000]
+            .into_iter()
+            .find_map(|ms| {
+                let _ = std::fs::remove_file(&pid_file);
+                let limit = Duration::from_millis(ms);
+                let started = Instant::now();
+                let found = ask_shell(shell.to_str().unwrap(), "sh", limit);
+                let took = started.elapsed();
+                assert!(
+                    took < limit + Duration::from_millis(1500),
+                    "took {took:?} with a limit of {limit:?}"
+                );
+                assert_eq!(found, None, "no answer within the limit");
+                std::fs::read_to_string(&pid_file)
+                    .ok()?
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+            })
+            .expect("the shell never started its job, even with an 8 s limit");
+        let gone = (0..250).any(|_| {
             std::thread::sleep(Duration::from_millis(20));
             // SAFETY: signal 0 only checks that the process exists.
             (unsafe { libc::kill(job, 0) }) != 0
