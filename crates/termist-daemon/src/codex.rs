@@ -172,6 +172,18 @@ mod tests {
         );
     }
 
+    /// Codex 0.156.1 ran this exact Interrupt hook, with `timeout=3`, as trusted: no
+    /// review screen, and its hook list showed "Timeout 3s, Trusted". The hash is the one
+    /// termist passed then; the command is part of the hashed input, so it stays as it is.
+    #[test]
+    fn the_trust_hash_of_a_3_s_interrupt_hook_is_the_one_codex_accepted() {
+        let command = "'/Users/eyup/Code/termist/.claude/worktrees/bakim-daemon/target/debug/termist' hook --harness codex Interrupt";
+        assert_eq!(
+            trust_hash("Interrupt", command, hook_timeout("Interrupt")),
+            "sha256:62758e41c344ccffdafd84a57f7a70bf68be96c1f556f43d2c1497a51094d59b"
+        );
+    }
+
     // Codex's own 1 s for these two can pass before a shell has started `termist hook`.
     #[test]
     fn a_cancel_or_an_exit_gets_more_than_a_second() {
