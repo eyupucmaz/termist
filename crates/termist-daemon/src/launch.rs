@@ -211,6 +211,7 @@ impl Launcher {
                 env.extend(crate::opencode::config_env(
                     &self.opencode_config_dir,
                     std::env::var_os("OPENCODE_CONFIG_DIR").as_deref(),
+                    std::env::var_os("OPENCODE_CONFIG_CONTENT").as_deref(),
                 ));
                 (
                     self.programs.get(Harness::OpenCode).to_string(),

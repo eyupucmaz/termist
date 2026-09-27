@@ -1,0 +1,68 @@
+# Runs the one-line installers from the site (docs/install.sh, docs/install.ps1) the way a
+# user would, then checks that the installed termist starts its daemon and stops it again.
+name: install
+on:
+  release:
+    types: [published]
+  # A release created by the Release workflow's own token starts no `release` run.
+  # Release also runs (without releasing) on pull requests: only a push counts.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+  pull_request:
+    paths: [docs/install.sh, docs/install.ps1, .github/workflows/install.yml]
+  push:
+    branches: [main]
+    paths: [docs/install.sh, docs/install.ps1, .github/workflows/install.yml]
+jobs:
+  install:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    # `wait` on a daemon that never stops must not hold a runner for hours.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: sh docs/install.sh
+      - name: install.ps1 in PowerShell 7
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: Get-Content -Raw docs/install.ps1 | Invoke-Expression
+      - name: install.ps1 in Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: Get-Content -Raw docs/install.ps1 | Invoke-Expression
+      - name: Put ~/.cargo/bin on PATH
+        shell: pwsh
+        run: Join-Path $HOME .cargo bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: termist starts its daemon and stops it
+        shell: bash
+        env:
+          # A home of its own: nothing here depends on the runner's.
+          TERMIST_HOME: ${{ runner.temp }}/termist-home
+        run: |
+          termist --version
+          termist daemon 2> "$RUNNER_TEMP/daemon.log" &
+          daemon=$!
+          # `kill` says "no daemon running" until the daemon listens.
+          for _ in $(seq 60); do
+            if termist kill | grep "daemon stopped"; then
+              wait "$daemon"
+              exit
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/daemon.log"
+          exit 1

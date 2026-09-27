@@ -63,34 +63,88 @@ pub fn write_plugin(config_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// A `file://` URL for `path`, percent-encoded as an RFC 3986 path: a space or a `#`
+/// in the data dir must not end the path. A Windows drive path gets its own `/`, a UNC
+/// path (`\\server\share`) names its server as the host, and the verbatim `\\?\`
+/// prefix is dropped.
 fn file_url(path: &Path) -> String {
     let s = path.display().to_string().replace('\\', "/");
-    if s.starts_with('/') {
-        format!("file://{s}")
+    let s = match s.strip_prefix("//?/") {
+        Some(rest) => match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        },
+        None => s,
+    };
+    let mut url = String::from(if s.starts_with("//") {
+        "file:"
+    } else if s.starts_with('/') {
+        "file://"
     } else {
-        format!("file:///{s}")
+        "file:///"
+    });
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&b) {
+            url.push(b as char);
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
     }
+    url
 }
 
 /// Spawn env for an OpenCode session. The user's own `OPENCODE_CONFIG_DIR` wins; then
-/// our plugin is added through `OPENCODE_CONFIG_CONTENT` instead (untested upstream, so logged).
-pub fn config_env(config_dir: &Path, users_dir: Option<&OsStr>) -> Vec<(String, String)> {
-    match users_dir {
-        None => vec![(
+/// our plugin is added through `OPENCODE_CONFIG_CONTENT` instead (untested upstream,
+/// so logged), merged into the user's own `OPENCODE_CONFIG_CONTENT` if they have one.
+pub fn config_env(
+    config_dir: &Path,
+    users_dir: Option<&OsStr>,
+    users_content: Option<&OsStr>,
+) -> Vec<(String, String)> {
+    if users_dir.is_none() {
+        return vec![(
             "OPENCODE_CONFIG_DIR".into(),
             config_dir.display().to_string(),
-        )],
-        Some(_) => {
+        )];
+    }
+    tracing::warn!(
+        "OPENCODE_CONFIG_DIR is set; adding the termist plugin through OPENCODE_CONFIG_CONTENT"
+    );
+    let plugin = file_url(&config_dir.join("plugins").join("termist.ts"));
+    // An empty value configures nothing: as if it were unset.
+    let content = match users_content.filter(|c| !c.to_string_lossy().trim().is_empty()) {
+        None => Some(json!({ "plugin": [plugin] })),
+        Some(users) => with_plugin(users, plugin),
+    };
+    match content {
+        Some(content) => vec![("OPENCODE_CONFIG_CONTENT".into(), content.to_string())],
+        None => {
             tracing::warn!(
-                "OPENCODE_CONFIG_DIR is set; adding the termist plugin through OPENCODE_CONFIG_CONTENT"
+                "could not read OPENCODE_CONFIG_CONTENT as a JSON object with a plugin list; \
+                 it is passed on unchanged, without the termist plugin (no status for OpenCode)"
             );
-            let plugin = file_url(&config_dir.join("plugins").join("termist.ts"));
-            vec![(
-                "OPENCODE_CONFIG_CONTENT".into(),
-                json!({ "plugin": [plugin] }).to_string(),
-            )]
+            vec![]
         }
     }
+}
+
+/// The user's config content with our plugin added to its `plugin` list, once. `None`
+/// when it is not plain JSON of that shape (OpenCode also takes JSONC, which we don't
+/// rewrite).
+fn with_plugin(users: &OsStr, plugin: String) -> Option<Value> {
+    let mut config: Value = serde_json::from_str(users.to_str()?).ok()?;
+    let list = config
+        .as_object_mut()?
+        .entry("plugin")
+        .or_insert(Value::Null);
+    if list.is_null() {
+        *list = json!([]);
+    }
+    let list = list.as_array_mut()?;
+    if !list.iter().any(|p| p.as_str() == Some(plugin.as_str())) {
+        list.push(Value::String(plugin));
+    }
+    Some(config)
 }
 
 /// `opencode [--session <id>] [-m <provider/model>] [--prompt=<text>]`. OpenCode has
@@ -175,21 +229,109 @@ mod tests {
     fn our_config_dir_is_used_unless_the_user_has_their_own() {
         let dir = std::path::Path::new("/data/opencode");
         assert_eq!(
-            config_env(dir, None),
+            config_env(dir, None, None),
             vec![(
                 "OPENCODE_CONFIG_DIR".to_string(),
                 "/data/opencode".to_string()
             )]
         );
-        let env = config_env(dir, Some(OsStr::new("/home/me/.oc")));
+        let env = config_env(dir, Some(OsStr::new("/home/me/.oc")), None);
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "OPENCODE_CONFIG_CONTENT");
         let v: serde_json::Value = serde_json::from_str(&env[0].1).unwrap();
-        assert!(
-            v["plugin"][0]
-                .as_str()
-                .unwrap()
-                .ends_with("/data/opencode/plugins/termist.ts")
+        assert_eq!(v["plugin"], json!([PLUGIN_URL]));
+    }
+
+    const PLUGIN_URL: &str = "file:///data/opencode/plugins/termist.ts";
+
+    fn content_with(users: &str) -> Option<serde_json::Value> {
+        let env = config_env(
+            std::path::Path::new("/data/opencode"),
+            Some(OsStr::new("/home/me/.oc")),
+            Some(OsStr::new(users)),
+        );
+        let (key, value) = env.into_iter().next()?;
+        assert_eq!(key, "OPENCODE_CONFIG_CONTENT");
+        Some(serde_json::from_str(&value).unwrap())
+    }
+
+    // The user's own inline config stays; our plugin joins theirs.
+    #[test]
+    fn our_plugin_is_added_to_the_users_config_content() {
+        assert_eq!(
+            content_with(r#"{"model":"a/b","plugin":["their-plugin"]}"#),
+            Some(json!({"model":"a/b","plugin":["their-plugin", PLUGIN_URL]}))
+        );
+        assert_eq!(
+            content_with(r#"{"model":"a/b"}"#),
+            Some(json!({"model":"a/b","plugin":[PLUGIN_URL]}))
+        );
+        assert_eq!(
+            content_with(&format!(r#"{{"plugin":["{PLUGIN_URL}"]}}"#)),
+            Some(json!({"plugin":[PLUGIN_URL]})),
+            "not twice"
+        );
+    }
+
+    // An empty value configures nothing, and a null plugin list is no list.
+    #[test]
+    fn an_empty_config_content_or_a_null_plugin_list_is_no_obstacle() {
+        for users in ["", "  \n"] {
+            assert_eq!(
+                content_with(users),
+                Some(json!({"plugin":[PLUGIN_URL]})),
+                "{users:?}"
+            );
+        }
+        assert_eq!(
+            content_with(r#"{"model":"a/b","plugin":null}"#),
+            Some(json!({"model":"a/b","plugin":[PLUGIN_URL]}))
+        );
+    }
+
+    // No merge is better than a broken one: their value is left as it is, without us.
+    #[test]
+    fn a_config_content_we_cannot_read_is_left_alone() {
+        for users in [
+            "{ // a comment\n \"model\": \"a/b\" }",
+            "[1]",
+            r#"{"plugin":"one"}"#,
+        ] {
+            assert_eq!(content_with(users), None, "{users}");
+        }
+    }
+
+    #[test]
+    fn plugin_paths_are_proper_file_urls() {
+        assert_eq!(
+            file_url(std::path::Path::new("/Users/me/My Data/#1/termist.ts")),
+            "file:///Users/me/My%20Data/%231/termist.ts"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new(r"C:\Users\Me Too\AppData\termist.ts")),
+            "file:///C:/Users/Me%20Too/AppData/termist.ts"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new("/tmp/ü?%.ts")),
+            "file:///tmp/%C3%BC%3F%25.ts"
+        );
+    }
+
+    // A data dir on a network share, or given in Windows' verbatim `\\?\` form.
+    #[test]
+    fn unc_and_verbatim_windows_paths_become_file_urls() {
+        let url = |p: &str| file_url(std::path::Path::new(p));
+        assert_eq!(
+            url(r"\\server\share\My Data\termist.ts"),
+            "file://server/share/My%20Data/termist.ts"
+        );
+        assert_eq!(
+            url(r"\\?\C:\Users\Me\termist.ts"),
+            "file:///C:/Users/Me/termist.ts"
+        );
+        assert_eq!(
+            url(r"\\?\UNC\server\share\termist.ts"),
+            "file://server/share/termist.ts"
         );
     }
 

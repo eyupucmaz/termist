@@ -59,7 +59,25 @@ PRAGMA user_version = 2;
 
 pub struct Store {
     conn: Connection,
+    /// Why this store is in memory although a file was asked for, as clients are told.
+    not_saved: Option<String>,
 }
+
+/// The file's schema is one a newer termist wrote: this one must not touch it.
+#[derive(Debug)]
+struct NewerSchema(i64);
+
+impl std::fmt::Display for NewerSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "schema version {} is newer than this termist ({SCHEMA_VERSION})",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NewerSchema {}
 
 /// A session as stored. `resumable` is true once the agent's own conversation exists
 /// (a prompt was submitted, or the agent reported its id), so `--resume` can find it.
@@ -88,6 +106,16 @@ impl Store {
         match Self::try_open(path) {
             Ok(store) => Ok(store),
             Err(e) => {
+                // Moving it aside would hide the newer termist's sessions from it.
+                if let Some(NewerSchema(version)) = e.downcast_ref() {
+                    tracing::warn!(error = %e, path = %path.display(), "database left alone; sessions are not saved");
+                    let mut store = Self::open_in_memory();
+                    store.not_saved = Some(format!(
+                        "sessions are not being saved: the database was written by a newer \
+                         termist (schema {version}) — upgrade termist"
+                    ));
+                    return Ok(store);
+                }
                 let aside = PathBuf::from(format!("{}.broken-{}", path.display(), now_ms()));
                 tracing::warn!(error = %e, aside = %aside.display(), "database unusable; starting fresh");
 
@@ -139,16 +167,20 @@ impl Store {
         Self::migrate(Connection::open(path)?)
     }
 
+    /// Nothing is written before the version is known to be one this termist can use.
     fn migrate(mut conn: Connection) -> anyhow::Result<Store> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // Safety probe: a garbage file will fail here
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(NewerSchema(version).into());
+        }
         if conn.path().is_some_and(|p| !p.is_empty()) {
             // Every status change is a write; WAL with NORMAL sync keeps them cheap.
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
             conn.pragma_update(None, "synchronous", "NORMAL")?;
         }
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         match version {
             0 => {
                 conn.execute_batch(SCHEMA_V1)?;
@@ -156,9 +188,7 @@ impl Store {
             }
             1 => Self::upgrade_to_v2(&mut conn)?,
             SCHEMA_VERSION => {}
-            newer => anyhow::bail!(
-                "schema version {newer} is newer than this termist ({SCHEMA_VERSION})"
-            ),
+            other => anyhow::bail!("unknown schema version {other}"),
         }
         // A table of the right version but the wrong shape is as unusable as garbage.
         conn.prepare(
@@ -169,7 +199,15 @@ impl Store {
         conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
         conn.prepare("SELECT id, prompt, created_ms FROM prompt_history LIMIT 0")?;
         conn.prepare("SELECT key, value FROM ui_state LIMIT 0")?;
-        Ok(Store { conn })
+        Ok(Store {
+            conn,
+            not_saved: None,
+        })
+    }
+
+    /// Why nothing is being saved, when the database could not be used as it is.
+    pub fn not_saved(&self) -> Option<&str> {
+        self.not_saved.as_deref()
     }
 
     fn upgrade_to_v2(conn: &mut Connection) -> anyhow::Result<()> {
@@ -532,6 +570,7 @@ mod tests {
         .unwrap();
         let store = Store::open(&path).unwrap();
         assert!(store.load().unwrap().0.is_empty());
+        assert_eq!(store.not_saved(), None, "the fresh file is saved to");
         let aside: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -544,22 +583,41 @@ mod tests {
         assert_eq!(aside.len(), 1, "the bad file is kept for inspection");
     }
 
+    // The newer termist's sessions stay where it will look for them; this one runs
+    // without saving, and says so.
     #[test]
-    fn a_database_from_a_newer_termist_is_moved_aside() {
+    fn a_database_from_a_newer_termist_is_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("termist.db");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL; CREATE TABLE future (x); PRAGMA user_version = 99;",
+            )
+            .unwrap();
         }
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let (before, bytes) = (listing(), std::fs::read(&path).unwrap());
         let store = Store::open(&path).unwrap();
-        assert!(store.load().unwrap().1.is_empty());
-        assert!(std::fs::read_dir(tmp.path()).unwrap().any(|e| {
-            e.unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("termist.db.broken-")
-        }));
+        assert_eq!(
+            store.not_saved(),
+            Some(
+                "sessions are not being saved: the database was written by a newer \
+                 termist (schema 99) — upgrade termist"
+            )
+        );
+        store.upsert_project(&project("/p")).unwrap();
+        assert_eq!(store.load().unwrap().0.len(), 1, "works in memory");
+        drop(store);
+        assert_eq!(listing(), before, "nothing moved, nothing added");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "not written");
     }
 
     #[test]
