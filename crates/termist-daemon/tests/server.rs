@@ -87,7 +87,14 @@ async fn add_project(c: &mut Client, dir: PathBuf) -> ProjectId {
     }
 }
 
+/// Creates a session and returns it. Other sessions' updates (their output is broadcast as
+/// activity) can arrive first, so the answer is the first update for an id not seen before.
 async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> SessionInfo {
+    c.send(&ClientRequest::ListState).await.unwrap();
+    let known: Vec<SessionId> = match next_event(c, |e| matches!(e, ServerEvent::State(_))).await {
+        ServerEvent::State(s) => s.sessions.iter().map(|s| s.id).collect(),
+        _ => unreachable!(),
+    };
     c.send(&ClientRequest::CreateSession {
         project,
         kind,
@@ -99,11 +106,10 @@ async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> Sessio
     })
     .await
     .unwrap();
-    match next_event(c, |e| {
-        matches!(
-            e,
-            ServerEvent::SessionUpdated(_) | ServerEvent::Error { .. }
-        )
+    match next_event(c, |e| match e {
+        ServerEvent::SessionUpdated(s) => !known.contains(&s.id),
+        ServerEvent::Error { .. } => true,
+        _ => false,
     })
     .await
     {
