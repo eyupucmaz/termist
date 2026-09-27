@@ -111,7 +111,8 @@ pub fn config_env(
         "OPENCODE_CONFIG_DIR is set; adding the termist plugin through OPENCODE_CONFIG_CONTENT"
     );
     let plugin = file_url(&config_dir.join("plugins").join("termist.ts"));
-    let content = match users_content {
+    // An empty value configures nothing: as if it were unset.
+    let content = match users_content.filter(|c| !c.to_string_lossy().trim().is_empty()) {
         None => Some(json!({ "plugin": [plugin] })),
         Some(users) => with_plugin(users, plugin),
     };
@@ -135,8 +136,11 @@ fn with_plugin(users: &OsStr, plugin: String) -> Option<Value> {
     let list = config
         .as_object_mut()?
         .entry("plugin")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()?;
+        .or_insert(Value::Null);
+    if list.is_null() {
+        *list = json!([]);
+    }
+    let list = list.as_array_mut()?;
     if !list.iter().any(|p| p.as_str() == Some(plugin.as_str())) {
         list.push(Value::String(plugin));
     }
@@ -266,6 +270,22 @@ mod tests {
             content_with(&format!(r#"{{"plugin":["{PLUGIN_URL}"]}}"#)),
             Some(json!({"plugin":[PLUGIN_URL]})),
             "not twice"
+        );
+    }
+
+    // An empty value configures nothing, and a null plugin list is no list.
+    #[test]
+    fn an_empty_config_content_or_a_null_plugin_list_is_no_obstacle() {
+        for users in ["", "  \n"] {
+            assert_eq!(
+                content_with(users),
+                Some(json!({"plugin":[PLUGIN_URL]})),
+                "{users:?}"
+            );
+        }
+        assert_eq!(
+            content_with(r#"{"model":"a/b","plugin":null}"#),
+            Some(json!({"model":"a/b","plugin":[PLUGIN_URL]}))
         );
     }
 
