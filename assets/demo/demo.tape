@@ -114,3 +114,15 @@ Sleep 1.2s
 Enter
 Sleep 2s
 Sleep 1s
+
+# leave termist, then stop the daemon of the temporary TERMIST_HOME
+Hide
+Escape
+Sleep 300ms
+Type "q"
+Sleep 300ms
+Type "y"
+Sleep 1s
+Type "$BIN kill"
+Enter
+Sleep 1s
