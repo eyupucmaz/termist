@@ -6,7 +6,13 @@
 set -eu
 
 repo="eyupucmaz/termist"
-tag=$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/$repo/releases?per_page=1" |
+# With a token (as in CI) the API allows far more than 60 lookups an hour per address.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    set -- -H "Authorization: Bearer $GITHUB_TOKEN"
+else
+    set --
+fi
+tag=$(curl --proto '=https' --tlsv1.2 -fsSL "$@" "https://api.github.com/repos/$repo/releases?per_page=1" |
     sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
 if [ -z "$tag" ]; then
     echo "termist: could not find a release of $repo" >&2

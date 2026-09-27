@@ -10,7 +10,12 @@
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $repo = 'eyupucmaz/termist'
-    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=1"
+    # With a token (as in CI) the API allows far more than 60 lookups an hour per address.
+    $headers = @{}
+    if ($env:GITHUB_TOKEN) {
+        $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
+    }
+    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=1" -Headers $headers
     $tag = ($releases | Select-Object -First 1).tag_name
     if (-not $tag) {
         throw "termist: could not find a release of $repo"
