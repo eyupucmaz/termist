@@ -1,5 +1,5 @@
-//! A list to choose from, optionally narrowed by typing (the letters of the query must
-//! appear in order, like a simple fzf). It knows nothing about the screen.
+//! A list to choose from, optionally narrowed by typing (every word of the query must
+//! appear in the label). It knows nothing about the screen.
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a key did to the picker.
@@ -25,13 +25,15 @@ pub struct ListPicker<T> {
     highlight: usize,
 }
 
-/// True when the letters of `query` appear in `label` in order, ignoring case.
+/// True when every whitespace-separated word of `query` appears whole in `label`, in
+/// any order, ignoring case. Letters scattered over a long label ("project name kind")
+/// would match nearly everything.
 pub fn matches(query: &str, label: &str) -> bool {
-    let mut label = label.chars().flat_map(char::to_lowercase);
+    let label = label.to_lowercase();
     query
-        .chars()
-        .flat_map(char::to_lowercase)
-        .all(|q| label.any(|l| l == q))
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| label.contains(word))
 }
 
 impl<T> ListPicker<T> {
@@ -158,11 +160,18 @@ mod tests {
     }
 
     #[test]
-    fn letters_must_appear_in_order_ignoring_case() {
-        assert!(matches("oapi", "orbit-api"));
+    fn every_word_must_appear_whole_ignoring_case() {
+        assert!(matches("api", "orbit-api"));
         assert!(matches("ORB", "orbit-api"));
         assert!(matches("", "anything"));
-        assert!(!matches("ipa", "orbit-api"));
+        assert!(matches("  ", "anything"));
+        assert!(
+            !matches("oapi", "orbit-api"),
+            "letters apart are not a word"
+        );
+        assert!(matches("api orb", "orbit-api claude"), "words in any order");
+        assert!(matches(" claude  orbit ", "orbit-api claude"));
+        assert!(!matches("orbit codex", "orbit-api claude"), "every word");
         assert!(matches("şi", "Şişli"));
     }
 

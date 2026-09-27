@@ -2255,6 +2255,30 @@ mod tests {
         assert_eq!(palette(&app), vec![s[1].id]);
     }
 
+    // The label is "project name kind": letters scattered over it must not match.
+    #[test]
+    fn a_palette_word_matches_only_where_it_appears_whole() {
+        let orbit = ProjectInfo {
+            id: ProjectId::new(),
+            name: "orbit-api".into(),
+            path: "/orbit-api".into(),
+            open: true,
+        };
+        let s = vec![
+            session(orbit.id, "limit uploads", AgentStatus::Running),
+            session(orbit.id, "billing-fix", AgentStatus::Running),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![orbit],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        app.on_key(k(K::Char('/')));
+        type_text(&mut app, "bill");
+        assert_eq!(palette(&app), vec![s[1].id]);
+    }
+
     #[test]
     fn the_palette_from_focus_mode_keeps_you_focused_on_the_new_card() {
         let (mut app, s) = app();
