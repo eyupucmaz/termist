@@ -49,6 +49,11 @@ impl TextInput {
         self.text.is_empty()
     }
 
+    /// The text is a history entry, not yet edited.
+    pub fn is_from_history(&self) -> bool {
+        self.history_pos.is_some()
+    }
+
     pub fn set_history(&mut self, newest_first: Vec<String>) {
         self.history = newest_first;
         self.history_pos = None;
@@ -351,9 +356,13 @@ mod tests {
         let mut t = TextInput::new(false);
         t.set_history(vec!["one".into(), "two".into()]);
         press(&mut t, K::Up, M::NONE);
+        assert!(t.is_from_history());
         press(&mut t, K::Char('!'), M::NONE);
+        assert!(!t.is_from_history());
         press(&mut t, K::Up, M::NONE);
         assert_eq!(t.text(), "one!", "Up no longer walks the history");
+        press(&mut t, K::Backspace, M::NONE);
+        assert!(!t.is_from_history(), "a deletion is an edit too");
         let mut empty = TextInput::new(false);
         press(&mut empty, K::Up, M::NONE);
         assert_eq!(empty.text(), "", "no history, nothing happens");

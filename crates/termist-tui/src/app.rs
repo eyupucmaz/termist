@@ -640,10 +640,12 @@ impl App {
         vec![]
     }
 
-    /// A quick prompt closed without starting: its text, unless blank, waits for the next.
+    /// A quick prompt closed without starting: its text waits for the next, unless it is
+    /// blank or an earlier prompt recalled and left as it was (`↑` brings that back).
     fn keep_draft(&mut self, q: &QuickPrompt) {
         let text = q.input.text();
-        self.prompt_draft = (!text.trim().is_empty()).then(|| text.to_string());
+        let own = !text.trim().is_empty() && !q.input.is_from_history();
+        self.prompt_draft = own.then(|| text.to_string());
     }
 
     /// Starts the task. An empty prompt starts the CLI bare; a CLI that is not
@@ -2151,15 +2153,32 @@ mod tests {
         ]));
         app.on_key(k(K::Up));
         assert_eq!(quick_prompt(&app).input.text(), "the last one");
-        app.on_key(ctrl('u'));
         app.on_key(k(K::Esc));
         app.on_key(k(K::Char('p')));
+        assert!(
+            quick_prompt(&app).input.is_empty(),
+            "a recalled prompt left as it was is not a draft"
+        );
         app.on_key(k(K::Up));
         assert_eq!(
             quick_prompt(&app).input.text(),
             "the last one",
             "remembered for the next prompt"
         );
+        app.on_key(k(K::Up));
+        assert_eq!(quick_prompt(&app).input.text(), "older");
+    }
+
+    #[test]
+    fn a_recalled_prompt_that_was_edited_is_a_draft() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_event(ServerEvent::PromptHistory(vec!["the last one".into()]));
+        app.on_key(k(K::Up));
+        type_text(&mut app, " again");
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('p')));
+        assert_eq!(quick_prompt(&app).input.text(), "the last one again");
     }
 
     // Esc is often a slip: the text waits for the next `p`, cursor at its end.
