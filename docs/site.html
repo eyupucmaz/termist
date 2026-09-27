@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>termist — mission control for your coding agents</title>
+<meta name="description" content="Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab. A Rust TUI from Istanbul.">
+<meta property="og:title" content="termist — terminal istanbul">
+<meta property="og:description" content="Mission control for your coding agents: every session a card with a status dot, kept alive by a background daemon.">
+<meta property="og:image" content="https://eyupucmaz.github.io/termist/screenshot.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%2340c2bd'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script>
+  // Show the scene for the visitor's time of day, as termist itself does.
+  (function () {
+    var h = new Date().getHours();
+    var tod = h >= 6 && h < 11 ? "sabah" : h >= 11 && h < 17 ? "gunduz" : h >= 17 && h < 20 ? "aksam" : "gece";
+    document.documentElement.setAttribute("data-tod", tod);
+  })();
+</script>
+<style>
+  :root {
+    --ground: #f3f7fa;
+    --ink: #13263b;
+    --muted: #4d6075;
+    --rule: #cfdbe5;
+    --turquoise: #0f7f82;
+    --cobalt: #2a5aa8;
+    --code-bg: #e3edf4;
+    --running: #a8780a;
+    --waiting: #c0392b;
+    --done: #2a5aa8;
+    --ready: #2f8a4a;
+    --gone: #6b7a8a;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1d2e;
+      --ink: #e6edf3;
+      --muted: #93a4b8;
+      --rule: #22354b;
+      --turquoise: #40c2bd;
+      --cobalt: #7fb2ff;
+      --code-bg: #16283d;
+      --running: #f2cc5b;
+      --waiting: #ff7a6b;
+      --done: #7fb2ff;
+      --ready: #7fd49a;
+      --gone: #8494a6;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0f1d2e; --ink: #e6edf3; --muted: #93a4b8; --rule: #22354b; --turquoise: #40c2bd;
+    --cobalt: #7fb2ff; --code-bg: #16283d; --running: #f2cc5b; --waiting: #ff7a6b; --done: #7fb2ff;
+    --ready: #7fd49a; --gone: #8494a6; color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--ground); }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 400 1.0625rem/1.6 "Bricolage Grotesque", system-ui, sans-serif;
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--turquoise); text-underline-offset: 0.18em; }
+  a:hover { color: var(--cobalt); }
+  :focus-visible { outline: 2px solid var(--turquoise); outline-offset: 3px; border-radius: 3px; }
+
+  /* the scene: 96 columns wide, scaled to the viewport */
+  .sky { overflow: hidden; line-height: 0; }
+  .scene {
+    display: none;
+    margin: 0 auto;
+    width: max-content;
+    font: 400 min(15px, calc((100vw) / 96 / 0.6)) / 1.18 "JetBrains Mono", ui-monospace, monospace;
+    letter-spacing: 0;
+  }
+  .scene span { display: inline; }
+  :root:not([data-tod]) .scene[data-tod="gunduz"],
+  :root[data-tod="sabah"] .scene[data-tod="sabah"],
+  :root[data-tod="gunduz"] .scene[data-tod="gunduz"],
+  :root[data-tod="aksam"] .scene[data-tod="aksam"],
+  :root[data-tod="gece"] .scene[data-tod="gece"] { display: block; }
+
+  main { max-width: 46rem; margin: 0 auto; padding: 0 1rem 4rem; }
+
+  .name {
+    margin: 2.2rem 0 0;
+    font-size: clamp(3.4rem, 13vw, 6.5rem);
+    font-weight: 800;
+    font-stretch: 85%;
+    line-height: 0.9;
+    letter-spacing: -0.045em;
+  }
+  .gloss { margin: 0.35rem 0 0; color: var(--muted); font-size: 1.05rem; }
+  .pitch { margin: 1.4rem 0 0; font-size: clamp(1.25rem, 3.4vw, 1.55rem); line-height: 1.35; max-width: 34ch; }
+  .status-note { margin: 0.9rem 0 0; color: var(--muted); font-size: 0.95rem; }
+
+  h2 { margin: 3.2rem 0 0.8rem; font-size: 1.5rem; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; }
+
+  .install { margin: 0; }
+  .install dt { margin: 1.1rem 0 0.4rem; color: var(--muted); font-size: 0.95rem; }
+  .install dd { margin: 0; }
+  .cmd {
+    display: flex; align-items: stretch; gap: 0;
+    background: var(--code-bg); border-radius: 8px; overflow: hidden;
+  }
+  .cmd code {
+    flex: 1; min-width: 0; padding: 0.8rem 1rem; overflow-x: auto; white-space: pre;
+    font: 400 0.88rem/1.5 "JetBrains Mono", ui-monospace, monospace;
+  }
+  .cmd button {
+    flex: none; border: 0; border-left: 1px solid var(--rule); background: transparent; color: var(--ink);
+    padding: 0 1rem; font: 600 0.85rem "Bricolage Grotesque", system-ui, sans-serif; cursor: pointer;
+  }
+  .cmd button:hover { color: var(--turquoise); }
+  .after { margin: 0.9rem 0 0; color: var(--muted); font-size: 0.95rem; }
+
+  figure { margin: 2.6rem 0 0; }
+  figure img { display: block; width: 100%; height: auto; border-radius: 10px; }
+  figcaption { margin-top: 0.6rem; color: var(--muted); font-size: 0.92rem; }
+
+  .dots { list-style: none; margin: 0; padding: 0; }
+  .dots li { display: grid; grid-template-columns: 1.6rem 1fr; gap: 0.2rem; margin: 0 0 0.9rem; }
+  .dot { font: 600 1.05rem/1.6 "JetBrains Mono", ui-monospace, monospace; }
+  .running { color: var(--running); } .waiting { color: var(--waiting); } .done { color: var(--done); }
+  .ready { color: var(--ready); } .gone { color: var(--gone); }
+
+  .features { margin: 0; padding: 0 0 0 1.1rem; }
+  .features li { margin: 0 0 0.7rem; padding-left: 0.2rem; }
+  .features li::marker { color: var(--turquoise); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.98rem; }
+  th, td { text-align: left; padding: 0.45rem 0.8rem 0.45rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); }
+  kbd {
+    font: 600 0.85rem "JetBrains Mono", ui-monospace, monospace; white-space: nowrap;
+    padding: 0.05rem 0.4rem; border-radius: 5px; background: var(--code-bg);
+  }
+
+  footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.95rem; }
+  footer p { margin: 0 0 0.4rem; }
+  footer nav a { margin-right: 1.1rem; }
+
+  @media (max-width: 480px) {
+    body { font-size: 1rem; }
+    .cmd { flex-direction: column; }
+    .cmd button { border-left: 0; border-top: 1px solid var(--rule); padding: 0.6rem; }
+  }
+</style>
+</head>
+<body>
+<div class="sky">
+<!-- SCENES -->
+</div>
+<main>
+  <h1 class="name">termist</h1>
+  <p class="gloss">terminal istanbul</p>
+  <p class="pitch">Mission control for your coding agents. Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.</p>
+  <p class="status-note">Alpha: <a href="https://github.com/eyupucmaz/termist/releases">v0.1.0-alpha.1</a> is the first public build. Notifications, sounds and themes come next.</p>
+
+  <h2 id="install">Install</h2>
+  <dl class="install">
+    <dt>macOS and Linux</dt>
+    <dd><div class="cmd"><code id="cmd-unix">curl -LsSf https://eyupucmaz.github.io/termist/install.sh | sh</code><button type="button" data-copy="cmd-unix">Copy</button></div></dd>
+    <dt>Windows, in PowerShell</dt>
+    <dd><div class="cmd"><code id="cmd-win">powershell -ExecutionPolicy Bypass -c "irm https://github.com/eyupucmaz/termist/releases/download/v0.1.0-alpha.1/termist-installer.ps1 | iex"</code><button type="button" data-copy="cmd-win">Copy</button></div></dd>
+  </dl>
+  <p class="after">Then open a terminal in a project and run <kbd>termist</kbd>. It uses the agent CLIs you already have installed, and never writes into your repositories or their config.</p>
+
+  <figure>
+    <img src="demo.gif" width="1400" height="600" alt="termist in a terminal: three agents as cards, one running, one waiting for an answer, one done; the user jumps to the waiting one, answers it, starts a new task and finds a session by name.">
+    <figcaption>Three agents at work. <kbd>.</kbd> jumps to the one waiting for you, <kbd>p</kbd> starts a new task, <kbd>/</kbd> finds any session.</figcaption>
+  </figure>
+
+  <h2 id="dots">Every session is a card with a dot</h2>
+  <ul class="dots">
+    <li><span class="dot running">●</span><span>Running. The agent is working; leave it.</span></li>
+    <li><span class="dot waiting">◆</span><span>Waiting for you: a permission or a question. <kbd>.</kbd> takes you straight there, from any project.</span></li>
+    <li><span class="dot done">✓</span><span>Done, and you have not looked yet.</span></li>
+    <li><span class="dot ready">●</span><span>Done and seen, ready for the next instruction.</span></li>
+    <li><span class="dot gone">○</span><span>Not running, for instance after a reboot. <kbd>Enter</kbd> resumes the same conversation.</span></li>
+  </ul>
+  <p class="after">The dots come from each agent's own hooks, so they change the moment the agent does.</p>
+
+  <h2 id="why">What you get</h2>
+  <ul class="features">
+    <li>Agents keep running when you close the window. A small daemon owns every session; the TUI just attaches to it.</li>
+    <li>Start a task without leaving the grid: <kbd>p</kbd>, type the prompt, pick the agent with <kbd>Tab</kbd> and the model with <kbd>^O</kbd>.</li>
+    <li>Send the next instruction to a finished agent with <kbd>Space</kbd>, without opening its terminal.</li>
+    <li>Projects as tabs, cards that scroll, rename and archive, and a real terminal for each agent when you want to type into it.</li>
+  </ul>
+
+  <h2 id="keys">Keys</h2>
+  <table>
+    <thead><tr><th>Key</th><th>Does</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>p</kbd></td><td>New task from a prompt</td></tr>
+      <tr><td><kbd>n</kbd> <kbd>t</kbd></td><td>New agent session, new shell</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>Type into the selected card; <kbd>Ctrl+a Esc</kbd> goes back</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>Follow-up to a card without entering it</td></tr>
+      <tr><td><kbd>.</kbd> <kbd>,</kbd></td><td>Next or previous session that needs you</td></tr>
+      <tr><td><kbd>/</kbd></td><td>Find any session</td></tr>
+      <tr><td><kbd>o</kbd> <kbd>x</kbd></td><td>Open a project, close its tab</td></tr>
+      <tr><td><kbd>r</kbd> <kbd>a</kbd> <kbd>A</kbd></td><td>Rename, archive, show the archive</td></tr>
+      <tr><td><kbd>q</kbd></td><td>Quit the TUI; the agents keep running</td></tr>
+    </tbody>
+  </table>
+
+  <footer>
+    <p>Written in Rust for macOS, Linux and Windows, in Istanbul. Licensed MIT or Apache-2.0.</p>
+    <nav aria-label="Project links">
+      <a href="https://github.com/eyupucmaz/termist">Source on GitHub</a>
+      <a href="https://github.com/eyupucmaz/termist/releases">Releases</a>
+      <a href="https://github.com/eyupucmaz/termist/issues">Issues</a>
+      <a href="https://github.com/eyupucmaz/termist/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
+    </nav>
+  </footer>
+</main>
+<script>
+  document.querySelectorAll("[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var text = document.getElementById(button.dataset.copy).textContent;
+      navigator.clipboard.writeText(text).then(function () {
+        button.textContent = "Copied";
+        setTimeout(function () { button.textContent = "Copy"; }, 1600);
+      });
+    });
+  });
+</script>
+</body>
+</html>
