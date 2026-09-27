@@ -5,6 +5,7 @@ on:
   release:
     types: [published]
   # A release created by the Release workflow's own token starts no `release` run.
+  # Release also runs (without releasing) on pull requests: only a push counts.
   workflow_run:
     workflows: [Release]
     types: [completed]
@@ -16,7 +17,9 @@ on:
     paths: [docs/install.sh, docs/install.ps1, .github/workflows/install.yml]
 jobs:
   install:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    # `wait` on a daemon that never stops must not hold a runner for hours.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
