@@ -316,6 +316,14 @@ impl Registry {
             ClientRequest::ListState => {
                 self.send(client, ServerEvent::State(self.state()));
                 self.send(client, ServerEvent::Harnesses(self.harnesses.clone()));
+                if let Some(why) = self.store.not_saved() {
+                    self.send(
+                        client,
+                        ServerEvent::Error {
+                            message: why.to_string(),
+                        },
+                    );
+                }
             }
             ClientRequest::AddProject { path } => match self.add_project(path) {
                 Ok(()) => self.broadcast(ServerEvent::State(self.state())),
@@ -999,6 +1007,10 @@ mod tests {
         for s in sessions {
             store.upsert_session(s, false).unwrap();
         }
+        registry_on(store)
+    }
+
+    fn registry_on(store: Store) -> Registry {
         let launcher = Launcher {
             config: DaemonConfig::default(),
             programs: HarnessPrograms {
@@ -1050,6 +1062,43 @@ mod tests {
             out,
         });
         rx
+    }
+
+    // A client learns at once that nothing it does will be kept.
+    #[test]
+    fn every_client_is_told_when_sessions_are_not_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("termist.db");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 99;")
+            .unwrap();
+        let mut reg = registry_on(Store::open(&path).unwrap());
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::ListState,
+        });
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::State(_))));
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Harnesses(_))));
+        match rx.try_recv() {
+            Ok(ServerEvent::Error { message }) => assert!(
+                message.starts_with("sessions are not being saved")
+                    && message.contains("schema 99"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::ListState,
+        });
+        let _ = (rx.try_recv(), rx.try_recv());
+        assert!(rx.try_recv().is_err(), "a saving store says nothing");
     }
 
     #[test]
