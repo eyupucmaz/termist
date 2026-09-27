@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "termist"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "termist-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "termist-daemon"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "interprocess",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "termist-platform"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "etcetera",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "termist-term"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "alacritty_terminal",
  "termist-core",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "termist-tui"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "insta",

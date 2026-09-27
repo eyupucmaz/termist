@@ -7,7 +7,7 @@ fn prints_version() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "termist 0.1.0");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), concat!("termist ", env!("CARGO_PKG_VERSION")));
 }
 
 // A malformed `termist hook …` must not exit 2: Claude Code treats that as "block".
