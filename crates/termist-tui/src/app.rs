@@ -1027,12 +1027,18 @@ impl App {
     fn navigate(&mut self, c: char) -> Vec<Action> {
         match c {
             '.' | ',' => {
-                // Going somewhere yourself outranks a tab still on its way.
-                self.project_pending = None;
+                // A card on its way counts as where you are; going on from it, you
+                // no longer wait for it.
+                let from = match self.project_pending.take() {
+                    Some(ProjectPending::Known {
+                        select: Some(id), ..
+                    }) => Some(id),
+                    _ => self.selected,
+                };
                 let waiting = self.waiting_in_closed_projects();
                 let mut reachable = self.visible_sessions();
                 reachable.extend(waiting.iter().cloned());
-                let Some(id) = next_in_attention(&reachable, self.selected, c == '.') else {
+                let Some(id) = next_in_attention(&reachable, from, c == '.') else {
                     return vec![];
                 };
                 let closed = waiting.iter().find(|s| s.id == id).map(|s| s.project);
@@ -2546,6 +2552,25 @@ mod tests {
             (app.project, app.selected),
             (Some(s[3].project), Some(s[3].id))
         );
+    }
+
+    // The card on its way counts as where you are: the next `.` steps on from it.
+    #[test]
+    fn a_second_dot_steps_on_from_the_waiting_card_on_its_way() {
+        let (mut app, s) = web_closed();
+        app.on_key(k(K::Char('.')));
+        let actions = app.on_key(k(K::Char('.')));
+        assert!(
+            !sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::OpenProject { .. })),
+            "{actions:?}"
+        );
+        assert_eq!(app.selected, Some(s[2].id), "the one after w1");
+        let mut state = app.state.clone();
+        state.projects[1].open = true;
+        app.on_event(ServerEvent::State(state));
+        assert_eq!(app.selected, Some(s[2].id), "and no jump when web opens");
     }
 
     #[test]
