@@ -760,11 +760,13 @@ mod tests {
                     crate::browse::DirEntry {
                         name: "notes".into(),
                         path: "/notes".into(),
+                        canonical: "/notes".into(),
                         git: false,
                     },
                     crate::browse::DirEntry {
                         name: "orbit-web".into(),
                         path: "/orbit-web".into(),
+                        canonical: "/orbit-web".into(),
                         git: true,
                     },
                 ],

@@ -12,6 +12,9 @@ pub const MAX_ENTRIES: usize = 20_000;
 pub struct DirEntry {
     pub name: String,
     pub path: PathBuf,
+    /// `path` with its links resolved, as the daemon stores a project; `path` itself
+    /// when that fails.
+    pub canonical: PathBuf,
     /// Holds a `.git`: shown with `●`.
     pub git: bool,
 }
@@ -23,7 +26,8 @@ pub struct Listing {
     pub truncated: bool,
 }
 
-/// The folders in `dir` (hidden ones left out), sorted by name, git repos marked.
+/// The folders in `dir` (hidden ones left out), sorted by name, git repos marked, links
+/// resolved.
 pub fn list_dir(dir: &Path) -> Result<Listing, String> {
     let read = std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
     let mut dirs = Vec::new();
@@ -56,6 +60,7 @@ pub fn list_dir(dir: &Path) -> Result<Listing, String> {
         .into_iter()
         .map(|(name, path)| DirEntry {
             git: path.join(".git").exists(),
+            canonical: std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()),
             name,
             path,
         })
@@ -98,6 +103,23 @@ mod tests {
         assert_eq!(listing.entries.len(), MAX_DIRS);
         assert!(listing.truncated);
         assert_eq!(listing.entries[0].name, "d0000");
+    }
+
+    // The daemon opens a project under its real path; the browser must know it to
+    // tell whether a link leads to a project that is already open.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_shown_as_listed_and_carries_the_real_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let listing = list_dir(&root).unwrap();
+        let link = &listing.entries[0];
+        assert_eq!(link.name, "link");
+        assert_eq!(link.path, root.join("link"));
+        assert_eq!(link.canonical, root.join("real"));
+        assert_eq!(listing.entries[1].canonical, root.join("real"));
     }
 
     #[cfg(unix)]

@@ -76,11 +76,8 @@ pub struct App {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProjectPending {
     Known(ProjectId),
-    /// A folder added as shown, and the projects that were open when it was asked for.
-    Path {
-        path: PathBuf,
-        open_before: Vec<ProjectId>,
-    },
+    /// A folder added under its real path; the project comes with exactly that path.
+    Path(PathBuf),
 }
 
 impl Default for App {
@@ -383,9 +380,7 @@ impl App {
                             .nth(c as usize - '1' as usize)
                             .map(|p| p.id);
                         if let Some(id) = tab {
-                            self.project = Some(id);
-                            self.selected = None;
-                            self.repair_selection();
+                            self.go_to_project(id);
                         }
                     }
                     KeyCode::Char('o') if !ctrl => actions.extend(self.open_project_browser()),
@@ -851,6 +846,7 @@ impl App {
             && let Some(id) = picker.selected().copied()
         {
             self.overlays.pop();
+            self.project_pending = None;
             self.select(id);
         }
         vec![]
@@ -905,23 +901,24 @@ impl App {
                 open.enter(d.path.clone());
                 return vec![Action::ListDir(d.path)];
             }
-            // The daemon resolves links in the path; the project it opens may show
-            // another path, so one that was not open before counts too.
+            // The daemon stores a project under its real path: a link to a project
+            // that is open already just brings its tab forward.
             (KeyCode::Tab, Some(BrowseEntry::Dir(d))) => {
                 self.overlays.pop();
-                let open_before = self.open_projects().map(|p| p.id).collect();
-                self.project_pending = Some(ProjectPending::Path {
-                    path: d.path.clone(),
-                    open_before,
-                });
-                return vec![Action::Send(ClientRequest::AddProject { path: d.path })];
+                let open = self.open_projects().find(|p| p.path == d.canonical);
+                if let Some(id) = open.map(|p| p.id) {
+                    self.go_to_project(id);
+                    return vec![];
+                }
+                self.project_pending = Some(ProjectPending::Path(d.canonical.clone()));
+                return vec![Action::Send(ClientRequest::AddProject {
+                    path: d.canonical,
+                })];
             }
             (KeyCode::Enter | KeyCode::Tab, Some(BrowseEntry::Project(p))) => {
                 self.overlays.pop();
                 if p.open {
-                    self.project = Some(p.id);
-                    self.selected = None;
-                    self.repair_selection();
+                    self.go_to_project(p.id);
                     return vec![];
                 }
                 self.project_pending = Some(ProjectPending::Known(p.id));
@@ -996,6 +993,8 @@ impl App {
     fn navigate(&mut self, c: char) {
         match c {
             '.' | ',' => {
+                // Going somewhere yourself outranks a tab still on its way.
+                self.project_pending = None;
                 let visible = self.visible_sessions();
                 if let Some(id) = next_in_attention(&visible, self.selected, c == '.') {
                     self.select(id);
@@ -1108,7 +1107,14 @@ impl App {
             .project
             .and_then(|p| open.iter().position(|x| *x == p))
             .unwrap_or(0) as isize;
-        self.project = Some(open[((pos + delta).rem_euclid(n)) as usize]);
+        self.go_to_project(open[((pos + delta).rem_euclid(n)) as usize]);
+    }
+
+    /// The user shows the tab of an open project, on its first card; a tab still on its
+    /// way no longer comes forward.
+    fn go_to_project(&mut self, id: ProjectId) {
+        self.project_pending = None;
+        self.project = Some(id);
         self.selected = None;
         self.repair_selection();
     }
@@ -1120,12 +1126,7 @@ impl App {
             Some(ProjectPending::Known(id)) => {
                 self.state.projects.iter().find(|p| p.id == *id && p.open)
             }
-            Some(ProjectPending::Path { path, open_before }) => {
-                let open = || self.open_projects();
-                open()
-                    .find(|p| p.path == *path)
-                    .or_else(|| open().find(|p| !open_before.contains(&p.id)))
-            }
+            Some(ProjectPending::Path(path)) => self.open_projects().find(|p| p.path == *path),
             None => None,
         };
         if let Some(id) = found.map(|p| p.id) {
@@ -2433,6 +2434,7 @@ mod tests {
                 .map(|(name, git)| crate::browse::DirEntry {
                     name: name.to_string(),
                     path: under.join(name),
+                    canonical: under.join(name),
                     git: *git,
                 })
                 .collect(),
@@ -2514,24 +2516,24 @@ mod tests {
         assert_eq!(app.project, Some(added.id));
     }
 
-    // The path goes to the daemon as shown (it resolves links itself, off the UI
-    // thread); the project it adds under its real path still comes to the front.
+    // The daemon opens a project under its real path, so the browser asks for that
+    // path and waits for exactly it.
     #[cfg(unix)]
     #[test]
-    fn a_folder_reached_through_a_link_is_added_as_shown_and_still_comes_to_the_front() {
+    fn a_folder_reached_through_a_link_is_added_under_its_real_path() {
         let (mut app, _) = app();
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         std::fs::create_dir(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
         app.on_key(k(K::Char('o')));
-        app.listed(Path::new("/"), listing(&[("link", false)], &root));
+        app.listed(Path::new("/"), crate::browse::list_dir(&root));
         type_text(&mut app, "link");
         let actions = app.on_key(k(K::Tab));
         assert_eq!(
             sent(&actions),
             vec![&ClientRequest::AddProject {
-                path: root.join("link")
+                path: root.join("real")
             }]
         );
         let mut state = app.state.clone();
@@ -2544,6 +2546,93 @@ mod tests {
         state.projects.push(added.clone());
         app.on_event(ServerEvent::State(state));
         assert_eq!(app.project, Some(added.id));
+    }
+
+    // Nothing new would open, so there is nothing to wait for.
+    #[test]
+    fn a_link_to_an_open_project_brings_its_tab_forward_at_once() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('o')));
+        app.listed(
+            Path::new("/"),
+            Ok(Listing {
+                entries: vec![crate::browse::DirEntry {
+                    name: "web-link".into(),
+                    path: "/code/web-link".into(),
+                    canonical: "/web".into(),
+                    git: true,
+                }],
+                truncated: false,
+            }),
+        );
+        type_text(&mut app, "link");
+        let actions = app.on_key(k(K::Tab));
+        assert!(
+            !sent(&actions).iter().any(|r| matches!(
+                r,
+                ClientRequest::AddProject { .. } | ClientRequest::OpenProject { .. }
+            )),
+            "{actions:?}"
+        );
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            (app.project, app.selected),
+            (Some(s[3].project), Some(s[3].id))
+        );
+    }
+
+    /// `o`, then Tab on a folder "orbit" that is not a project yet.
+    fn add_orbit(app: &mut App) {
+        app.on_key(k(K::Char('o')));
+        app.listed(Path::new("/"), listing(&[("orbit", true)], Path::new("/")));
+        type_text(app, "orbit");
+        app.on_key(k(K::Tab));
+    }
+
+    /// The state with one more open project at `path`.
+    fn opened(app: &mut App, path: &str) -> ProjectId {
+        let mut state = app.state.clone();
+        let id = ProjectId::new();
+        state.projects.push(ProjectInfo {
+            id,
+            name: path.trim_start_matches('/').into(),
+            path: path.into(),
+            open: true,
+        });
+        app.on_event(ServerEvent::State(state));
+        id
+    }
+
+    #[test]
+    fn a_folder_being_added_does_not_jump_to_another_project_that_opens() {
+        let (mut app, s) = app();
+        add_orbit(&mut app);
+        opened(&mut app, "/elsewhere");
+        assert_eq!(app.project, Some(s[0].project), "opened by someone else");
+        let orbit = opened(&mut app, "/orbit");
+        assert_eq!(app.project, Some(orbit));
+    }
+
+    #[test]
+    fn changing_tab_yourself_drops_the_switch_to_a_folder_being_added() {
+        let keys: [&[KeyEvent]; 6] = [
+            &[k(K::Char(']'))],
+            &[k(K::Char('['))],
+            &[k(K::Char('2'))],
+            &[k(K::Char('.'))],
+            &[k(K::Char(','))],
+            &[k(K::Char('/')), k(K::Enter)],
+        ];
+        for sequence in keys {
+            let (mut app, _) = app();
+            add_orbit(&mut app);
+            for key in sequence {
+                app.on_key(*key);
+            }
+            let chosen = app.project;
+            opened(&mut app, "/orbit");
+            assert_eq!(app.project, chosen, "{sequence:?}");
+        }
     }
 
     #[test]
