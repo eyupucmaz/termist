@@ -340,8 +340,8 @@ impl App {
                             }));
                         }
                     }
-                    KeyCode::Char('p') => actions.extend(self.open_quick_prompt()),
-                    KeyCode::Char('/') => self.open_palette(),
+                    KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
+                    KeyCode::Char('/') if !ctrl => self.open_palette(),
                     KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => self.navigate(c),
                     _ => {}
                 }
@@ -351,11 +351,11 @@ impl App {
                 self.message = None;
                 match key.code {
                     KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
-                    KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
+                    KeyCode::Char('q') if !ctrl => self.mode = Mode::ConfirmQuit,
                     KeyCode::Enter if self.selected.is_some() => actions.extend(self.enter()),
-                    KeyCode::Char('n') => actions.extend(self.open_picker()),
+                    KeyCode::Char('n') if !ctrl => actions.extend(self.open_picker()),
                     KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
-                    KeyCode::Char('t') => actions.extend(self.create(SessionKind::Shell)),
+                    KeyCode::Char('t') if !ctrl => actions.extend(self.create(SessionKind::Shell)),
                     KeyCode::Char(' ') if !ctrl => self.open_follow_up(),
                     KeyCode::Char('r') if !ctrl => self.open_rename(),
                     KeyCode::Char('a') if !ctrl => {
@@ -1043,7 +1043,7 @@ impl App {
                     self.mode = Mode::ConfirmKill(id);
                 }
             }
-            KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
+            KeyCode::Char('q') if !ctrl => self.mode = Mode::ConfirmQuit,
             KeyCode::Char(']') => self.switch_project(1),
             KeyCode::Char('[') => self.switch_project(-1),
             KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.navigate(c),
@@ -2871,7 +2871,7 @@ mod tests {
     #[test]
     fn ctrl_with_a_grid_letter_does_nothing() {
         let (mut app, _) = app();
-        for c in ['a', 'p', 'r', 'o', 'x', '/', ' '] {
+        for c in ['a', 'p', 'r', 'o', 'x', '/', ' ', 'n', 't', 'q'] {
             assert!(sent(&app.on_key(ctrl(c))).is_empty(), "{c:?}");
             assert!(app.overlays.is_empty(), "{c:?}");
             assert_eq!(app.mode, Mode::Grid, "{c:?}");
@@ -2882,6 +2882,20 @@ mod tests {
         app.on_key(k(K::Char('A')));
         app.on_key(ctrl_shift_a);
         assert!(app.archive_view, "and it does not leave the archive view");
+        app.on_key(ctrl('q'));
+        assert_eq!(app.mode, Mode::Grid, "nor asks to quit");
+    }
+
+    #[test]
+    fn after_the_prefix_ctrl_with_p_or_slash_does_nothing() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Enter));
+        for c in ['p', '/'] {
+            app.on_key(ctrl('a'));
+            assert!(sent(&app.on_key(ctrl(c))).is_empty(), "{c:?}");
+            assert!(app.overlays.is_empty(), "{c:?}");
+            assert_eq!(app.mode, Mode::Focus, "{c:?}");
+        }
     }
 
     #[test]
