@@ -1,13 +1,13 @@
 #!/bin/sh
 # Stand-in for `codex`: prints its arguments, then does what Codex does with the
-# `-c hooks.<Event>=[{hooks=[{type="command",command="…"}]}]` flags it was given: runs
+# `-c hooks.<Event>=[{hooks=[{type="command",command="…",timeout=N}]}]` flags it was given: runs
 # each hook's command through a shell with the event JSON on stdin, for one turn with a
 # permission prompt. TERMIST_HOME is removed so only TERMIST_RUNTIME_DIR can route hooks.
 echo "fake-codex $*"
 map=$(mktemp)
 python3 - "$@" > "$map" <<'PY'
 import re, sys
-pat = re.compile(r'hooks\.(\w+)=\[\{hooks=\[\{type="command",command="((?:[^"\\]|\\.)*)"\}\]\}\]$')
+pat = re.compile(r'hooks\.(\w+)=\[\{hooks=\[\{type="command",command="((?:[^"\\]|\\.)*)",timeout=\d+\}\]\}\]$')
 for a in sys.argv[1:]:
     m = pat.match(a)
     if m:

@@ -32,9 +32,13 @@ pub fn snake_case(event: &str) -> String {
     out
 }
 
-fn default_timeout(snake_event: &str) -> u64 {
-    if matches!(snake_event, "session_end" | "interrupt") {
-        1
+/// Seconds Codex waits for one of our hooks. Every hook states it, so the flag and the
+/// trust hash use the same value. Codex's own default for `Interrupt` and `SessionEnd`
+/// is 1 s, which a shell starting `termist hook` can miss, losing the cancel; 3 s is
+/// the most Codex allows for those two (it clamps more, and hashes the clamped value).
+pub fn hook_timeout(event: &str) -> u64 {
+    if matches!(event, "Interrupt" | "SessionEnd") {
+        3
     } else {
         600
     }
@@ -42,14 +46,13 @@ fn default_timeout(snake_event: &str) -> u64 {
 
 /// Codex's trusted-hash of one command hook. Keys are written in sorted order so the
 /// canonical form holds even if serde_json's `preserve_order` feature is enabled.
-pub fn trust_hash(event: &str, command: &str) -> String {
-    let snake = snake_case(event);
+pub fn trust_hash(event: &str, command: &str, timeout: u64) -> String {
     let identity = json!({
-        "event_name": snake,
+        "event_name": snake_case(event),
         "hooks": [{
             "async": false,
             "command": command,
-            "timeout": default_timeout(&snake),
+            "timeout": timeout,
             "type": "command",
         }],
     });
@@ -95,9 +98,10 @@ pub fn args(
     let mut state_entries = Vec::with_capacity(EVENTS.len());
     for ev in EVENTS {
         let cmd = crate::hookcmd::hook_command(exe, Harness::Codex, ev);
+        let timeout = hook_timeout(ev);
         args.push("-c".into());
         args.push(format!(
-            "hooks.{ev}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
+            "hooks.{ev}=[{{hooks=[{{type=\"command\",command={},timeout={timeout}}}]}}]",
             toml_string(&cmd)
         ));
         state_entries.push(format!(
@@ -106,7 +110,7 @@ pub fn args(
                 "/<session-flags>/config.toml:{}:0:0",
                 snake_case(ev)
             )),
-            toml_string(&trust_hash(ev, &cmd)),
+            toml_string(&trust_hash(ev, &cmd, timeout)),
         ));
     }
     // One `-c hooks.state={…}` flag holding every trust entry as an inline table:
@@ -153,18 +157,27 @@ mod tests {
         assert_eq!(snake_case("SessionEnd"), "session_end");
     }
 
-    /// Hashes Codex 0.156.1 itself wrote into config.toml for these exact commands.
+    /// Hashes Codex 0.156.1 itself wrote into config.toml for these exact commands,
+    /// which had no timeout of their own: Codex hashed its defaults, 600 s and 1 s.
     #[test]
     fn trust_hashes_match_the_ones_codex_computed() {
         assert_eq!(
-            trust_hash("Stop", &format!("{RECORDED_BIN} CX:Stop")),
+            trust_hash("Stop", &format!("{RECORDED_BIN} CX:Stop"), 600),
             "sha256:70ff015721d34c53546596e5d77d7c42975f83eb3f237f65b3be4b6326f987b8"
         );
         assert_eq!(
-            trust_hash("Interrupt", &format!("{RECORDED_BIN} CX:Interrupt")),
+            trust_hash("Interrupt", &format!("{RECORDED_BIN} CX:Interrupt"), 1),
             "sha256:10b00d56b15d8f826906c83db8146c8a792bebb9a223100b31a11f34ad39fe7a",
-            "interrupt uses the 1 s timeout"
+            "the timeout is part of the hash"
         );
+    }
+
+    // Codex's own 1 s for these two can pass before a shell has started `termist hook`.
+    #[test]
+    fn a_cancel_or_an_exit_gets_more_than_a_second() {
+        assert_eq!(hook_timeout("Interrupt"), 3);
+        assert_eq!(hook_timeout("SessionEnd"), 3);
+        assert_eq!(hook_timeout("Stop"), 600);
     }
 
     /// Every hook carries its own trust entry, computed from the very
@@ -199,8 +212,9 @@ mod tests {
 
         for ev in EVENTS {
             let cmd = crate::hookcmd::hook_command(exe, Harness::Codex, ev);
+            let timeout = hook_timeout(ev);
             let hook = format!(
-                "hooks.{ev}=[{{hooks=[{{type=\"command\",command={}}}]}}]",
+                "hooks.{ev}=[{{hooks=[{{type=\"command\",command={},timeout={timeout}}}]}}]",
                 toml_string(&cmd)
             );
             let hi = args
@@ -215,7 +229,7 @@ mod tests {
                     "/<session-flags>/config.toml:{}:0:0",
                     snake_case(ev)
                 )),
-                toml_string(&trust_hash(ev, &cmd)),
+                toml_string(&trust_hash(ev, &cmd, timeout)),
             );
             assert!(state.contains(&entry), "missing entry {entry} in {state}");
         }
