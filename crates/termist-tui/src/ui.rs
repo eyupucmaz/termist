@@ -1183,4 +1183,19 @@ mod tests {
         assert!(app.overlays.is_empty());
         assert_eq!(app.mode, Mode::Focus);
     }
+
+    #[test]
+    fn the_settings_and_the_keys_screens() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('s')));
+        insta::assert_snapshot!("settings", render(&mut app, 80, 16).backend());
+        for _ in 0..3 {
+            app.on_key(key(K::Char('j')));
+        }
+        app.on_key(key(K::Enter));
+        app.on_key(key(K::Enter));
+        app.on_key(key(K::Char('g')));
+        insta::assert_snapshot!("keys", render(&mut app, 80, 16).backend());
+    }
 }

@@ -7,6 +7,7 @@ pub mod list_picker;
 pub mod overlay;
 pub mod overlay_view;
 pub mod run;
+pub mod settings;
 pub mod text_input;
 pub mod theme;
 pub mod ui;

@@ -44,6 +44,7 @@ pub enum Action {
     Up,
     Right,
     Help,
+    Settings,
 }
 
 use Action::*;
@@ -81,6 +82,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     Archive,
     ArchiveView,
     Kill,
+    Settings,
     Help,
     Quit,
 ];
@@ -131,6 +133,7 @@ impl Action {
             Up => "up",
             Right => "right",
             Help => "help",
+            Settings => "settings",
         }
     }
 
@@ -168,6 +171,7 @@ impl Action {
             PrevAttention => "previous●",
             Left | Down | Up | Right => "move",
             Help => "help",
+            Settings => "settings",
         }
     }
 
@@ -200,6 +204,7 @@ impl Action {
             Up => "card above",
             Right => "card to the right",
             Help => "this help",
+            Settings => "settings: theme, colours, prefix, keys",
         }
     }
 }
@@ -394,6 +399,7 @@ impl Keymap {
             ("a", Archive),
             ("A", ArchiveView),
             ("d", Kill),
+            ("s", Settings),
             ("?", Help),
             ("q", Quit),
         ]
@@ -435,14 +441,10 @@ impl Keymap {
         let mut problems = Vec::new();
         let mut problem = |path: String, message: String| problems.push(Problem { path, message });
         match KeySpec::parse(prefix) {
-            Ok(p) if reserved(&p).is_some() => {
-                problem("prefix".into(), reserved(&p).unwrap().into());
-            }
-            Ok(p) if p.is_plain_char() => problem(
-                "prefix".into(),
-                format!("\"{prefix}\" would stop you typing it; use a key with C- or M-"),
-            ),
-            Ok(p) => map.prefix = p,
+            Ok(p) => match Keymap::refuses_prefix(&p) {
+                Some(why) => problem("prefix".into(), why),
+                None => map.prefix = p,
+            },
             Err(e) => problem("prefix".into(), e),
         }
         for (context, name, bindings) in [
@@ -504,6 +506,55 @@ impl Keymap {
         if let Some(action) = action {
             table.push((key, action));
         }
+    }
+
+    /// Makes `keys` the only keys of `action` in `context`, taking them from whatever
+    /// they were bound to.
+    pub fn set_keys(&mut self, context: Context, action: Action, keys: &[KeySpec]) {
+        let table = match context {
+            Context::Grid => &mut self.grid,
+            Context::Focus => &mut self.focus,
+        };
+        table.retain(|(k, a)| *a != action && !keys.contains(k));
+        table.extend(keys.iter().map(|k| (*k, action)));
+    }
+
+    /// The bindings of `context` that differ from the defaults, as config.toml writes
+    /// them: `(key, action id)`, `"none"` for a default key left unbound.
+    pub fn overrides(&self, context: Context) -> Vec<(String, String)> {
+        let defaults = Keymap::defaults();
+        let (default, current) = (defaults.table(context), self.table(context));
+        let mut out: Vec<(String, String)> = current
+            .iter()
+            .filter(|binding| !default.contains(binding))
+            .map(|(k, a)| (k.to_string(), a.id().to_string()))
+            .collect();
+        out.extend(
+            default
+                .iter()
+                .filter(|(k, _)| !current.iter().any(|(c, _)| c == k))
+                .map(|(k, _)| (k.to_string(), "none".to_string())),
+        );
+        out.sort();
+        out
+    }
+
+    /// Why `key` cannot be bound in `context`, if it cannot.
+    pub fn refuses(&self, context: Context, key: &KeySpec) -> Option<String> {
+        if let Some(why) = reserved(key) {
+            return Some(why.into());
+        }
+        (context == Context::Focus && *key == self.prefix)
+            .then(|| format!("{key} is the prefix: pressed twice it goes to the session"))
+    }
+
+    /// Why `key` cannot be the prefix, if it cannot.
+    pub fn refuses_prefix(key: &KeySpec) -> Option<String> {
+        if let Some(why) = reserved(key) {
+            return Some(why.into());
+        }
+        key.is_plain_char()
+            .then(|| format!("{key} would stop you typing it; use a key with C- or M-"))
     }
 
     pub fn action(&self, context: Context, key: &KeyEvent) -> Option<Action> {
@@ -652,7 +703,10 @@ mod tests {
         );
         let text: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
         assert_eq!(text.len(), 7, "{text:#?}");
-        assert!(text[0].starts_with("prefix: \"x\" would stop you typing it"));
+        assert!(
+            text[0].starts_with("prefix: x would stop you typing it"),
+            "{text:?}"
+        );
         assert!(
             text.iter()
                 .any(|t| t.starts_with("keys.grid.C-q: C-q always gets you out"))
@@ -670,5 +724,40 @@ mod tests {
                 .any(|t| t.starts_with("keys.focus.C-a: the prefix itself"))
         );
         assert_eq!(m, Keymap::defaults(), "nothing of it was used");
+    }
+
+    #[test]
+    fn overrides_are_what_differs_from_the_defaults() {
+        let mut m = Keymap::defaults();
+        assert!(m.overrides(Context::Grid).is_empty());
+        let g = KeySpec::parse("g").unwrap();
+        m.set_keys(Context::Grid, QuickPrompt, &[g]);
+        assert_eq!(
+            m.overrides(Context::Grid),
+            [
+                ("g".to_string(), "quick_prompt".to_string()),
+                ("p".into(), "none".into())
+            ]
+        );
+        let (read_back, problems) = Keymap::from_config(
+            &KeysConfig {
+                grid: m.overrides(Context::Grid).into_iter().collect(),
+                ..Default::default()
+            },
+            "C-a",
+        );
+        assert!(problems.is_empty());
+        assert_eq!(read_back.keys(Context::Grid, QuickPrompt), [g]);
+        m.set_keys(Context::Grid, QuickPrompt, &[KeySpec::parse("p").unwrap()]);
+        assert!(m.overrides(Context::Grid).is_empty(), "back to the default");
+    }
+
+    #[test]
+    fn a_key_taken_for_another_action_leaves_the_old_one() {
+        let mut m = Keymap::defaults();
+        let k = KeySpec::parse("k").unwrap();
+        m.set_keys(Context::Grid, Palette, &[k]);
+        assert_eq!(m.keys(Context::Grid, Up), []);
+        assert_eq!(m.keys(Context::Grid, Palette), [k]);
     }
 }

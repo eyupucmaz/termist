@@ -2,6 +2,7 @@
 //! gets every key; Esc closes it and Ctrl+Q closes them all, so a picker opened from
 //! the quick prompt returns to it with the text still there.
 use crate::browse::{DirEntry, Listing};
+use crate::keys::{self, Action as KeyAction, Context, KeySpec};
 use crate::list_picker::ListPicker;
 use crate::text_input::TextInput;
 use std::path::PathBuf;
@@ -35,6 +36,64 @@ pub enum Overlay {
     OpenProject(OpenProject),
     /// `?` and `C-a ?`: every key, scrolled down `scroll` lines.
     Help { scroll: usize },
+    /// `s`: theme, colours, prefix and the way to the keys.
+    Settings(SettingsView),
+    /// "keys" in the settings: every grid and focus action with its keys.
+    Keys(SettingsView),
+    /// Waiting for the key to bind.
+    KeyCapture(Capture),
+}
+
+/// A list of settings: the highlighted row, and a word about the last change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SettingsView {
+    pub row: usize,
+    pub note: Option<String>,
+}
+
+/// The rows of the settings screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingRow {
+    Theme,
+    Colors,
+    Prefix,
+    Keys,
+}
+
+pub const SETTING_ROWS: [SettingRow; 4] = [
+    SettingRow::Theme,
+    SettingRow::Colors,
+    SettingRow::Prefix,
+    SettingRow::Keys,
+];
+
+/// What a captured key will be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureTarget {
+    Prefix,
+    Key(Context, KeyAction),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capture {
+    pub target: CaptureTarget,
+    /// A key pressed that another action has: Enter gives it to this one and the other
+    /// action this one's old key.
+    pub conflict: Option<(KeySpec, KeyAction)>,
+    pub note: Option<String>,
+}
+
+/// The rows of the keys screen: the grid's actions, then focus mode's.
+pub fn key_rows() -> Vec<(Context, KeyAction)> {
+    keys::actions(Context::Grid)
+        .iter()
+        .map(|a| (Context::Grid, *a))
+        .chain(
+            keys::actions(Context::Focus)
+                .iter()
+                .map(|a| (Context::Focus, *a)),
+        )
+        .collect()
 }
 
 impl Overlay {

@@ -71,6 +71,15 @@ impl Theme {
         spec.resolve(id, depth)
     }
 
+    /// The name a built-in theme shows, `id` itself for an unknown one.
+    pub fn name_of(id: &str) -> String {
+        SOURCES
+            .iter()
+            .find(|(i, _)| *i == id)
+            .and_then(|(_, source)| Spec::parse(source).ok())
+            .map_or_else(|| id.to_string(), |spec| spec.name)
+    }
+
     /// The host terminal's own colours, as today: the theme tests and a bare `App` use.
     pub fn terminal() -> Theme {
         Theme::named("terminal", ColorDepth::TrueColor)

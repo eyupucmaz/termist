@@ -2,7 +2,9 @@
 //! bottom to top, so a picker opened from the quick prompt sits on top of it.
 use crate::app::App;
 use crate::keys::{self, Action as KeyAction, Context};
-use crate::overlay::{BrowseEntry, Overlay, QuickPrompt};
+use crate::overlay::{
+    BrowseEntry, CaptureTarget, Overlay, QuickPrompt, SETTING_ROWS, SettingRow, key_rows,
+};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::status_style;
@@ -11,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use termist_core::config::ColorDepth;
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -324,6 +327,138 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let shown = lines.into_iter().skip(first).take(room).collect();
             boxed(f, t, area, "help", shown);
         }
+        Overlay::Settings(view) => {
+            let depth = app.config.colors;
+            let colours = match depth {
+                ColorDepth::Auto => format!("auto ({} here)", depth_name(app.detected_depth)),
+                other => depth_name(other).to_string(),
+            };
+            let local = |key: &str| {
+                if app.local_settings.iter().any(|k| k == key) {
+                    "  (config.local.toml)"
+                } else {
+                    ""
+                }
+            };
+            let rows = SETTING_ROWS
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let (name, value) = match row {
+                        SettingRow::Theme => (
+                            "theme",
+                            format!(
+                                "‹ {} ›{}",
+                                Theme::name_of(&app.config.theme),
+                                local("theme")
+                            ),
+                        ),
+                        SettingRow::Colors => {
+                            ("colours", format!("‹ {colours} ›{}", local("colors")))
+                        }
+                        SettingRow::Prefix => (
+                            "prefix",
+                            format!("{}{}", app.keymap.prefix, local("prefix")),
+                        ),
+                        SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
+                    };
+                    Line::from(Span::styled(
+                        format!(" {name:<9} {value}"),
+                        highlighted(Style::default(), i == view.row),
+                    ))
+                })
+                .collect();
+            let path = app
+                .config_path
+                .as_ref()
+                .map_or("default settings".to_string(), |p| p.display().to_string());
+            let mut extra = vec![
+                Line::default(),
+                Line::from(Span::styled(format!(" {path}"), dim())),
+            ];
+            if let Some(note) = &view.note {
+                extra.push(Line::from(Span::styled(format!(" {note}"), t.warn)));
+            }
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "settings".into(),
+                    width: 64,
+                    query: None,
+                    rows,
+                    highlight: view.row,
+                    extra,
+                },
+            );
+        }
+        Overlay::Keys(view) => {
+            let prefix = app.keymap.prefix.to_string();
+            let rows = key_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(i, (context, action))| {
+                    let keys: Vec<String> = app
+                        .keymap
+                        .keys(context, action)
+                        .iter()
+                        .map(|k| match context {
+                            Context::Grid => k.to_string(),
+                            Context::Focus => format!("{prefix} {k}"),
+                        })
+                        .collect();
+                    let keys = if keys.is_empty() {
+                        "—".to_string()
+                    } else {
+                        keys.join(" ")
+                    };
+                    let place = match context {
+                        Context::Grid => "grid",
+                        Context::Focus => "focus",
+                    };
+                    Line::from(vec![
+                        Span::styled(format!(" {place:<6}"), dim()),
+                        Span::styled(
+                            format!("{keys:<14} {}", action.label()),
+                            highlighted(Style::default(), i == view.row),
+                        ),
+                    ])
+                })
+                .collect();
+            let extra = view
+                .note
+                .iter()
+                .map(|note| Line::from(Span::styled(format!(" {note}"), t.warn)))
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "keys".into(),
+                    width: 72,
+                    query: None,
+                    rows,
+                    highlight: view.row,
+                    extra,
+                },
+            );
+        }
+        Overlay::KeyCapture(capture) => {
+            let what = match capture.target {
+                CaptureTarget::Prefix => "press the new prefix".to_string(),
+                CaptureTarget::Key(_, action) => {
+                    format!("press the new key for: {}", action.label())
+                }
+            };
+            let mut lines = vec![Line::from(format!(" {what}"))];
+            if let Some(note) = &capture.note {
+                lines.push(Line::from(Span::styled(format!(" {note}"), t.warn)));
+            }
+            let area = centered(body, 68, lines.len() as u16 + 2);
+            boxed(f, t, area, "new key", lines);
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -371,6 +506,19 @@ pub fn hint(overlay: &Overlay) -> &'static str {
             "type to filter · Enter open · → in · ← up · Tab open this folder · Esc close"
         }
         Overlay::Help { .. } => "j/k scroll · Esc close",
+        Overlay::Settings(_) => "j/k choose · ←/→ change · Enter set · Esc close",
+        Overlay::Keys(_) => "j/k choose · Enter new key · Backspace no key · R default · Esc back",
+        Overlay::KeyCapture(c) if c.conflict.is_some() => "Enter swap · Esc cancel",
+        Overlay::KeyCapture(_) => "press a key · Esc cancel",
+    }
+}
+
+fn depth_name(depth: ColorDepth) -> &'static str {
+    match depth {
+        ColorDepth::Auto => "auto",
+        ColorDepth::TrueColor => "24-bit",
+        ColorDepth::Ansi256 => "256 colours",
+        ColorDepth::Ansi16 => "16 colours",
     }
 }
 

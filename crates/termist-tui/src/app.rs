@@ -1,16 +1,19 @@
 use crate::browse::Listing;
 use crate::encode::{encode_key, encode_paste};
-use crate::keys::{Action as KeyAction, Context, Keymap};
+use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
-    self, BrowseEntry, ModelChoice, ModelPicker, OpenProject, Overlay, QuickPrompt,
+    self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
+    QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
+use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use termist_core::config::Config;
+use termist_core::TermColors;
+use termist_core::config::{ColorDepth, Config, THEMES};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
@@ -39,6 +42,8 @@ pub enum Action {
     Send(ClientRequest),
     /// List a folder off the UI thread; the result comes back through `App::listed`.
     ListDir(PathBuf),
+    /// Save a settings change to config.toml.
+    WriteConfig(ConfigEdit),
     Quit,
 }
 
@@ -79,6 +84,13 @@ pub struct App {
     pub config_path: Option<PathBuf>,
     pub theme: Theme,
     pub keymap: Keymap,
+    /// What `colors = "auto"` means in this terminal.
+    pub detected_depth: ColorDepth,
+    /// The host terminal's own colours, if it said; agents get them with a theme that
+    /// paints nothing.
+    pub host_colors: Option<TermColors>,
+    /// The top-level settings config.local.toml sets: the settings screen leaves them.
+    pub local_settings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +149,9 @@ impl App {
             config_path: None,
             theme,
             keymap,
+            detected_depth: ColorDepth::TrueColor,
+            host_colors: None,
+            local_settings: Vec::new(),
         }
     }
 
@@ -470,6 +485,9 @@ impl App {
                 self.help_key(key);
                 vec![]
             }
+            Some(Overlay::Settings(_)) => self.settings_key(key),
+            Some(Overlay::Keys(_)) => self.keys_key(key),
+            Some(Overlay::KeyCapture(_)) => self.capture_key(key),
             None => vec![],
         }
     }
@@ -1148,8 +1166,248 @@ impl App {
             KeyAction::Up => return self.navigate('k'),
             KeyAction::Right => return self.navigate('l'),
             KeyAction::Help => self.overlays.push(Overlay::Help { scroll: 0 }),
+            KeyAction::Settings => self
+                .overlays
+                .push(Overlay::Settings(SettingsView::default())),
         }
         vec![]
+    }
+
+    /// The colours agents are told about: the theme's, or the host terminal's.
+    pub fn agent_colors(&self) -> TermColors {
+        self.theme
+            .agent_colors
+            .or(self.host_colors)
+            .unwrap_or_default()
+    }
+
+    /// Redraws in the configured theme and colour depth, and tells the daemon.
+    fn apply_theme(&mut self) -> Vec<Action> {
+        let depth = match self.config.colors {
+            ColorDepth::Auto => self.detected_depth,
+            depth => depth,
+        };
+        self.theme = Theme::named(&self.config.theme, depth);
+        vec![Action::Send(ClientRequest::SetColors(self.agent_colors()))]
+    }
+
+    /// Notes a change in the settings box on top: the settings or the keys list.
+    fn settings_note(&mut self, note: impl Into<String>) {
+        if let Some(Overlay::Settings(v) | Overlay::Keys(v)) = self.overlays.last_mut() {
+            v.note = Some(note.into());
+        }
+    }
+
+    fn settings_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Settings(view)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let row = view.row;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Down | KeyCode::Char('j') => view.row = (row + 1).min(SETTING_ROWS.len() - 1),
+            KeyCode::Up | KeyCode::Char('k') => view.row = row.saturating_sub(1),
+            KeyCode::Left | KeyCode::Char('h') => {
+                return self.change_setting(SETTING_ROWS[row], -1);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                return self.change_setting(SETTING_ROWS[row], 1);
+            }
+            KeyCode::Enter => match SETTING_ROWS[row] {
+                SettingRow::Prefix if self.local_settings.iter().any(|k| k == "prefix") => {
+                    self.settings_note("prefix is set in config.local.toml");
+                }
+                SettingRow::Prefix => self.overlays.push(Overlay::KeyCapture(Capture {
+                    target: CaptureTarget::Prefix,
+                    conflict: None,
+                    note: None,
+                })),
+                SettingRow::Keys => self.overlays.push(Overlay::Keys(SettingsView::default())),
+                other => return self.change_setting(other, 1),
+            },
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// ←/→ on a settings row: the next or the previous choice, saved at once.
+    fn change_setting(&mut self, row: SettingRow, step: isize) -> Vec<Action> {
+        let key = match row {
+            SettingRow::Theme => "theme",
+            SettingRow::Colors => "colors",
+            SettingRow::Prefix | SettingRow::Keys => return vec![],
+        };
+        if self.local_settings.iter().any(|k| k == key) {
+            self.settings_note(format!("{key} is set in config.local.toml"));
+            return vec![];
+        }
+        let next = |len: usize, at: usize| (at as isize + step).rem_euclid(len as isize) as usize;
+        let value = match row {
+            SettingRow::Theme => {
+                let at = THEMES
+                    .iter()
+                    .position(|t| *t == self.config.theme)
+                    .unwrap_or(0);
+                self.config.theme = THEMES[next(THEMES.len(), at)].to_string();
+                self.config.theme.clone()
+            }
+            _ => {
+                let all = ColorDepth::ALL;
+                let at = all
+                    .iter()
+                    .position(|d| *d == self.config.colors)
+                    .unwrap_or(0);
+                self.config.colors = all[next(all.len(), at)];
+                self.config.colors.id().to_string()
+            }
+        };
+        let mut actions = self.apply_theme();
+        let running_agents = self.state.sessions.iter().any(|s| {
+            matches!(s.kind, SessionKind::Agent { .. }) && s.status.is_live() && !s.archived
+        });
+        if let Some(wanted) = self.theme.stands_in_for {
+            self.settings_note(format!("{wanted} needs 256 colours; this terminal has 16"));
+        } else if running_agents {
+            self.settings_note("running agents keep the colours they started with");
+        } else if let Some(Overlay::Settings(v)) = self.overlays.last_mut() {
+            v.note = None;
+        }
+        actions.push(Action::WriteConfig(ConfigEdit::Set { key, value }));
+        actions
+    }
+
+    fn keys_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let rows = key_rows();
+        let Some(Overlay::Keys(view)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let row = view.row.min(rows.len() - 1);
+        let (context, action) = rows[row];
+        let local = self.local_settings.iter().any(|k| k == "keys");
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Down | KeyCode::Char('j') => view.row = (row + 1).min(rows.len() - 1),
+            KeyCode::Up | KeyCode::Char('k') => view.row = row.saturating_sub(1),
+            KeyCode::PageDown => view.row = (row + 10).min(rows.len() - 1),
+            KeyCode::PageUp => view.row = row.saturating_sub(10),
+            KeyCode::Enter | KeyCode::Backspace | KeyCode::Char('R') if local => {
+                self.settings_note("keys are set in config.local.toml");
+            }
+            KeyCode::Enter => self.overlays.push(Overlay::KeyCapture(Capture {
+                target: CaptureTarget::Key(context, action),
+                conflict: None,
+                note: None,
+            })),
+            KeyCode::Backspace => {
+                self.keymap.set_keys(context, action, &[]);
+                self.settings_note(format!("{} has no key now", action.label()));
+                return vec![self.write_keys(context)];
+            }
+            KeyCode::Char('R') => {
+                let defaults = Keymap::defaults().keys(context, action);
+                self.keymap.set_keys(context, action, &defaults);
+                self.settings_note(format!("{} is back on its default key", action.label()));
+                return vec![self.write_keys(context)];
+            }
+            _ => {}
+        }
+        vec![]
+    }
+
+    fn write_keys(&self, context: Context) -> Action {
+        Action::WriteConfig(ConfigEdit::Keys {
+            table: match context {
+                Context::Grid => "grid",
+                Context::Focus => "focus",
+            },
+            bindings: self.keymap.overrides(context),
+        })
+    }
+
+    /// The key pressed while capturing becomes the prefix or the action's key; a key
+    /// another action has asks first.
+    fn capture_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::KeyCapture(capture)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        let spec = KeySpec::of(&key);
+        match (capture.target, capture.conflict.take()) {
+            (CaptureTarget::Key(context, action), Some((taken, other)))
+                if key.code == KeyCode::Enter =>
+            {
+                let old = self.keymap.keys(context, action);
+                self.keymap.set_keys(context, action, &[taken]);
+                if let Some(old) = old.first() {
+                    self.keymap.bind(context, *old, Some(other));
+                }
+                self.overlays.pop();
+                self.settings_note(format!("{taken}: {} · {}", action.label(), other.label()));
+                vec![self.write_keys(context)]
+            }
+            (CaptureTarget::Prefix, _) => {
+                if let Some(why) = Keymap::refuses_prefix(&spec) {
+                    capture.note = Some(why);
+                    return vec![];
+                }
+                self.keymap.prefix = spec;
+                // The new prefix cannot also be a key after the prefix.
+                let taken = self.keymap.action(Context::Focus, &key);
+                if let Some(action) = taken {
+                    let keys: Vec<KeySpec> = self
+                        .keymap
+                        .keys(Context::Focus, action)
+                        .into_iter()
+                        .filter(|k| *k != spec)
+                        .collect();
+                    self.keymap.set_keys(Context::Focus, action, &keys);
+                }
+                self.config.prefix = spec.to_string();
+                self.overlays.pop();
+                self.settings_note(format!("the prefix is {spec}"));
+                let mut actions = vec![Action::WriteConfig(ConfigEdit::Set {
+                    key: "prefix",
+                    value: spec.to_string(),
+                })];
+                if taken.is_some() {
+                    actions.push(self.write_keys(Context::Focus));
+                }
+                actions
+            }
+            (CaptureTarget::Key(context, action), _) => {
+                if let Some(why) = self.keymap.refuses(context, &spec) {
+                    capture.note = Some(why);
+                    return vec![];
+                }
+                match self.keymap.action(context, &key) {
+                    Some(same) if same == action => {
+                        self.overlays.pop();
+                        vec![]
+                    }
+                    Some(other) => {
+                        capture.note = Some(format!(
+                            "{spec} is \"{}\" · Enter: swap their keys · Esc: cancel",
+                            other.label()
+                        ));
+                        capture.conflict = Some((spec, other));
+                        vec![]
+                    }
+                    None => {
+                        self.keymap.set_keys(context, action, &[spec]);
+                        self.overlays.pop();
+                        self.settings_note(format!("{spec}: {}", action.label()));
+                        vec![self.write_keys(context)]
+                    }
+                }
+            }
+        }
     }
 
     /// The help: j/k and the arrows scroll (the view stops at its last line), Esc, `?`
@@ -3270,5 +3528,192 @@ mod tests {
             )),
             "{actions:?}"
         );
+    }
+
+    fn writes(actions: &[Action]) -> Vec<&ConfigEdit> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::WriteConfig(e) => Some(e),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn top_note(app: &App) -> Option<String> {
+        match app.overlays.last() {
+            Some(Overlay::Settings(v) | Overlay::Keys(v)) => v.note.clone(),
+            Some(Overlay::KeyCapture(c)) => c.note.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_theme_changes_at_once_is_saved_and_agents_are_told() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Settings(_))));
+        let actions = app.on_key(k(K::Right));
+        assert_eq!(app.theme.id, "moda");
+        assert_eq!(
+            writes(&actions),
+            [&ConfigEdit::Set {
+                key: "theme",
+                value: "moda".into()
+            }]
+        );
+        let moda = app.theme.agent_colors.unwrap();
+        assert!(sent(&actions).contains(&&ClientRequest::SetColors(moda)));
+        app.on_key(k(K::Left));
+        app.on_key(k(K::Left));
+        assert_eq!(app.theme.id, "terminal", "it wraps around");
+        app.host_colors = Some(TermColors {
+            fg: (1, 1, 1),
+            bg: (2, 2, 2),
+            ansi: None,
+        });
+        app.on_key(k(K::Right));
+        let actions = app.on_key(k(K::Left));
+        assert!(
+            sent(&actions).contains(&&ClientRequest::SetColors(app.host_colors.unwrap())),
+            "the terminal theme tells agents the host's colours"
+        );
+    }
+
+    #[test]
+    fn with_16_colours_a_painting_theme_is_not_drawn_and_the_screen_says_why() {
+        let (mut app, _) = app();
+        app.detected_depth = ColorDepth::Ansi16;
+        app.on_key(k(K::Char('s')));
+        app.on_key(k(K::Right));
+        assert_eq!(app.config.theme, "moda");
+        assert_eq!(app.theme.id, "terminal");
+        assert_eq!(
+            top_note(&app).unwrap(),
+            "moda needs 256 colours; this terminal has 16"
+        );
+    }
+
+    #[test]
+    fn a_setting_of_the_local_file_is_left_alone() {
+        let (mut app, _) = app();
+        app.local_settings = vec!["theme".into()];
+        app.on_key(k(K::Char('s')));
+        assert!(app.on_key(k(K::Right)).is_empty());
+        assert_eq!(app.config.theme, "uskudar");
+        assert_eq!(top_note(&app).unwrap(), "theme is set in config.local.toml");
+    }
+
+    /// Opens the keys screen on the grid's first action, the quick prompt.
+    fn keys_screen() -> App {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        for _ in 0..3 {
+            app.on_key(k(K::Char('j')));
+        }
+        app.on_key(k(K::Enter));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Keys(_))));
+        app
+    }
+
+    #[test]
+    fn a_key_is_bound_from_the_keys_screen_and_saved() {
+        let mut app = keys_screen();
+        app.on_key(k(K::Enter));
+        let actions = app.on_key(k(K::Char('g')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Keys(_))));
+        assert_eq!(
+            writes(&actions),
+            [&ConfigEdit::Keys {
+                table: "grid",
+                bindings: vec![
+                    ("g".into(), "quick_prompt".into()),
+                    ("p".into(), "none".into())
+                ],
+            }]
+        );
+        assert_eq!(top_note(&app).unwrap(), "g: new task: prompt, CLI, model");
+        app.on_key(k(K::Backspace));
+        assert!(
+            app.keymap
+                .keys(Context::Grid, KeyAction::QuickPrompt)
+                .is_empty()
+        );
+        let actions = app.on_key(k(K::Char('R')));
+        assert_eq!(
+            app.keymap
+                .key(Context::Grid, KeyAction::QuickPrompt)
+                .as_deref(),
+            Some("p")
+        );
+        assert_eq!(
+            writes(&actions),
+            [&ConfigEdit::Keys {
+                table: "grid",
+                bindings: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_key_another_action_has_is_swapped_only_when_asked() {
+        let mut app = keys_screen();
+        app.on_key(k(K::Enter));
+        assert!(app.on_key(k(K::Char('k'))).is_empty());
+        assert!(top_note(&app).unwrap().starts_with("k is \"card above\""));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(writes(&actions).len(), 1);
+        assert_eq!(
+            app.keymap
+                .key(Context::Grid, KeyAction::QuickPrompt)
+                .as_deref(),
+            Some("k")
+        );
+        assert_eq!(
+            app.keymap.key(Context::Grid, KeyAction::Up).as_deref(),
+            Some("p")
+        );
+
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Esc));
+        assert!(
+            matches!(app.overlays.last(), Some(Overlay::Keys(_))),
+            "Esc cancels"
+        );
+        assert_eq!(
+            app.keymap.key(Context::Grid, KeyAction::Down).as_deref(),
+            Some("j")
+        );
+    }
+
+    #[test]
+    fn keys_that_cannot_be_bound_are_refused_where_they_are_pressed() {
+        let mut app = keys_screen();
+        app.on_key(k(K::Enter));
+        assert!(app.on_key(ctrl('c')).is_empty());
+        assert!(top_note(&app).unwrap().starts_with("C-c always quits"));
+        assert!(matches!(app.overlays.last(), Some(Overlay::KeyCapture(_))));
+    }
+
+    #[test]
+    fn the_prefix_is_set_from_the_settings() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Enter));
+        assert!(app.on_key(k(K::Char('x'))).is_empty());
+        assert!(top_note(&app).unwrap().contains("would stop you typing it"));
+        let actions = app.on_key(ctrl(' '));
+        assert_eq!(app.keymap.prefix.to_string(), "C-Space");
+        assert_eq!(
+            writes(&actions),
+            [&ConfigEdit::Set {
+                key: "prefix",
+                value: "C-Space".into()
+            }]
+        );
+        assert!(matches!(app.overlays.last(), Some(Overlay::Settings(_))));
     }
 }

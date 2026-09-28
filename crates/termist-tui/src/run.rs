@@ -1,6 +1,7 @@
 use crate::app::{Action, App};
 use crate::browse::{self, Listing};
 use crate::keys::Keymap;
+use crate::settings;
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
@@ -15,8 +16,9 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use termist_core::config::Problem;
+use termist_core::config::{ColorDepth, Problem};
 use termist_core::{ClientRequest, ServerEvent, TermColors};
+use termist_platform::config_file;
 use termist_platform::framed::write_frame;
 use termist_platform::host_colors;
 use termist_platform::ipc::SendHalf;
@@ -98,12 +100,22 @@ fn daemon_cwd() -> PathBuf {
 /// The app with the user's settings; what could not be used is said once in the footer.
 fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
     let (config, mut problems) = termist_platform::config_file::load(paths);
-    let depth = termist_platform::term::resolve_depth(config.colors);
+    let detected = termist_platform::term::resolve_depth(ColorDepth::Auto);
+    let depth = match config.colors {
+        ColorDepth::Auto => detected,
+        depth => depth,
+    };
     let theme = Theme::named(&config.theme, depth);
     let (keymap, key_problems) = Keymap::from_config(&config.keys, &config.prefix);
     problems.extend(key_problems);
     let mut app = App::with_config(config, theme, keymap);
     app.config_path = Some(paths.config_path());
+    app.detected_depth = detected;
+    app.local_settings = std::fs::read_to_string(paths.config_local_path())
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
     app.message = startup_message(&problems, &app.theme);
     if app.message.is_none() {
         app.message = tmux_notice(paths, &app.keymap, inside_tmux);
@@ -126,7 +138,7 @@ fn tmux_notice(paths: &Paths, keymap: &Keymap, inside_tmux: bool) -> Option<Stri
 }
 
 const TMUX_NOTICE: &str =
-    "Inside tmux, C-a is tmux's prefix too · prefix = \"C-Space\" in config.toml frees it";
+    "Inside tmux, C-a is tmux's prefix too · s → prefix changes it (C-Space is free)";
 
 fn startup_message(problems: &[Problem], theme: &Theme) -> Option<String> {
     match problems {
@@ -154,9 +166,6 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     write_frame(&mut writer, &ClientRequest::ListState).await?;
     let inside_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
     let mut app = app_from_config(&paths, inside_tmux);
-    if let Some(colors) = app.theme.agent_colors {
-        write_frame(&mut writer, &ClientRequest::SetColors(colors)).await?;
-    }
 
     let (server_tx, mut server_rx) = unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
@@ -170,14 +179,14 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     // Query before the input thread exists: `event::read()` holds crossterm's global
     // event-reader lock, and a query that can't take it times out after 2 s.
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
-    // A theme that paints nothing shows agents in the host terminal's own colours:
-    // tell them what those are (a dark grey stays the answer if the host says nothing).
-    if app.theme.agent_colors.is_none()
-        && let Some((fg, bg)) = host_colors::query(Duration::from_millis(150))
-    {
-        let colors = TermColors { fg, bg, ansi: None };
-        write_frame(&mut writer, &ClientRequest::SetColors(colors)).await?;
-    }
+    // A theme that paints nothing shows agents in the host terminal's own colours;
+    // they are asked for once, here, in case the settings switch to such a theme.
+    app.host_colors = host_colors::query(Duration::from_millis(150)).map(|(fg, bg)| TermColors {
+        fg,
+        bg,
+        ansi: None,
+    });
+    write_frame(&mut writer, &ClientRequest::SetColors(app.agent_colors())).await?;
     let _ = execute!(stdout(), EnableBracketedPaste);
     if enhanced {
         let _ = execute!(
@@ -223,6 +232,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                     vec![]
                 }
             };
+            let actions = save_settings(&paths, &mut app, actions);
             if perform(actions, &mut writer, &listing_tx).await? {
                 return Ok(());
             }
@@ -254,6 +264,26 @@ fn set_panic_hook(enhanced: bool) {
     }));
 }
 
+/// Writes the settings changes among `actions` to config.toml and returns the rest.
+/// A change that cannot be saved still holds until termist quits, and says so.
+fn save_settings(paths: &Paths, app: &mut App, actions: Vec<Action>) -> Vec<Action> {
+    let (edits, rest): (Vec<_>, Vec<_>) = actions
+        .into_iter()
+        .partition(|a| matches!(a, Action::WriteConfig(_)));
+    for edit in edits {
+        let Action::WriteConfig(edit) = edit else {
+            continue;
+        };
+        let text = std::fs::read_to_string(paths.config_path()).unwrap_or_default();
+        let saved = settings::apply(&text, &edit)
+            .and_then(|new| config_file::write(paths, &new).map_err(|e| e.to_string()));
+        if let Err(e) = saved {
+            app.message = Some(format!("not saved: {e}"));
+        }
+    }
+    rest
+}
+
 /// A folder listing, for the folder it lists.
 type Listed = (PathBuf, Result<Listing, String>);
 
@@ -276,6 +306,7 @@ async fn perform(
                 });
             }
             Action::Quit => return Ok(true),
+            Action::WriteConfig(_) => {} // saved by `save_settings`
         }
     }
     Ok(false)
@@ -389,5 +420,33 @@ mod tests {
         assert_eq!(second, None, "once");
         assert_eq!(with_other_prefix, None);
         assert_eq!(outside, None);
+    }
+
+    #[test]
+    fn settings_are_saved_into_the_users_own_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "# mine\ntheme = \"uskudar\" # dark\n").unwrap();
+        let mut app = App::new();
+        let edit = |key, value: &str| {
+            Action::WriteConfig(settings::ConfigEdit::Set {
+                key,
+                value: value.into(),
+            })
+        };
+        let rest = save_settings(&paths, &mut app, vec![edit("theme", "moda"), Action::Quit]);
+        assert_eq!(rest, vec![Action::Quit]);
+        let text = std::fs::read_to_string(paths.config_path()).unwrap();
+        assert_eq!(text, "# mine\ntheme = \"moda\" # dark\n");
+        assert_eq!(app.message, None);
+
+        std::fs::write(paths.config_path(), "theme = \"moda\n").unwrap();
+        save_settings(&paths, &mut app, vec![edit("theme", "uskudar")]);
+        assert!(
+            app.message
+                .unwrap()
+                .starts_with("not saved: config.toml is not valid TOML")
+        );
     }
 }
