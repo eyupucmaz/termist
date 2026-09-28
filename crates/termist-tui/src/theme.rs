@@ -582,7 +582,10 @@ mod tests {
         let err = Spec::parse("name = \"x\"\n").unwrap_err();
         assert!(err.contains("status.fresh"), "{err}");
         // A Windows checkout may have CRLF line ends.
-        let src = SOURCES[0].1.replace("\r\n", "\n").replace("\"#ffffff\",\n]", "]");
+        let src = SOURCES[0]
+            .1
+            .replace("\r\n", "\n")
+            .replace("\"#ffffff\",\n]", "]");
         let err = Spec::parse(&src).unwrap_err();
         assert!(err.contains("16 colours"), "{err}");
     }
