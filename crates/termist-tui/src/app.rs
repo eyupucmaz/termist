@@ -75,6 +75,8 @@ pub struct App {
     /// A project asked to be opened (or a folder added); switched to when it arrives.
     project_pending: Option<ProjectPending>,
     pub config: Config,
+    /// Where config.toml is, for the help screen; `None` in tests.
+    pub config_path: Option<PathBuf>,
     pub theme: Theme,
     pub keymap: Keymap,
 }
@@ -132,6 +134,7 @@ impl App {
             resume_pending: None,
             project_pending: None,
             config,
+            config_path: None,
             theme,
             keymap,
         }
@@ -463,6 +466,10 @@ impl App {
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
+            Some(Overlay::Help { .. }) => {
+                self.help_key(key);
+                vec![]
+            }
             None => vec![],
         }
     }
@@ -1140,8 +1147,27 @@ impl App {
             KeyAction::Down => return self.navigate('j'),
             KeyAction::Up => return self.navigate('k'),
             KeyAction::Right => return self.navigate('l'),
+            KeyAction::Help => self.overlays.push(Overlay::Help { scroll: 0 }),
         }
         vec![]
+    }
+
+    /// The help: j/k and the arrows scroll (the view stops at its last line), Esc, `?`
+    /// and `q` close it.
+    fn help_key(&mut self, key: KeyEvent) {
+        let Some(Overlay::Help { scroll }) = self.overlays.last_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?' | 'q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::PageDown | KeyCode::Char(' ') => *scroll += 10,
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            _ => {}
+        }
     }
 
     /// Enter in the archive view: the card comes back to the grid and, if it is not

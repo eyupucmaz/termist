@@ -1,13 +1,14 @@
 //! Drawing the overlay stack: each overlay is a box centred over the body, drawn
 //! bottom to top, so a picker opened from the quick prompt sits on top of it.
 use crate::app::App;
+use crate::keys::{self, Action as KeyAction, Context};
 use crate::overlay::{BrowseEntry, Overlay, QuickPrompt};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::status_style;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -315,6 +316,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::Help { scroll } => {
+            let lines = help_lines(app);
+            let area = centered(body, 78, body.height);
+            let room = area.height.saturating_sub(2) as usize;
+            let first = (*scroll).min(lines.len().saturating_sub(room));
+            let shown = lines.into_iter().skip(first).take(room).collect();
+            boxed(f, t, area, "help", shown);
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -361,5 +370,99 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::OpenProject(_) => {
             "type to filter · Enter open · → in · ← up · Tab open this folder · Esc close"
         }
+        Overlay::Help { .. } => "j/k scroll · Esc close",
     }
+}
+
+/// Every key: the grid's and focus mode's as bound now, then the fixed ones.
+pub fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let t = &app.theme;
+    let heading =
+        |text: String| Line::from(Span::styled(text, t.accent.add_modifier(Modifier::BOLD)));
+    let row = |key: String, what: &str| {
+        Line::from(vec![
+            Span::raw(format!("  {key:<12} ")),
+            Span::styled(what.to_string(), t.dim),
+        ])
+    };
+    let mut lines = vec![Line::from(format!(
+        "termist {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        app.config_path
+            .as_ref()
+            .map_or("default settings".to_string(), |p| p.display().to_string())
+    ))];
+    let prefix = app.keymap.prefix.to_string();
+    for (context, title) in [
+        (Context::Grid, "Grid".to_string()),
+        (Context::Focus, format!("Focus mode, after {prefix}")),
+    ] {
+        lines.push(Line::default());
+        lines.push(heading(title));
+        let mut tabs_done = false;
+        for action in keys::actions(context) {
+            let keys = app.keymap.keys(context, *action);
+            if let KeyAction::Tab(_) = action {
+                // Nine tab keys read as one line.
+                if !tabs_done {
+                    tabs_done = true;
+                    let tabs: Vec<String> = (1..=9)
+                        .filter_map(|n| app.keymap.key(context, KeyAction::Tab(n)))
+                        .collect();
+                    let digits: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
+                    if tabs == digits {
+                        lines.push(row("1-9".into(), "project tab 1 to 9"));
+                    } else if !tabs.is_empty() {
+                        lines.push(row(tabs.join(" "), "project tab 1 to 9"));
+                    }
+                }
+                continue;
+            }
+            if keys.is_empty() {
+                continue;
+            }
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            lines.push(row(keys.join(" "), action.label()));
+        }
+        if context == Context::Focus {
+            lines.push(row(
+                format!("{prefix} {prefix}"),
+                "send the prefix to the session",
+            ));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(heading("Anywhere".into()));
+    lines.push(row("C-q".into(), "out of anything, back to the grid"));
+    lines.push(row("C-c".into(), "quit"));
+    lines.push(Line::default());
+    lines.push(heading("Text boxes".into()));
+    for (key, what) in [
+        ("Enter", "send"),
+        ("Alt+Enter", "new line (also Shift+Enter, C-j)"),
+        ("↑ ↓", "earlier prompts, or lines"),
+        ("C-a C-e", "start, end of the line"),
+        ("C-u C-k", "delete to the start, to the end"),
+        ("Alt+← →", "a word back, forward"),
+        ("Esc", "close"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("Lists".into()));
+    for (key, what) in [
+        ("letters", "filter, where the list can be typed into"),
+        ("↑ ↓ C-n C-p", "choose"),
+        ("j k", "choose, where the list cannot be typed into"),
+        ("Enter", "pick"),
+        ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Grid and focus keys change in config.toml: [keys.grid] and [keys.focus]",
+        t.dim,
+    )));
+    lines
 }

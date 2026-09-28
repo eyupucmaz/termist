@@ -33,6 +33,8 @@ pub enum Overlay {
     Palette(ListPicker<SessionId>),
     /// `o`: the known projects, then a folder browser.
     OpenProject(OpenProject),
+    /// `?` and `C-a ?`: every key, scrolled down `scroll` lines.
+    Help { scroll: usize },
 }
 
 impl Overlay {

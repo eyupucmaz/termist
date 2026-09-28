@@ -103,6 +103,7 @@ fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
     let (keymap, key_problems) = Keymap::from_config(&config.keys, &config.prefix);
     problems.extend(key_problems);
     let mut app = App::with_config(config, theme, keymap);
+    app.config_path = Some(paths.config_path());
     app.message = startup_message(&problems, &app.theme);
     if app.message.is_none() {
         app.message = tmux_notice(paths, &app.keymap, inside_tmux);

@@ -43,6 +43,7 @@ pub enum Action {
     Down,
     Up,
     Right,
+    Help,
 }
 
 use Action::*;
@@ -80,6 +81,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     Archive,
     ArchiveView,
     Kill,
+    Help,
     Quit,
 ];
 
@@ -96,6 +98,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     Down,
     Up,
     Right,
+    Help,
 ];
 
 impl Action {
@@ -127,6 +130,7 @@ impl Action {
             Down => "down",
             Up => "up",
             Right => "right",
+            Help => "help",
         }
     }
 
@@ -163,6 +167,7 @@ impl Action {
             NextAttention => "next●",
             PrevAttention => "previous●",
             Left | Down | Up | Right => "move",
+            Help => "help",
         }
     }
 
@@ -194,6 +199,7 @@ impl Action {
             Down => "card below",
             Up => "card above",
             Right => "card to the right",
+            Help => "this help",
         }
     }
 }
@@ -388,6 +394,7 @@ impl Keymap {
             ("a", Archive),
             ("A", ArchiveView),
             ("d", Kill),
+            ("?", Help),
             ("q", Quit),
         ]
         .into_iter()
@@ -409,6 +416,7 @@ impl Keymap {
             ("j", Down),
             ("k", Up),
             ("l", Right),
+            ("?", Help),
         ]
         .into_iter()
         .map(|(key, action)| (k(key), action))

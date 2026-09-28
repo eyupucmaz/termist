@@ -436,6 +436,7 @@ fn grid_hint(keymap: &Keymap) -> String {
         keymap,
         Context::Grid,
         &[
+            Help,
             QuickPrompt,
             FollowUp,
             Palette,
@@ -1092,7 +1093,10 @@ mod tests {
         let (keymap, problems) = Keymap::from_config(&keys, "C-Space");
         assert!(problems.is_empty());
         let grid = grid_hint(&keymap);
-        assert!(grid.starts_with("g new task · Space follow-up"), "{grid}");
+        assert!(
+            grid.starts_with("? help · g new task · Space follow-up"),
+            "{grid}"
+        );
         assert!(!grid.contains("p new task"));
         assert_eq!(
             archive_hint(&keymap),
@@ -1122,5 +1126,61 @@ mod tests {
             row(&t, 1),
             "No sessions yet.  g: new task  ·  n: agent  ·  t: shell"
         );
+    }
+
+    #[test]
+    fn the_help_lists_every_key() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('?')));
+        insta::assert_snapshot!(render(&mut app, 80, 40).backend());
+    }
+
+    #[test]
+    fn the_help_shows_a_rebound_key_and_scrolls_to_its_end_only() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let keys = termist_core::config::KeysConfig {
+            grid: [("g", "quick_prompt"), ("p", "none")]
+                .into_iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let mut app = fixture();
+        app.keymap = Keymap::from_config(&keys, "C-Space").0;
+        app.on_key(key(K::Char('?')));
+        let text = screen_text(&render(&mut app, 80, 60));
+        assert!(
+            text.contains("g            new task: prompt, CLI, model"),
+            "{text}"
+        );
+        assert!(text.contains("Focus mode, after C-Space"));
+        assert!(text.contains("C-Space C-Space"));
+        for _ in 0..200 {
+            app.on_key(key(K::Char('j')));
+        }
+        let text = screen_text(&render(&mut app, 80, 16));
+        assert!(
+            text.contains("[keys.grid] and [keys.focus]"),
+            "the last line is in view"
+        );
+        app.on_key(key(K::Esc));
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn the_help_opens_from_focus_mode_and_closes_back_to_it() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('?')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(crate::overlay::Overlay::Help { .. })
+        ));
+        app.on_key(key(K::Char('?')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::Focus);
     }
 }
