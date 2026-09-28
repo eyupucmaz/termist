@@ -30,6 +30,11 @@ Both put `termist` in `~/.cargo/bin`. Prebuilt archives for every platform are o
 [releases page](https://github.com/eyupucmaz/termist/releases). From source:
 `cargo install --git https://github.com/eyupucmaz/termist termist`.
 
+**Updating.** `termist update` installs the newest release where the installer put termist
+(`termist update --check` only says whether there is one). Versions without it (0.1.0-alpha.1)
+update by running the install line above again. Either way the daemon keeps running the old version,
+with your sessions: when they can stop, run `termist kill`, then `termist` starts the new one.
+
 termist runs the agent CLIs you already have: install at least one of
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or
 [OpenCode](https://opencode.ai). It never writes into your repositories or your agents' own config.

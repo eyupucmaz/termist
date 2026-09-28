@@ -1,3 +1,5 @@
+mod update;
+
 use clap::{Parser, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
@@ -26,6 +28,12 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+    /// Install the newest release over this one (`--check` only says whether there is one)
+    #[command(visible_alias = "upgrade")]
+    Update {
+        #[arg(long)]
+        check: bool,
     },
     /// Hear the sounds: `termist sound test vapur` (waiting) or `marti` (done)
     Sound {
@@ -88,6 +96,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(Cmd::Update { check }) = &cli.cmd {
+        return update::run(*check);
+    }
     if let Some(Cmd::Config { cmd }) = &cli.cmd {
         return config(&paths, cmd);
     }
@@ -107,7 +118,9 @@ fn main() -> ExitCode {
                 termist_daemon::server::run(paths, DaemonConfig::from_env()).await
             }
             Some(Cmd::Kill) => kill(&paths).await,
-            Some(Cmd::Hook { .. } | Cmd::Config { .. } | Cmd::Sound { .. }) => {
+            Some(
+                Cmd::Hook { .. } | Cmd::Config { .. } | Cmd::Sound { .. } | Cmd::Update { .. },
+            ) => {
                 unreachable!("handled above")
             }
         }

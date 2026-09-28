@@ -26,6 +26,9 @@
   `termist sound test vapur|marti` plays one.
 - **Desktop notifications** when the terminal is not in front, asked of the terminal itself (Ghostty,
   WezTerm, kitty, iTerm2 and others; through tmux too).
+- **`termist update`** (also `termist upgrade`) installs the newest release, pre-releases included,
+  through the release's own installer and into the same place; `--check` only looks. A termist that
+  the installer did not put there (`cargo install`, a source build) is left alone.
 - After the prefix, `n` and `t` start an agent or a shell, as in the grid.
 - Inside tmux, termist says once that `C-a` is tmux's prefix too.
 

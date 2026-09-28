@@ -129,3 +129,73 @@ fn sound_test_writes_the_sound_and_names_it() {
     let out = termist(tmp.path(), &["sound", "test", "horn"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+/// A stand-in `curl` on PATH: GitHub's API names v9.9.9, and the release's installer
+/// only says where it was told to install.
+#[cfg(unix)]
+fn fake_github(dir: &std::path::Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let curl = dir.join("curl");
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\ncase \"$*\" in\n\
+         *api.github.com*) echo '[{\"tag_name\":\"v9.9.9\",\"prerelease\":true}]' ;;\n\
+         *v9.9.9/termist-installer.sh*) echo 'echo \"installer into $TERMIST_INSTALL_DIR path $TERMIST_NO_MODIFY_PATH\"' ;;\n\
+         *) exit 22 ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = std::ffi::OsString::from(dir);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn update_installs_the_newest_release_where_the_installer_put_termist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = fake_github(tmp.path());
+    let config = tmp.path().join("xdg");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termist"))
+            .args(args)
+            .env("PATH", &path)
+            .env("XDG_CONFIG_HOME", &config)
+            .env_remove("GITHUB_TOKEN")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["update", "--check"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("termist 9.9.9 is out"));
+
+    // No install receipt: this termist was not installed by the installer.
+    let out = run(&["update"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("was not put there by termist's installer")
+    );
+
+    // A receipt for exactly this binary: the release's installer runs, into its dir.
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_termist"));
+    let dir = exe.parent().unwrap();
+    std::fs::create_dir_all(config.join("termist")).unwrap();
+    std::fs::write(
+        config.join("termist").join("termist-receipt.json"),
+        format!(
+            r#"{{"install_layout":"flat","install_prefix":"{}","version":"0.1.0"}}"#,
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let out = run(&["upgrade"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout.contains("updating"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("installer into {} path 1", dir.display())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("termist kill"), "{stdout}");
+}

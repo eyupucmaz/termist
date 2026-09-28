@@ -1921,6 +1921,7 @@ dependencies = [
  "clap",
  "interprocess",
  "portable-pty",
+ "serde_json",
  "tempfile",
  "termist-core",
  "termist-daemon",
