@@ -3,3 +3,5 @@
 assets/** text eol=lf
 # Sounds are binary: never touched for line ends.
 assets/sounds/** binary
+# The README's banners are images.
+assets/readme/** binary
