@@ -8,7 +8,6 @@ use crate::overlay::{
 };
 use crate::scene_view::{self, ShowKind, Showing};
 use crate::settings::ConfigEdit;
-use crate::sound::Sound;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -62,7 +61,6 @@ pub enum Action {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
-    pub sound: Sound,
     pub text: String,
 }
 
@@ -230,13 +228,8 @@ impl App {
             .iter()
             .find(|p| p.id == s.project)
             .map_or("", |p| p.name.as_str());
-        let (sound, what) = if waiting {
-            (Sound::Vapur, "waits for you")
-        } else {
-            (Sound::Marti, "is done")
-        };
+        let what = if waiting { "waits for you" } else { "is done" };
         Some(Action::Alert(Alert {
-            sound,
             text: format!("{} · {project} {what}", s.display_name()),
         }))
     }
@@ -4255,7 +4248,6 @@ mod tests {
         assert_eq!(
             alerts(&waiting),
             [&Alert {
-                sound: Sound::Vapur,
                 text: format!("{} · api waits for you", s[1].display_name()),
             }]
         );
@@ -4264,7 +4256,6 @@ mod tests {
             "once"
         );
         let done = update(&mut app, &s[1], AgentStatus::Unseen);
-        assert_eq!(alerts(&done)[0].sound, Sound::Marti);
         assert!(alerts(&done)[0].text.ends_with("is done"));
         assert!(alerts(&update(&mut app, &s[1], AgentStatus::Running)).is_empty());
     }
@@ -4332,7 +4323,7 @@ mod tests {
             [
                 ConfigEdit::Set {
                     key: "notify.sounds",
-                    value: "system".into()
+                    value: "istanbul".into()
                 },
                 ConfigEdit::SetBool {
                     key: "notify.desktop",
@@ -4352,7 +4343,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(app.config.notify.sounds, Sounds::System);
+        assert_eq!(app.config.notify.sounds, Sounds::Istanbul);
         assert!(!app.config.animations);
         app.local_settings = vec!["scenes.idle_minutes".into()];
         app.on_key(k(K::Char('k')));

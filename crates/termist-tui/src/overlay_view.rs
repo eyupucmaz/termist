@@ -388,7 +388,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
                         SettingRow::Sounds => {
                             let sounds = match app.config.notify.sounds {
-                                Sounds::Istanbul => "istanbul (vapur waits, martı done)",
+                                Sounds::Istanbul => "istanbul (a martı)",
                                 Sounds::System => "the system's",
                                 Sounds::Bell => "the terminal bell",
                                 Sounds::Off => "off",

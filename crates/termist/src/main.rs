@@ -35,7 +35,7 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// Hear the sounds: `termist sound test vapur` (waiting) or `marti` (done)
+    /// Hear the sound: `termist sound test` plays the martı
     Sound {
         #[command(subcommand)]
         cmd: SoundCmd,
@@ -51,11 +51,8 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SoundCmd {
-    /// Play a sound as termist would, and print where its file is
-    Test {
-        #[arg(default_value = "vapur")]
-        name: String,
-    },
+    /// Play the martı as termist would, and print where its file is
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -103,10 +100,10 @@ fn main() -> ExitCode {
         return config(&paths, cmd);
     }
     if let Some(Cmd::Sound {
-        cmd: SoundCmd::Test { name },
+        cmd: SoundCmd::Test,
     }) = &cli.cmd
     {
-        return sound_test(&paths, name);
+        return sound_test(&paths);
     }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let tui = cli.cmd.is_none();
@@ -191,13 +188,8 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn sound_test(paths: &Paths, name: &str) -> ExitCode {
-    use termist_tui::sound::{self, Sound};
-    let Some(which) = Sound::from_name(name) else {
-        eprintln!("termist: no sound {name:?}; sounds: vapur, marti");
-        return ExitCode::FAILURE;
-    };
-    match sound::file(&paths.data_dir.join("sounds"), which) {
+fn sound_test(paths: &Paths) -> ExitCode {
+    match termist_tui::sound::file(&paths.data_dir.join("sounds")) {
         Ok(file) => {
             println!("{}", file.display());
             let (tx, rx) = std::sync::mpsc::channel();

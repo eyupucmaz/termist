@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Sounds are off unless you turn them on** (`notify.sounds`, or `s`). A new install stays quiet; a
+  `config.toml` that already names a sound keeps it.
+- **One sound, a real martı.** The `istanbul` sound is now a recorded seagull, played both when an
+  agent waits for you and when one is done. The ferry's horn is gone, and `termist sound test` takes no
+  name.
+
 ## 0.1.0-beta.1 - 2026-09-28
 
 termist gets its look and its voice: themes, Istanbul scenes, sounds and notifications, settings

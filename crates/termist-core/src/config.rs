@@ -179,7 +179,7 @@ impl Default for Config {
             editor: None,
             scenes: ScenesConfig::default(),
             notify: NotifyConfig {
-                sounds: Sounds::Istanbul,
+                sounds: Sounds::Off,
                 desktop: true,
             },
             worktrees: WorktreesConfig::default(),
@@ -533,7 +533,7 @@ idle_minutes = 10               # 0 = off
 pool = ["galata", "kiz-kulesi", "ayasofya", "kopru", "vapur", "yerebatan"]
 
 [notify]
-sounds = "istanbul"             # istanbul | system | bell | off
+sounds = "off"                  # off | istanbul (a martı) | system | bell
 desktop = true
 
 [worktrees]
@@ -571,7 +571,7 @@ editor = "zed"
 idle_minutes = 0
 pool = ["galata", "vapur"]
 [notify]
-sounds = "off"
+sounds = "istanbul"
 [agents]
 default = "codex"
 [keys.grid]
@@ -591,7 +591,7 @@ default = "codex"
         assert_eq!(c.scenes.idle_minutes, 0);
         assert_eq!(c.scenes.pool, ["galata", "vapur"]);
         assert!(c.scenes.splash, "untouched keys keep their default");
-        assert_eq!(c.notify.sounds, Sounds::Off);
+        assert_eq!(c.notify.sounds, Sounds::Istanbul);
         assert_eq!(c.agents.default, Harness::Codex);
         assert_eq!(c.keys.grid["g"], "quick_prompt");
         assert_eq!(c.keys.grid["p"], "none");

@@ -1,3 +1,5 @@
 # Scene art is laid out by column, and tests read the theme files as text: keep every
 # asset byte for byte, LF, on every OS.
 assets/** text eol=lf
+# Sounds are binary: never touched for line ends.
+assets/sounds/** binary

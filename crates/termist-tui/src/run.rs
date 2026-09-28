@@ -2,7 +2,6 @@ use crate::app::{Action, App};
 use crate::browse::{self, Listing};
 use crate::keys::Keymap;
 use crate::settings;
-use crate::sound::Sound;
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
@@ -379,7 +378,7 @@ impl Alerts {
             {
                 self.last_sound = Some(now);
                 let bell = self.bell.clone();
-                sound(paths, app.config.notify.sounds, alert.sound, move || {
+                sound(paths, app.config.notify.sounds, move || {
                     let _ = bell.send(());
                 });
             }
@@ -395,13 +394,13 @@ impl Alerts {
     }
 }
 
-/// Plays `which` as the settings say: termist's own, the system's, or the bell.
+/// Plays a sound as the settings say: termist's martı, the system's, or the bell.
 /// `failed` asks for the bell later, if a player starts but cannot play.
-fn sound(paths: &Paths, setting: Sounds, which: Sound, failed: impl FnOnce() + Send + 'static) {
+fn sound(paths: &Paths, setting: Sounds, failed: impl FnOnce() + Send + 'static) {
     let played = match setting {
         Sounds::Off => return,
         Sounds::Bell => false,
-        Sounds::Istanbul => crate::sound::file(&paths.data_dir.join("sounds"), which)
+        Sounds::Istanbul => crate::sound::file(&paths.data_dir.join("sounds"))
             .is_ok_and(|file| notify::play(&file, failed)),
         Sounds::System => notify::system_sound().is_some_and(|file| notify::play(&file, failed)),
     };
