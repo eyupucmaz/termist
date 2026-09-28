@@ -2,6 +2,7 @@
 pub mod client;
 pub mod config_file;
 pub mod framed;
+pub mod host_colors;
 pub mod ipc;
 pub mod paths;
 pub mod term;

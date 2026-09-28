@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 use termist_core::config::Problem;
-use termist_core::{ClientRequest, ServerEvent};
+use termist_core::{ClientRequest, ServerEvent, TermColors};
 use termist_platform::framed::write_frame;
+use termist_platform::host_colors;
 use termist_platform::ipc::SendHalf;
 use termist_platform::{Client, Paths};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -144,6 +145,14 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     // Query before the input thread exists: `event::read()` holds crossterm's global
     // event-reader lock, and a query that can't take it times out after 2 s.
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    // A theme that paints nothing shows agents in the host terminal's own colours:
+    // tell them what those are (a dark grey stays the answer if the host says nothing).
+    if app.theme.agent_colors.is_none()
+        && let Some((fg, bg)) = host_colors::query(Duration::from_millis(150))
+    {
+        let colors = TermColors { fg, bg, ansi: None };
+        write_frame(&mut writer, &ClientRequest::SetColors(colors)).await?;
+    }
     let _ = execute!(stdout(), EnableBracketedPaste);
     if enhanced {
         let _ = execute!(
