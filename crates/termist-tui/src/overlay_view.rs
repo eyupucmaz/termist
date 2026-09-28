@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use termist_core::config::ColorDepth;
+use termist_core::config::{ColorDepth, PanePosition};
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -360,6 +360,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             "prefix",
                             format!("{}{}", app.keymap.prefix, local("prefix")),
                         ),
+                        SettingRow::Pane => {
+                            let place = match app.config.pane_position {
+                                PanePosition::Auto => "auto (right from 180 columns)",
+                                PanePosition::Bottom => "under the cards",
+                                PanePosition::Right => "right of the cards",
+                            };
+                            ("pane", format!("‹ {place} ›{}", local("pane_position")))
+                        }
                         SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
                     };
                     Line::from(Span::styled(

@@ -57,13 +57,15 @@ pub enum SettingRow {
     Theme,
     Colors,
     Prefix,
+    Pane,
     Keys,
 }
 
-pub const SETTING_ROWS: [SettingRow; 4] = [
+pub const SETTING_ROWS: [SettingRow; 5] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
+    SettingRow::Pane,
     SettingRow::Keys,
 ];
 

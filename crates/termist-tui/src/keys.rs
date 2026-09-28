@@ -45,6 +45,8 @@ pub enum Action {
     Right,
     Help,
     Settings,
+    /// Focus mode: the pane under the cards or right of them, until termist quits.
+    TogglePane,
 }
 
 use Action::*;
@@ -100,6 +102,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     Down,
     Up,
     Right,
+    TogglePane,
     Help,
 ];
 
@@ -134,6 +137,7 @@ impl Action {
             Right => "right",
             Help => "help",
             Settings => "settings",
+            TogglePane => "toggle_pane",
         }
     }
 
@@ -172,6 +176,7 @@ impl Action {
             Left | Down | Up | Right => "move",
             Help => "help",
             Settings => "settings",
+            TogglePane => "pane",
         }
     }
 
@@ -204,7 +209,8 @@ impl Action {
             Up => "card above",
             Right => "card to the right",
             Help => "this help",
-            Settings => "settings: theme, colours, prefix, keys",
+            Settings => "settings: theme, colours, prefix, pane, keys",
+            TogglePane => "pane under or right of the cards, until you quit",
         }
     }
 }
@@ -422,6 +428,7 @@ impl Keymap {
             ("j", Down),
             ("k", Up),
             ("l", Right),
+            ("z", TogglePane),
             ("?", Help),
         ]
         .into_iter()

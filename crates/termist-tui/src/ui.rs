@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use termist_core::config::PanePosition;
 use termist_core::{AgentStatus, Snapshot, cell_flags};
 
 const CARD_W: u16 = 24;
@@ -18,6 +19,8 @@ pub struct Areas {
     pub header: Rect,
     /// Everything between the header and the footer: cards and pane.
     pub body: Rect,
+    /// Where cards and their "more" lines go: above the pane, or left of it.
+    pub cards_zone: Rect,
     pub cards: Rect,
     pub pane: Rect,
     pub pane_inner: Rect,
@@ -28,9 +31,14 @@ pub struct Areas {
     /// Not every card fits: the line above and the line below the cards count the
     /// hidden ones.
     pub scroll_lines: bool,
+    /// The pane is right of the cards, not under them.
+    pub pane_right: bool,
 }
 
-pub fn layout(area: Rect, session_count: usize) -> Areas {
+/// From this many columns up, `auto` puts the pane right of the cards.
+pub const PANE_RIGHT_FROM: u16 = 180;
+
+pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas {
     let header = Rect {
         height: area.height.min(1),
         ..area
@@ -46,32 +54,59 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
         height: area.height.saturating_sub(header.height + footer_h),
         ..area
     };
-    let cards_per_row = (body.width / CARD_W).max(1) as usize;
-    let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
-    let room = body.height / 2;
-    let cards_h = (card_rows * CARD_H).min(room);
-    let scroll_lines = card_rows * CARD_H > room;
-    let (cards, visible_rows) = if scroll_lines {
-        let rows = (cards_h.saturating_sub(2) / CARD_H).max(1);
-        let cards = Rect {
-            y: body.y + 1,
-            height: (rows * CARD_H).min(cards_h.saturating_sub(1)),
+    let pane_right = match position {
+        PanePosition::Right => true,
+        PanePosition::Bottom => false,
+        PanePosition::Auto => area.width >= PANE_RIGHT_FROM,
+    };
+    let (cards_zone, cards_per_row) = if pane_right {
+        // At most two fifths of the width, and always one column of cards.
+        let per_row = (body.width * 2 / 5 / CARD_W).max(1);
+        let zone = Rect {
+            width: (per_row * CARD_W).min(body.width),
             ..body
+        };
+        (zone, per_row as usize)
+    } else {
+        let per_row = (body.width / CARD_W).max(1) as usize;
+        let card_rows = session_count.max(1).div_ceil(per_row) as u16;
+        let zone = Rect {
+            height: (card_rows * CARD_H).min(body.height / 2),
+            ..body
+        };
+        (zone, per_row)
+    };
+    let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
+    let scroll_lines = card_rows * CARD_H > cards_zone.height;
+    let (cards, visible_rows) = if scroll_lines {
+        let rows = (cards_zone.height.saturating_sub(2) / CARD_H).max(1);
+        let cards = Rect {
+            y: cards_zone.y + 1,
+            height: (rows * CARD_H).min(cards_zone.height.saturating_sub(1)),
+            ..cards_zone
         };
         (cards, rows)
     } else {
         (
             Rect {
-                height: cards_h,
-                ..body
+                height: card_rows * CARD_H,
+                ..cards_zone
             },
             card_rows,
         )
     };
-    let pane = Rect {
-        y: body.y + cards_h,
-        height: body.height - cards_h,
-        ..body
+    let pane = if pane_right {
+        Rect {
+            x: cards_zone.right(),
+            width: body.width - cards_zone.width,
+            ..body
+        }
+    } else {
+        Rect {
+            y: body.y + cards_zone.height,
+            height: body.height - cards_zone.height,
+            ..body
+        }
     };
     let pane_inner = Rect {
         x: pane.x + 1,
@@ -82,6 +117,7 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
     Areas {
         header,
         body,
+        cards_zone,
         cards,
         pane,
         pane_inner,
@@ -89,6 +125,7 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
         cards_per_row,
         card_rows: visible_rows as usize,
         scroll_lines,
+        pane_right,
     }
 }
 
@@ -169,7 +206,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                 (above, '↑', line(areas.cards.y.saturating_sub(1))),
                 (below, '↓', line(areas.cards.bottom())),
             ] {
-                if n > 0 && rect.y < areas.pane.y {
+                if n > 0 && rect.y >= areas.cards_zone.y && rect.y < areas.cards_zone.bottom() {
                     f.render_widget(
                         Paragraph::new(format!("{arrow} {n} more")).style(app.theme.dim),
                         rect,
@@ -512,7 +549,12 @@ mod tests {
 
     fn render(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        let areas = layout(Rect::new(0, 0, w, h), app.project_sessions().len());
+        let areas = layout(
+            Rect::new(0, 0, w, h),
+            app.project_sessions().len(),
+            app.pane_position(),
+        );
+        app.pane_right = areas.pane_right;
         app.set_card_window(areas.cards_per_row, areas.card_rows);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
@@ -688,9 +730,11 @@ mod tests {
         for (w, h) in [(20, 5), (1, 1), (0, 0), (200, 3)] {
             let mut app = fixture();
             let mut t = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
-            let areas = layout(Rect::new(0, 0, w, h), 2);
-            t.draw(|f| draw(f, &app, &areas)).unwrap();
-            app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
+            for position in PanePosition::ALL {
+                let areas = layout(Rect::new(0, 0, w, h), 2, position);
+                t.draw(|f| draw(f, &app, &areas)).unwrap();
+                app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
+            }
         }
     }
 
@@ -1044,7 +1088,7 @@ mod tests {
         });
         let t = render(&mut app, 60, 16);
         let buf = t.backend().buffer();
-        let areas = layout(Rect::new(0, 0, 60, 16), 2);
+        let areas = layout(Rect::new(0, 0, 60, 16), 2, PanePosition::Auto);
         let (x, y) = (areas.pane_inner.x, areas.pane_inner.y);
         assert_eq!(buf[(x, y)].symbol(), "r");
         assert_eq!(buf[(x, y)].fg, Color::Rgb(0xc0, 0x39, 0x2b), "Moda's red");
@@ -1190,12 +1234,86 @@ mod tests {
         let mut app = fixture();
         app.on_key(key(K::Char('s')));
         insta::assert_snapshot!("settings", render(&mut app, 80, 16).backend());
-        for _ in 0..3 {
+        for _ in 0..4 {
             app.on_key(key(K::Char('j')));
         }
         app.on_key(key(K::Enter));
         app.on_key(key(K::Enter));
         app.on_key(key(K::Char('g')));
         insta::assert_snapshot!("keys", render(&mut app, 80, 16).backend());
+    }
+
+    #[test]
+    fn auto_puts_the_pane_on_the_right_from_180_columns() {
+        let area = |w| Rect::new(0, 0, w, 40);
+        assert!(!layout(area(179), 3, PanePosition::Auto).pane_right);
+        let wide = layout(area(180), 3, PanePosition::Auto);
+        assert!(wide.pane_right);
+        assert_eq!(wide.cards_per_row, 3, "two fifths of 180 is three cards");
+        assert_eq!(wide.pane.x, 72);
+        assert_eq!(wide.pane.width, 108);
+        assert_eq!(wide.pane.height, 38, "the whole body");
+        assert!(layout(area(100), 3, PanePosition::Right).pane_right);
+        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_right);
+    }
+
+    #[test]
+    fn the_pane_on_the_right() {
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Right;
+        insta::assert_snapshot!(render(&mut app, 80, 12).backend());
+    }
+
+    #[test]
+    fn cards_that_do_not_fit_left_of_the_pane_are_counted() {
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Right;
+        let project = app.state.projects[0].id;
+        let mut state = app.state.clone();
+        for i in 3..=7 {
+            let mut s = state.sessions[1].clone();
+            s.id = SessionId::new();
+            s.project = project;
+            s.name = format!("shell-{i}");
+            state.sessions.push(s);
+        }
+        app.on_event(ServerEvent::State(state));
+        let t = render(&mut app, 80, 16);
+        let left = |y| {
+            row(&t, y)
+                .chars()
+                .take(24)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(left(14), "↓ 4 more", "under the three cards that fit");
+        assert_eq!(left(1), "", "none above");
+    }
+
+    #[test]
+    fn prefix_z_moves_the_pane_until_termist_quits() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        render(&mut app, 100, 20);
+        assert!(!app.pane_right);
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Right);
+        let t = render(&mut app, 100, 20);
+        assert!(
+            t.backend().buffer()[(24, 1)].symbol() == "┌",
+            "the pane starts right of the cards"
+        );
+        app.pane_right = true;
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Bottom);
+        assert_eq!(
+            app.config.pane_position,
+            PanePosition::Auto,
+            "the setting is untouched"
+        );
     }
 }

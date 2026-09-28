@@ -13,7 +13,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use termist_core::TermColors;
-use termist_core::config::{ColorDepth, Config, THEMES};
+use termist_core::config::{ColorDepth, Config, PanePosition, THEMES};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
@@ -91,6 +91,10 @@ pub struct App {
     pub host_colors: Option<TermColors>,
     /// The top-level settings config.local.toml sets: the settings screen leaves them.
     pub local_settings: Vec<String>,
+    /// `C-a z`: the pane's place until termist quits, over the configured one.
+    pub pane_override: Option<PanePosition>,
+    /// Where the last frame put the pane.
+    pub pane_right: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +156,8 @@ impl App {
             detected_depth: ColorDepth::TrueColor,
             host_colors: None,
             local_settings: Vec::new(),
+            pane_override: None,
+            pane_right: false,
         }
     }
 
@@ -1169,8 +1175,20 @@ impl App {
             KeyAction::Settings => self
                 .overlays
                 .push(Overlay::Settings(SettingsView::default())),
+            KeyAction::TogglePane => {
+                self.pane_override = Some(if self.pane_right {
+                    PanePosition::Bottom
+                } else {
+                    PanePosition::Right
+                });
+            }
         }
         vec![]
+    }
+
+    /// Where the pane goes: `C-a z`'s choice, else the configured one.
+    pub fn pane_position(&self) -> PanePosition {
+        self.pane_override.unwrap_or(self.config.pane_position)
     }
 
     /// The colours agents are told about: the theme's, or the host terminal's.
@@ -1237,6 +1255,7 @@ impl App {
         let key = match row {
             SettingRow::Theme => "theme",
             SettingRow::Colors => "colors",
+            SettingRow::Pane => "pane_position",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         if self.local_settings.iter().any(|k| k == key) {
@@ -1252,6 +1271,20 @@ impl App {
                     .unwrap_or(0);
                 self.config.theme = THEMES[next(THEMES.len(), at)].to_string();
                 self.config.theme.clone()
+            }
+            SettingRow::Pane => {
+                let all = PanePosition::ALL;
+                let at = all
+                    .iter()
+                    .position(|p| *p == self.config.pane_position)
+                    .unwrap_or(0);
+                self.config.pane_position = all[next(all.len(), at)];
+                self.pane_override = None;
+                if let Some(Overlay::Settings(v)) = self.overlays.last_mut() {
+                    v.note = None;
+                }
+                let value = self.config.pane_position.id().to_string();
+                return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
             }
             _ => {
                 let all = ColorDepth::ALL;
@@ -3608,7 +3641,7 @@ mod tests {
     fn keys_screen() -> App {
         let (mut app, _) = app();
         app.on_key(k(K::Char('s')));
-        for _ in 0..3 {
+        for _ in 0..4 {
             app.on_key(k(K::Char('j')));
         }
         app.on_key(k(K::Enter));
@@ -3715,5 +3748,25 @@ mod tests {
             }]
         );
         assert!(matches!(app.overlays.last(), Some(Overlay::Settings(_))));
+    }
+
+    #[test]
+    fn the_pane_setting_is_saved_and_ends_a_prefix_z_choice() {
+        let (mut app, _) = app();
+        app.pane_override = Some(PanePosition::Right);
+        app.on_key(k(K::Char('s')));
+        for _ in 0..3 {
+            app.on_key(k(K::Char('j')));
+        }
+        let actions = app.on_key(k(K::Right));
+        assert_eq!(app.config.pane_position, PanePosition::Bottom);
+        assert_eq!(app.pane_position(), PanePosition::Bottom);
+        assert_eq!(
+            writes(&actions),
+            [&ConfigEdit::Set {
+                key: "pane_position",
+                value: "bottom".into()
+            }]
+        );
     }
 }
