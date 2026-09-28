@@ -5,8 +5,12 @@ use toml_edit::{DocumentMut, Item, Table, value};
 /// One change to config.toml.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigEdit {
-    /// A top-level setting: `theme = "moda"`.
+    /// A text setting: `theme = "moda"`, or `notify.sounds = "bell"` in its table.
     Set { key: &'static str, value: String },
+    /// A true/false setting: `animations = false`, `scenes.splash = false`.
+    SetBool { key: &'static str, value: bool },
+    /// A number: `scenes.idle_minutes = 5`.
+    SetInt { key: &'static str, value: i64 },
     /// The whole of `[keys.<table>]`: the bindings that differ from the defaults.
     /// Empty removes the table.
     Keys {
@@ -28,17 +32,9 @@ pub fn apply(text: &str, edit: &ConfigEdit) -> Result<String, String> {
         .parse()
         .map_err(|_| "config.toml is not valid TOML; fix it first (termist config check)")?;
     match edit {
-        ConfigEdit::Set { key, value: v } => {
-            // A comment after the old value stays after the new one.
-            let decor = doc
-                .get(key)
-                .and_then(Item::as_value)
-                .map(|old| old.decor().clone());
-            doc[key] = value(v.as_str());
-            if let (Some(decor), Some(new)) = (decor, doc[key].as_value_mut()) {
-                *new.decor_mut() = decor;
-            }
-        }
+        ConfigEdit::Set { key, value: v } => set(&mut doc, key, value(v.as_str()))?,
+        ConfigEdit::SetBool { key, value: v } => set(&mut doc, key, value(*v))?,
+        ConfigEdit::SetInt { key, value: v } => set(&mut doc, key, value(*v))?,
         ConfigEdit::Keys { table, bindings } => {
             if !doc.contains_key("keys") {
                 let mut keys = Table::new();
@@ -86,6 +82,31 @@ pub fn apply(text: &str, edit: &ConfigEdit) -> Result<String, String> {
     } else {
         doc.to_string()
     })
+}
+
+/// Puts `new` at the dotted `path`, making its table if there is none. A comment after
+/// the old value stays after the new one.
+fn set(doc: &mut DocumentMut, path: &str, new: Item) -> Result<(), String> {
+    let mut parts: Vec<&str> = path.split('.').collect();
+    let key = parts.pop().ok_or("an empty setting name")?;
+    let mut table = doc.as_table_mut();
+    for part in parts {
+        if !table.contains_key(part) {
+            table.insert(part, Item::Table(Table::new()));
+        }
+        table = table[part]
+            .as_table_mut()
+            .ok_or(format!("{part} in config.toml is not a table"))?;
+    }
+    let decor = table
+        .get(key)
+        .and_then(Item::as_value)
+        .map(|old| old.decor().clone());
+    table[key] = new;
+    if let (Some(decor), Some(new)) = (decor, table[key].as_value_mut()) {
+        *new.decor_mut() = decor;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -170,5 +191,45 @@ mod tests {
     fn a_broken_file_is_not_touched() {
         let err = apply("theme = \"moda\n", &set("theme", "uskudar")).unwrap_err();
         assert!(err.contains("not valid TOML"), "{err}");
+    }
+
+    #[test]
+    fn settings_in_tables_and_of_every_kind_are_written() {
+        let text = "theme = \"moda\"\n\n[scenes]\n# mine\nsplash = true # at start\n";
+        let out = apply(
+            text,
+            &ConfigEdit::SetBool {
+                key: "scenes.splash",
+                value: false,
+            },
+        )
+        .unwrap();
+        let out = apply(
+            &out,
+            &ConfigEdit::SetInt {
+                key: "scenes.idle_minutes",
+                value: 5,
+            },
+        )
+        .unwrap();
+        let out = apply(&out, &set("notify.sounds", "bell")).unwrap();
+        let out = apply(
+            &out,
+            &ConfigEdit::SetBool {
+                key: "animations",
+                value: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            out.contains("# mine\nsplash = false # at start\nidle_minutes = 5\n"),
+            "{out}"
+        );
+        let (config, problems) = Config::parse(&out, None);
+        assert!(problems.is_empty(), "{problems:?}\n{out}");
+        assert!(!config.scenes.splash);
+        assert_eq!(config.scenes.idle_minutes, 5);
+        assert_eq!(config.notify.sounds, termist_core::config::Sounds::Bell);
+        assert!(!config.animations);
     }
 }

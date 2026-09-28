@@ -114,3 +114,18 @@ fn config_path_check_export_and_import() {
         "{err}"
     );
 }
+
+#[test]
+fn sound_test_writes_the_sound_and_names_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = termist(tmp.path(), &["sound", "test", "marti"]);
+    assert!(out.status.success(), "{out:?}");
+    let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    assert_eq!(
+        path,
+        tmp.path().join("data").join("sounds").join("marti.wav")
+    );
+    assert!(std::fs::read(&path).unwrap().starts_with(b"RIFF"));
+    let out = termist(tmp.path(), &["sound", "test", "horn"]);
+    assert_eq!(out.status.code(), Some(1));
+}
