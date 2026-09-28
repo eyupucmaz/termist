@@ -1,8 +1,9 @@
-# Records docs/demo.gif, docs/scene.png and docs/screenshot.png with stand-in agents.
+# Records docs/look.gif, docs/settings.png, docs/moda.png and docs/help.png:
+# the Istanbul scene, the themes switched from the settings, and the help.
 # Run from the repository root after `cargo build --release -p termist`:
-#   vhs assets/demo/demo.tape
+#   vhs assets/demo/look.tape
 
-Output docs/demo.gif
+Output docs/look.gif
 
 Set Shell "bash"
 Set FontFamily "MesloLGLDZ Nerd Font Mono"
@@ -22,7 +23,7 @@ Type "export TZ=DEMO$(( (10#$(date -u +%H) + 18) % 24 - 12 )) TERMIST_HOME=/tmp/
 Enter
 Type "rm -rf $TERMIST_HOME && mkdir -p $TERMIST_HOME/config $TERMIST_HOME/code/orbit-api && cp $DEMO/config.toml $TERMIST_HOME/config/ && cd $TERMIST_HOME/code/orbit-api && clear && $BIN"
 Enter
-Sleep 2.5s
+Sleep 3s
 
 # three tasks, one per agent
 Type "p"
@@ -64,74 +65,45 @@ Sleep 1.5s
 Ctrl+A
 Escape
 Sleep 3s
-
-# quit the TUI; the agents keep running in the daemon
-Type "q"
+Type "h"
 Sleep 300ms
-Type "y"
+Type "h"
 Sleep 1s
-Type "clear && $BIN"
-Enter
 Show
 
-# termist again: the splash, then the fleet as it was left
-Sleep 400ms
-Screenshot docs/scene.png
-Sleep 1.6s
-
-# the fleet: running, waiting on you, done
-Type "h"
-Sleep 300ms
-Type "h"
-Sleep 2s
-Screenshot docs/screenshot.png
-Sleep 1s
-
-# jump to the agent that needs you and answer it
-Type "l"
-Sleep 400ms
-Type "l"
-Sleep 1s
-Type "."
-Sleep 1.2s
-Enter
+# Üsküdar, the default theme
 Sleep 1.5s
-Type "y"
-Sleep 300ms
-Enter
-Sleep 3s
-Ctrl+A
+
+# the settings: every change applies at once
+Type "s"
+Sleep 1.8s
+Screenshot docs/settings.png
+Sleep 500ms
+Right
+Sleep 2.2s
+Right
+Sleep 2.2s
+Left
+Sleep 1.2s
 Escape
 Sleep 1.5s
-
-# a new task from the quick prompt
-Type "p"
-Sleep 800ms
-Type@45ms "Split the session store into two files"
-Sleep 800ms
-Tab
+Screenshot docs/moda.png
 Sleep 1s
-Type "1"
-Sleep 800ms
-Enter
-Sleep 5s
-Ctrl+A
+
+# the help lists every key as it is bound now, under the scene
+Type "?"
+Sleep 2.5s
+Type@120ms "jjjjjjjjjjjjjjjjjjjj"
+Sleep 1.5s
+Screenshot docs/help.png
+Sleep 500ms
+Type@120ms "jjjjjjjjjjjj"
+Sleep 2s
 Escape
 Sleep 1.5s
-
-# find any session from anywhere
-Type "/"
-Sleep 1s
-Type@110ms "billing"
-Sleep 1.2s
-Enter
-Sleep 2s
-Sleep 1s
 
 # leave termist, then stop the daemon of the temporary TERMIST_HOME
 Hide
-Escape
-Sleep 300ms
 Type "q"
 Sleep 300ms
 Type "y"

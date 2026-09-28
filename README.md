@@ -77,7 +77,7 @@ directory — never through files in your project.
 
 Issues and pull requests are welcome. Please read the [code of conduct](CODE_OF_CONDUCT.md) first.
 The demo above is recorded with stand-in agents: `vhs assets/demo/demo.tape` after
-`cargo build --release -p termist`.
+`cargo build --release -p termist`; `vhs assets/demo/look.tape` records the themes, settings and help.
 
 ## License
 

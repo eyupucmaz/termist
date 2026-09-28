@@ -127,6 +127,12 @@
   figure img { display: block; width: 100%; height: auto; border-radius: 10px; }
   figcaption { margin-top: 0.6rem; color: var(--muted); font-size: 0.92rem; }
 
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem 1.2rem; margin: 2rem 0 0; }
+  .shots figure { margin: 0; }
+  .shots img { border-radius: 8px; }
+  .shots a { display: block; }
+  .shots + .features { margin-top: 1.8rem; }
+
   .dots { list-style: none; margin: 0; padding: 0; }
   .dots li { display: grid; grid-template-columns: 1.6rem 1fr; gap: 0.2rem; margin: 0 0 0.9rem; }
   .dot { font: 600 1.05rem/1.6 "JetBrains Mono", ui-monospace, monospace; }
@@ -154,6 +160,9 @@
     .cmd { flex-direction: column; }
     .cmd button { border-left: 0; border-top: 1px solid var(--rule); padding: 0.6rem; }
   }
+  @media (max-width: 640px) {
+    .shots { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -176,9 +185,39 @@
   <p class="after">Then open a terminal in a project and run <kbd>termist</kbd>. It uses the agent CLIs you already have installed, and never writes into your repositories or their config.</p>
 
   <figure>
-    <img src="demo.gif" width="1400" height="600" alt="termist in a terminal: three agents as cards, one running, one waiting for an answer, one done; the user jumps to the waiting one, answers it, starts a new task and finds a session by name.">
+    <img src="demo.gif" width="1400" height="800" alt="termist in a terminal: the Galata Tower at dusk for a moment, then three agents as cards, one running, one waiting for an answer, one done; the user jumps to the waiting one, answers it, starts a new task and finds a session by name.">
     <figcaption>Three agents at work. <kbd>.</kbd> jumps to the one waiting for you, <kbd>p</kbd> starts a new task, <kbd>/</kbd> finds any session.</figcaption>
   </figure>
+
+  <h2 id="beta">New in the beta</h2>
+  <p>termist gets its look and its voice. Everything below is in <a href="https://github.com/eyupucmaz/termist/releases">v0.1.0-beta.1</a>.</p>
+  <figure>
+    <img src="look.gif" width="1400" height="800" loading="lazy" alt="The settings screen open over three agent cards. The theme changes from Üsküdar, dark, to Moda, light, to the terminal's own colours and back to Moda, and the whole screen follows at once. Then the help opens with the Galata Tower at dusk above the list of keys.">
+    <figcaption>The theme changes from the settings (<kbd>s</kbd>) and the whole screen follows at once. The help (<kbd>?</kbd>) lists every key as it is bound now.</figcaption>
+  </figure>
+  <div class="shots">
+    <figure>
+      <a href="scene.png"><img src="scene.png" width="1400" height="800" loading="lazy" alt="The Galata Tower drawn in the terminal at dusk: a violet to orange sky, gulls, the old town's houses and the Golden Horn below, captioned Galata Kulesi, gün batımı."></a>
+      <figcaption><strong>Istanbul scenes.</strong> Galata, Kız Kulesi, Ayasofya, the Bosphorus Bridge, a vapur and the Basilica Cistern, in the colours of the hour. They show at start, on an empty grid and when you have been away a while.</figcaption>
+    </figure>
+    <figure>
+      <a href="settings.png"><img src="settings.png" width="1400" height="800" loading="lazy" alt="The settings screen over the grid: theme, colours, prefix, pane, keys, sounds, desktop, splash, idle and animation, each with its current value."></a>
+      <figcaption><strong>Settings, from inside.</strong> Theme, colours, prefix, where the pane goes, and every key of the grid and of focus mode. Changes are saved to <code>config.toml</code>, and your comments in it are kept.</figcaption>
+    </figure>
+    <figure>
+      <a href="moda.png"><img src="moda.png" width="1400" height="800" loading="lazy" alt="The grid in the light Moda theme: three agent cards on a cream background, the running agent's terminal below them."></a>
+      <figcaption><strong>Themes.</strong> Üsküdar is dark and the default, Moda is light, and the terminal theme keeps your terminal's own colours. Agents are told the colours termist draws them with, so they pick a light look on Moda.</figcaption>
+    </figure>
+    <figure>
+      <a href="help.png"><img src="help.png" width="1400" height="800" loading="lazy" alt="The help over the grid: the foot of the Galata scene, the version and config path, then the keys of the grid with what each one does."></a>
+      <figcaption><strong>Help.</strong> <kbd>?</kbd> lists every key as it is bound now, with a scene at the top.</figcaption>
+    </figure>
+  </div>
+  <ul class="features">
+    <li>Sounds and desktop notifications when an agent waits for you or is done, the notifications only while the terminal is not in front. Ghostty, WezTerm, kitty, iTerm2 and others, through tmux too.</li>
+    <li>The pane goes to the right of the cards from 180 columns.</li>
+    <li><code>termist update</code> installs the newest release over the one you have, and <code>termist update --check</code> only looks.</li>
+  </ul>
 
   <h2 id="dots">Every session is a card with a dot</h2>
   <ul class="dots">
@@ -210,6 +249,8 @@
       <tr><td><kbd>/</kbd></td><td>Find any session</td></tr>
       <tr><td><kbd>o</kbd> <kbd>x</kbd></td><td>Open a project, close its tab</td></tr>
       <tr><td><kbd>r</kbd> <kbd>a</kbd> <kbd>A</kbd></td><td>Rename, archive, show the archive</td></tr>
+      <tr><td><kbd>s</kbd></td><td>Settings: theme, colours, prefix, pane, keys</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Every key, as it is bound now</td></tr>
       <tr><td><kbd>q</kbd></td><td>Quit the TUI; the agents keep running</td></tr>
     </tbody>
   </table>
