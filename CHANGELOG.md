@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-beta.1 - 2026-09-28
+
+termist gets its look and its voice: themes, Istanbul scenes, sounds and notifications, settings
+you can change from inside, and a way to update itself.
 
 ### New
 
@@ -26,6 +29,9 @@
   `termist sound test vapur|marti` plays one.
 - **Desktop notifications** when the terminal is not in front, asked of the terminal itself (Ghostty,
   WezTerm, kitty, iTerm2 and others; through tmux too).
+- **`termist update`** (also `termist upgrade`) installs the newest release, pre-releases included,
+  through the release's own installer and into the same place; `--check` only looks. A termist that
+  the installer did not put there (`cargo install`, a source build) is left alone.
 - After the prefix, `n` and `t` start an agent or a shell, as in the grid.
 - Inside tmux, termist says once that `C-a` is tmux's prefix too.
 
@@ -33,6 +39,23 @@
 
 - A key matches with exactly its modifiers: Ctrl+h, Ctrl+] or Ctrl+1 no longer do what h, ] or 1 do.
 - The daemon speaks protocol 4: after upgrading, `termist kill` the old daemon once.
+
+### Known limits
+
+- The themes, scenes and sounds are new: tell us what looks or sounds wrong.
+- Windows builds are provided but have had the least use; there, termist cannot yet ask the terminal
+  for its colours.
+- Text boxes and lists keep their keys; only the grid's and focus mode's can be rebound.
+
+### Updating
+
+From 0.1.0-alpha.1, run the install line again; from now on, `termist update`. Then, when your
+sessions can stop, `termist kill` and start `termist` again.
+
+macOS and Linux: `curl -LsSf https://eyupucmaz.github.io/termist/install.sh | sh`
+
+Windows (PowerShell):
+`powershell -ExecutionPolicy Bypass -c "irm https://eyupucmaz.github.io/termist/install.ps1 | iex"`
 
 ## 0.1.0-alpha.1 - 2026-09-27
 

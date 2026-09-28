@@ -1,10 +1,10 @@
 ---
 source: crates/termist-tui/src/ui.rs
-expression: "render(&mut app, 80, 40).backend()"
+expression: text
 ---
 " termist   orbit-api ◆1✓1                                                       "
 "┏┌ help ──────────────────────────────────────────────────────────────────────┐ "
-"┃│termist 0.1.0-alpha.1 · default settings                                    │ "
+"┃│termist <version> · default settings                                     │ "
 "┃│                                                                            │ "
 "┗│Grid                                                                        │ "
 "┌│  p            new task: prompt, CLI, model                                 │┐"

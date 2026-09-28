@@ -1915,12 +1915,13 @@ dependencies = [
 
 [[package]]
 name = "termist"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "clap",
  "interprocess",
  "portable-pty",
+ "serde_json",
  "tempfile",
  "termist-core",
  "termist-daemon",
@@ -1931,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "termist-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -1943,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "termist-daemon"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "interprocess",
@@ -1964,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "termist-platform"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "etcetera",
@@ -1979,14 +1980,14 @@ dependencies = [
 
 [[package]]
 name = "termist-scenes"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "toml",
 ]
 
 [[package]]
 name = "termist-term"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "alacritty_terminal",
  "termist-core",
@@ -1994,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "termist-tui"
-version = "0.1.0-alpha.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "anyhow",
  "insta",
