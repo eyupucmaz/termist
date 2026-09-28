@@ -25,6 +25,7 @@ pub fn query(wait: Duration) -> Option<(Rgb, Rgb)> {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // Windows asks nothing yet
 const QUERY: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b[c";
 
 /// The colours in `answer` (the bytes a terminal sent back to [`QUERY`]).
@@ -34,6 +35,7 @@ pub fn parse(answer: &[u8]) -> Option<(Rgb, Rgb)> {
 }
 
 /// Whether `answer` holds the device-attributes reply, `ESC [ ? … c`.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn has_device_attributes(answer: &[u8]) -> bool {
     answer.windows(3).enumerate().any(|(i, w)| {
         w == b"\x1b[?"
@@ -70,6 +72,10 @@ mod unix {
     use std::time::Instant;
 
     pub fn query(tty: &std::fs::File, wait: Duration) -> Option<(Rgb, Rgb)> {
+        let fd = tty.as_raw_fd();
+        if fd >= libc::FD_SETSIZE as i32 {
+            return None; // select cannot watch it
+        }
         let mut out = tty;
         out.write_all(QUERY).ok()?;
         out.flush().ok()?;
@@ -81,13 +87,24 @@ mod unix {
             if left.is_zero() {
                 break;
             }
-            let mut fds = libc::pollfd {
-                fd: tty.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
+            // select, not poll: macOS's poll does not work on terminal devices.
+            let ready = unsafe {
+                // SAFETY: a zeroed fd_set is empty; fd is open and below FD_SETSIZE.
+                let mut read_set: libc::fd_set = std::mem::zeroed();
+                libc::FD_ZERO(&mut read_set);
+                libc::FD_SET(fd, &mut read_set);
+                let mut timeout = libc::timeval {
+                    tv_sec: left.as_secs() as _,
+                    tv_usec: left.subsec_micros() as _,
+                };
+                libc::select(
+                    fd + 1,
+                    &mut read_set,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut timeout,
+                )
             };
-            // SAFETY: one valid pollfd, and the count says so.
-            let ready = unsafe { libc::poll(&mut fds, 1, left.as_millis().max(1) as i32) };
             if ready <= 0 {
                 break;
             }
@@ -157,8 +174,9 @@ mod tests {
                         &mut m,
                         &mut s,
                         std::ptr::null_mut(),
-                        std::ptr::null(),
-                        std::ptr::null()
+                        // *mut on macOS, *const on Linux: a null *mut suits both.
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut()
                     ),
                     0
                 );
