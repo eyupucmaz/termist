@@ -12,6 +12,7 @@ accent = "#40c2bd"
 focus = "#e9c46a"
 warn = "#f2cc5b"
 error = "#ff7a6b"
+archive = "#d68fd6"
 selection = { fg = "#ffffff", bg = "#1f4b57" }
 tab_active = { fg = "#e6edf3", bg = "#1d3a4a", bold = true }
 

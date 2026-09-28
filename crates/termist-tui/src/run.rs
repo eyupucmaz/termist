@@ -1,5 +1,6 @@
 use crate::app::{Action, App};
 use crate::browse::{self, Listing};
+use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
@@ -13,6 +14,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use termist_core::config::Problem;
 use termist_core::{ClientRequest, ServerEvent};
 use termist_platform::framed::write_frame;
 use termist_platform::ipc::SendHalf;
@@ -91,6 +93,29 @@ fn daemon_cwd() -> PathBuf {
         })
 }
 
+/// The app with the user's settings; what could not be used is said once in the footer.
+fn app_from_config(paths: &Paths) -> App {
+    let (config, problems) = termist_platform::config_file::load(paths);
+    let depth = termist_platform::term::resolve_depth(config.colors);
+    let theme = Theme::named(&config.theme, depth);
+    let mut app = App::with_config(config, theme);
+    app.message = startup_message(&problems, &app.theme);
+    app
+}
+
+fn startup_message(problems: &[Problem], theme: &Theme) -> Option<String> {
+    match problems {
+        [] => theme.stands_in_for.map(|wanted| {
+            format!("{wanted} needs 256 colours; showing the terminal's own (colors = \"256\" if it has them)")
+        }),
+        [one] => Some(format!("config: {one} · termist config check")),
+        many => Some(format!(
+            "config: {} problems · termist config check",
+            many.len()
+        )),
+    }
+}
+
 pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let client = connect_or_spawn(&paths).await?;
     let (mut reader, mut writer) = client.into_split();
@@ -134,7 +159,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
-    let mut app = App::new();
+    let mut app = app_from_config(&paths);
     let result: anyhow::Result<()> = async {
         loop {
             let size = terminal.size()?;
@@ -262,6 +287,53 @@ mod tests {
         assert!(
             !paths.daemon_log_path().exists(),
             "no daemon may be spawned for a protocol mismatch"
+        );
+    }
+
+    #[test]
+    fn the_config_is_used_and_its_problems_are_said_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_path(),
+            "theme = \"moda\"\ncolors = \"truecolor\"\n[agents]\ndefault = \"codex\"\n",
+        )
+        .unwrap();
+        let app = app_from_config(&paths);
+        assert_eq!(app.theme.id, "moda");
+        assert_eq!(app.config.agents.default, termist_core::Harness::Codex);
+        assert_eq!(app.message, None);
+
+        std::fs::write(paths.config_path(), "theme = \"nope\"\ncolors = \"256\"\n").unwrap();
+        let app = app_from_config(&paths);
+        assert_eq!(app.theme.id, "uskudar", "the default theme");
+        assert_eq!(
+            app.message.as_deref(),
+            Some(
+                "config: theme: unknown theme \"nope\"; themes: uskudar, moda, terminal · termist config check"
+            )
+        );
+    }
+
+    #[test]
+    fn a_theme_the_terminal_cannot_draw_is_explained() {
+        let theme = Theme::named("moda", termist_core::config::ColorDepth::Ansi16);
+        let message = startup_message(&[], &theme).unwrap();
+        assert!(message.starts_with("moda needs 256 colours"), "{message}");
+        let two = [
+            Problem {
+                path: "a".into(),
+                message: "x".into(),
+            },
+            Problem {
+                path: "b".into(),
+                message: "y".into(),
+            },
+        ];
+        assert_eq!(
+            startup_message(&two, &Theme::terminal()).as_deref(),
+            Some("config: 2 problems · termist config check")
         );
     }
 }

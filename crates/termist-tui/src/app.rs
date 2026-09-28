@@ -5,9 +5,11 @@ use crate::overlay::{
     self, BrowseEntry, ModelChoice, ModelPicker, OpenProject, Overlay, QuickPrompt,
 };
 use crate::text_input::{Edit, TextInput};
+use crate::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use termist_core::config::Config;
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
@@ -71,6 +73,8 @@ pub struct App {
     resume_pending: Option<SessionId>,
     /// A project asked to be opened (or a folder added); switched to when it arrives.
     project_pending: Option<ProjectPending>,
+    pub config: Config,
+    pub theme: Theme,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +95,12 @@ impl Default for App {
 }
 
 impl App {
+    /// Default settings in the terminal's own colours.
     pub fn new() -> App {
+        App::with_config(Config::default(), Theme::terminal())
+    }
+
+    pub fn with_config(config: Config, theme: Theme) -> App {
         App {
             state: StateSnapshot::default(),
             project: None,
@@ -120,6 +129,8 @@ impl App {
             focus_next_created: false,
             resume_pending: None,
             project_pending: None,
+            config,
+            theme,
         }
     }
 
@@ -557,7 +568,8 @@ impl App {
             .any(|h| h.harness == harness && h.available)
     }
 
-    /// `p` and `C-a p`: opens on the last launch line (or the first installed CLI), and
+    /// `p` and `C-a p`: opens on the last launch line (or the configured CLI, or the
+    /// first installed one), and
     /// asks for the prompt history and for CLIs installed since the daemon started.
     fn open_quick_prompt(&mut self) -> Vec<Action> {
         let Some(project) = self.project else {
@@ -570,11 +582,15 @@ impl App {
             .clone()
             .filter(|l| self.is_available(l.harness))
             .unwrap_or_else(|| LaunchOptions {
-                harness: self
-                    .harnesses
-                    .iter()
-                    .find(|h| h.available)
-                    .map_or(Harness::Claude, |h| h.harness),
+                harness: Some(self.config.agents.default)
+                    .filter(|h| self.is_available(*h))
+                    .or_else(|| {
+                        self.harnesses
+                            .iter()
+                            .find(|h| h.available)
+                            .map(|h| h.harness)
+                    })
+                    .unwrap_or(Harness::Claude),
                 model: None,
                 effort: None,
             });
@@ -3121,5 +3137,17 @@ mod tests {
         app.on_key(k(K::Esc));
         assert!(!app.archive_view);
         assert_eq!(app.selected, Some(s[0].id));
+    }
+
+    #[test]
+    fn the_quick_prompt_starts_on_the_configured_cli_until_one_is_used() {
+        let (mut app, _) = app();
+        app.config.agents.default = Harness::Codex;
+        app.state.last_launch = None;
+        app.on_key(k(K::Char('p')));
+        let Some(Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("no quick prompt");
+        };
+        assert_eq!(q.launch.harness, Harness::Codex);
     }
 }

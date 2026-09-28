@@ -3,10 +3,11 @@
 use crate::app::App;
 use crate::overlay::{BrowseEntry, Overlay, QuickPrompt};
 use crate::text_input::TextInput;
+use crate::theme::Theme;
 use crate::ui::status_style;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -23,8 +24,9 @@ pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Clears `area` and draws a bordered box titled `title` holding `lines`.
-fn boxed(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
+fn boxed(f: &mut Frame, theme: &Theme, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     f.render_widget(Clear, area);
+    f.buffer_mut().set_style(area, theme.base);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -35,16 +37,12 @@ fn boxed(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     );
 }
 
-fn highlighted(style: Style, on: bool) -> Style {
+fn highlighted(theme: &Theme, style: Style, on: bool) -> Style {
     if on {
-        style.add_modifier(Modifier::REVERSED)
+        style.patch(theme.selection)
     } else {
         style
     }
-}
-
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
 }
 
 /// A list in a box: a query line when the list is typed into, the rows (scrolled to
@@ -58,18 +56,18 @@ struct ListBox {
     extra: Vec<Line<'static>>,
 }
 
-fn draw_list(f: &mut Frame, body: Rect, list: ListBox) {
+fn draw_list(f: &mut Frame, theme: &Theme, body: Rect, list: ListBox) {
     let fixed = list.query.is_some() as u16 + list.extra.len() as u16 + 2;
     let area = centered(body, list.width, fixed + (list.rows.len() as u16).max(1));
     let room = area.height.saturating_sub(fixed).max(1) as usize;
     let first = list.highlight.saturating_sub(room - 1);
     let mut lines = Vec::new();
     if let Some(q) = list.query {
-        lines.push(Line::from(Span::styled(format!("> {q}"), dim())));
+        lines.push(Line::from(Span::styled(format!("> {q}"), theme.dim)));
     }
     lines.extend(list.rows.into_iter().skip(first).take(room));
     lines.extend(list.extra);
-    boxed(f, area, &list.title, lines);
+    boxed(f, theme, area, &list.title, lines);
 }
 
 /// The lines of `input` that fit `width` × `height`, scrolled to keep the cursor in
@@ -89,10 +87,18 @@ fn input_view(input: &TextInput, width: u16, height: usize) -> (Vec<Line<'static
 }
 
 /// A one-line text box; the cursor shows when it is the top overlay.
-fn text_box(f: &mut Frame, body: Rect, title: &str, width: u16, input: &TextInput, top: bool) {
+fn text_box(
+    f: &mut Frame,
+    theme: &Theme,
+    body: Rect,
+    title: &str,
+    width: u16,
+    input: &TextInput,
+    top: bool,
+) {
     let area = centered(body, width, 3);
     let (lines, (cx, _)) = input_view(input, area.width.saturating_sub(2), 1);
-    boxed(f, area, title, lines);
+    boxed(f, theme, area, title, lines);
     if top && area.height == 3 {
         f.set_cursor_position((area.x + 1 + cx, area.y + 1));
     }
@@ -131,6 +137,9 @@ pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
 
 /// Draws one overlay; `top` is the one that gets the keys (and the cursor).
 pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) {
+    let t = &app.theme;
+    let dim = || t.dim;
+    let highlighted = |style, on| highlighted(t, style, on);
     match overlay {
         Overlay::Harness(picker) => {
             let rows = picker
@@ -146,6 +155,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "new session".into(),
@@ -165,7 +175,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let (mut lines, (cx, cy)) = input_view(&q.input, inner_w, rows);
             lines.resize(rows, Line::default());
             lines.push(Line::from(Span::styled(launch_line(app, q), dim())));
-            boxed(f, area, "new task", lines);
+            boxed(f, t, area, "new task", lines);
             if top && area.height > 3 {
                 f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
             }
@@ -195,6 +205,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             }
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: format!("model · {}", m.harness.id()),
@@ -206,7 +217,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
-        Overlay::ModelName(input) => text_box(f, body, "model name", 48, input, top),
+        Overlay::ModelName(input) => text_box(f, t, body, "model name", 48, input, top),
         Overlay::FollowUp { session, input } => {
             let name = app
                 .state
@@ -214,9 +225,9 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .iter()
                 .find(|s| s.id == *session)
                 .map_or("?", |s| s.display_name());
-            text_box(f, body, &format!("follow-up · {name}"), 64, input, top);
+            text_box(f, t, body, &format!("follow-up · {name}"), 64, input, top);
         }
-        Overlay::Rename { input, .. } => text_box(f, body, "rename", 48, input, top),
+        Overlay::Rename { input, .. } => text_box(f, t, body, "rename", 48, input, top),
         Overlay::Palette(picker) => {
             let rows = picker
                 .visible()
@@ -228,7 +239,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         .iter()
                         .find(|p| p.id == s.project)
                         .map_or("", |p| p.name.as_str());
-                    let (glyph, color, word) = status_style(s.status);
+                    let (glyph, color, word) = status_style(t, s.status);
                     Some(Line::from(vec![
                         Span::styled(format!(" {glyph} "), Style::default().fg(color)),
                         Span::styled(
@@ -241,6 +252,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "sessions".into(),
@@ -271,17 +283,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                     BrowseEntry::Dir(d) => Line::from(vec![
                         Span::styled(
                             if d.git { " ● " } else { "   " },
-                            Style::default().fg(Color::Green),
+                            Style::default().fg(t.status(termist_core::AgentStatus::Finished)),
                         ),
                         Span::styled(format!("{}/", d.name), highlighted(Style::default(), on)),
                     ]),
                 })
                 .collect();
             let note = if let Some(e) = &open.error {
-                Some(Span::styled(
-                    format!(" {e}"),
-                    Style::default().fg(Color::Red),
-                ))
+                Some(Span::styled(format!(" {e}"), t.error))
             } else if open.loading {
                 Some(Span::styled(" reading…", dim()))
             } else if open.truncated {
@@ -294,6 +303,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             };
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: format!("open project · {}", open.dir.display()),
@@ -317,6 +327,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "project".into(),

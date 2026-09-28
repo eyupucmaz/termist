@@ -9,6 +9,7 @@ accent = "cyan"
 focus = "yellow"
 warn = "yellow"
 error = "red"
+archive = "magenta"
 selection = { reversed = true }
 tab_active = { reversed = true }
 

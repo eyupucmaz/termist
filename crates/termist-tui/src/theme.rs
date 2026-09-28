@@ -43,6 +43,8 @@ pub struct Theme {
     pub focus: Style,
     pub warn: Style,
     pub error: Style,
+    /// The "archive" label of the archive view.
+    pub archive: Style,
     pub selection: Style,
     pub tab_active: Style,
     status: [Color; 8],
@@ -152,6 +154,7 @@ struct Spec {
     focus: StyleSpec,
     warn: StyleSpec,
     error: StyleSpec,
+    archive: StyleSpec,
     selection: StyleSpec,
     tab_active: StyleSpec,
     status: [Paint; 8],
@@ -218,6 +221,7 @@ impl Spec {
             focus: style("focus")?,
             warn: style("warn")?,
             error: style("error")?,
+            archive: style("archive")?,
             selection: style("selection")?,
             tab_active: style("tab_active")?,
             status,
@@ -274,6 +278,7 @@ impl Spec {
             focus: style(self.focus),
             warn: style(self.warn),
             error: style(self.error),
+            archive: style(self.archive),
             selection: style(self.selection),
             tab_active: style(self.tab_active),
             status: self.status.map(color),
@@ -444,6 +449,7 @@ mod tests {
                 ("focus", s.focus),
                 ("warn", s.warn),
                 ("error", s.error),
+                ("archive", s.archive),
             ] {
                 check(what.into(), rgb(st.fg), bg, 3.0);
             }
