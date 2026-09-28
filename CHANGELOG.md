@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-beta.2 - 2026-09-28
+
+termist's sound is now a real seagull, and it stays quiet until you ask for it.
 
 ### Changed
 
@@ -9,6 +11,11 @@
 - **One sound, a real martı.** The `istanbul` sound is now a recorded seagull, played both when an
   agent waits for you and when one is done. The ferry's horn is gone, and `termist sound test` takes no
   name.
+
+### Updating
+
+`termist update`, then, when your sessions can stop, `termist kill` and start `termist` again.
+To hear the martı, set `sounds` to `istanbul` in the settings (`s`).
 
 ## 0.1.0-beta.1 - 2026-09-28
 
