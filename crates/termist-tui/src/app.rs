@@ -95,6 +95,8 @@ pub struct App {
     pub pane_override: Option<PanePosition>,
     /// Where the last frame put the pane.
     pub pane_right: bool,
+    /// How far the help can scroll in the last frame: its last line at the bottom.
+    pub help_end: std::cell::Cell<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +160,7 @@ impl App {
             local_settings: Vec::new(),
             pane_override: None,
             pane_right: false,
+            help_end: std::cell::Cell::new(usize::MAX),
         }
     }
 
@@ -1372,17 +1375,48 @@ impl App {
             return vec![];
         }
         let spec = KeySpec::of(&key);
+        if !Keymap::writable(&spec) {
+            capture.note = Some("that key has no name config.toml can hold; try another".into());
+            capture.conflict = None;
+            return vec![];
+        }
         match (capture.target, capture.conflict.take()) {
             (CaptureTarget::Key(context, action), Some((taken, other)))
                 if key.code == KeyCode::Enter =>
             {
-                let old = self.keymap.keys(context, action);
+                // The other action gets every key this one had.
+                let old: Vec<KeySpec> = self
+                    .keymap
+                    .keys(context, action)
+                    .into_iter()
+                    .filter(|k| *k != taken)
+                    .collect();
+                let mut others: Vec<KeySpec> = self
+                    .keymap
+                    .keys(context, other)
+                    .into_iter()
+                    .filter(|k| *k != taken)
+                    .collect();
+                others.extend(&old);
                 self.keymap.set_keys(context, action, &[taken]);
-                if let Some(old) = old.first() {
-                    self.keymap.bind(context, *old, Some(other));
-                }
+                self.keymap.set_keys(context, other, &others);
                 self.overlays.pop();
-                self.settings_note(format!("{taken}: {} · {}", action.label(), other.label()));
+                let note = if others.is_empty() {
+                    format!(
+                        "{taken}: {} · {} has no key now",
+                        action.label(),
+                        other.label()
+                    )
+                } else {
+                    let keys: Vec<String> = others.iter().map(|k| k.to_string()).collect();
+                    format!(
+                        "{taken}: {} · {}: {}",
+                        action.label(),
+                        keys.join(" "),
+                        other.label()
+                    )
+                };
+                self.settings_note(note);
                 vec![self.write_keys(context)]
             }
             (CaptureTarget::Prefix, _) => {
@@ -1409,7 +1443,8 @@ impl App {
                     key: "prefix",
                     value: spec.to_string(),
                 })];
-                if taken.is_some() {
+                // Keys that config.local.toml sets are not copied into config.toml.
+                if taken.is_some() && !self.local_settings.iter().any(|k| k == "keys") {
                     actions.push(self.write_keys(Context::Focus));
                 }
                 actions
@@ -1453,9 +1488,11 @@ impl App {
             KeyCode::Esc | KeyCode::Char('?' | 'q') => {
                 self.overlays.pop();
             }
-            KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
+            KeyCode::Char('j') | KeyCode::Down => *scroll = (*scroll + 1).min(self.help_end.get()),
             KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
-            KeyCode::PageDown | KeyCode::Char(' ') => *scroll += 10,
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                *scroll = (*scroll + 10).min(self.help_end.get())
+            }
             KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
             _ => {}
         }
@@ -3737,7 +3774,11 @@ mod tests {
         app.on_key(k(K::Char('j')));
         app.on_key(k(K::Enter));
         assert!(app.on_key(k(K::Char('x'))).is_empty());
-        assert!(top_note(&app).unwrap().contains("would stop you typing it"));
+        assert!(
+            top_note(&app)
+                .unwrap()
+                .contains("would no longer reach the session")
+        );
         let actions = app.on_key(ctrl(' '));
         assert_eq!(app.keymap.prefix.to_string(), "C-Space");
         assert_eq!(
@@ -3767,6 +3808,40 @@ mod tests {
                 key: "pane_position",
                 value: "bottom".into()
             }]
+        );
+    }
+
+    #[test]
+    fn a_swap_gives_the_other_action_every_old_key_or_says_it_has_none() {
+        let mut app = keys_screen();
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Char('k')));
+        app.on_key(k(K::Enter));
+        assert_eq!(
+            top_note(&app).unwrap(),
+            "k: new task: prompt, CLI, model · p: card above"
+        );
+        // An action with no key: the other one is left with none, and says so.
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Backspace));
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Char('k')));
+        app.on_key(k(K::Enter));
+        assert_eq!(
+            top_note(&app).unwrap(),
+            "k: send the next instruction without entering · new task: prompt, CLI, model has no key now"
+        );
+    }
+
+    #[test]
+    fn a_key_config_toml_cannot_name_is_refused() {
+        let mut app = keys_screen();
+        app.on_key(k(K::Enter));
+        assert!(app.on_key(k(K::CapsLock)).is_empty());
+        assert!(top_note(&app).unwrap().starts_with("that key has no name"));
+        assert!(
+            writes(&app.on_key(k(K::Delete))).len() == 1,
+            "Delete has a name"
         );
     }
 }

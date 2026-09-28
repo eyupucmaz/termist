@@ -1200,6 +1200,7 @@ mod tests {
         );
         assert!(text.contains("Focus mode, after C-Space"));
         assert!(text.contains("C-Space C-Space"));
+        render(&mut app, 80, 16);
         for _ in 0..200 {
             app.on_key(key(K::Char('j')));
         }
@@ -1207,6 +1208,12 @@ mod tests {
         assert!(
             text.contains("[keys.grid] and [keys.focus]"),
             "the last line is in view"
+        );
+        app.on_key(key(K::Char('k')));
+        let text = screen_text(&render(&mut app, 80, 16));
+        assert!(
+            !text.contains("[keys.grid] and [keys.focus]"),
+            "one k from the end moves the view back"
         );
         app.on_key(key(K::Esc));
         assert!(app.overlays.is_empty());

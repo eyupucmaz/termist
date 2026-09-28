@@ -239,7 +239,7 @@ pub struct KeySpec {
     mods: KeyModifiers,
 }
 
-const NAMED: [(&str, KeyCode); 13] = [
+const NAMED: [(&str, KeyCode); 16] = [
     ("Enter", KeyCode::Enter),
     ("Esc", KeyCode::Esc),
     ("Tab", KeyCode::Tab),
@@ -253,6 +253,9 @@ const NAMED: [(&str, KeyCode); 13] = [
     ("Home", KeyCode::Home),
     ("End", KeyCode::End),
     ("PageUp", KeyCode::PageUp),
+    ("PageDown", KeyCode::PageDown),
+    ("Delete", KeyCode::Delete),
+    ("Insert", KeyCode::Insert),
 ];
 
 impl KeySpec {
@@ -261,6 +264,12 @@ impl KeySpec {
         let code = match code {
             KeyCode::Char(c) => {
                 mods.remove(KeyModifiers::SHIFT);
+                // AltGr comes as Ctrl+Alt (crossterm on Windows): `[` is AltGr+8 on many
+                // layouts, and is still `[`. Letters keep Ctrl+Alt, so C-M-k stays itself.
+                let both = KeyModifiers::CONTROL | KeyModifiers::ALT;
+                if mods.contains(both) && !c.is_ascii_alphabetic() {
+                    mods.remove(both);
+                }
                 // Ctrl+letter comes as the lower-case letter from most terminals.
                 if mods.contains(KeyModifiers::CONTROL) {
                     KeyCode::Char(c.to_ascii_lowercase())
@@ -295,12 +304,10 @@ impl KeySpec {
         }
         let code = if let Some((_, code)) = NAMED.iter().find(|(n, _)| *n == rest) {
             *code
-        } else if rest == "PageDown" {
-            KeyCode::PageDown
         } else if let Some(n) = rest
             .strip_prefix('F')
             .and_then(|n| n.parse::<u8>().ok())
-            .filter(|n| (1..=12).contains(n))
+            .filter(|n| (1..=24).contains(n))
         {
             KeyCode::F(n)
         } else {
@@ -320,14 +327,6 @@ impl KeySpec {
     pub fn matches(&self, key: &KeyEvent) -> bool {
         KeySpec::of(key) == *self
     }
-
-    /// A printable key with no Ctrl or Alt: typing it would type a character.
-    fn is_plain_char(&self) -> bool {
-        matches!(self.code, KeyCode::Char(_))
-            && !self
-                .mods
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    }
 }
 
 impl fmt::Display for KeySpec {
@@ -345,7 +344,6 @@ impl fmt::Display for KeySpec {
             KeyCode::Char(' ') => f.write_str("Space"),
             KeyCode::Char(c) => write!(f, "{c}"),
             KeyCode::F(n) => write!(f, "F{n}"),
-            KeyCode::PageDown => f.write_str("PageDown"),
             code => match NAMED.iter().find(|(_, c)| *c == code) {
                 Some((name, _)) => f.write_str(name),
                 None => write!(f, "{code:?}"),
@@ -560,8 +558,16 @@ impl Keymap {
         if let Some(why) = reserved(key) {
             return Some(why.into());
         }
-        key.is_plain_char()
-            .then(|| format!("{key} would stop you typing it; use a key with C- or M-"))
+        // Enter, Tab, arrows and the rest are what agents need unchanged.
+        (!key
+            .mods
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT))
+        .then(|| format!("{key} would no longer reach the session; use a key with C- or M-"))
+    }
+
+    /// Whether `key` reads back the same from config.toml (some keys have no name).
+    pub fn writable(key: &KeySpec) -> bool {
+        KeySpec::parse(&key.to_string()) == Ok(*key)
     }
 
     pub fn action(&self, context: Context, key: &KeyEvent) -> Option<Action> {
@@ -587,6 +593,11 @@ impl Keymap {
     }
 }
 
+/// What in `config` the keymap cannot use: the prefix and `[keys.*]`.
+pub fn problems(config: &termist_core::config::Config) -> Vec<Problem> {
+    Keymap::from_config(&config.keys, &config.prefix).1
+}
+
 pub fn actions(context: Context) -> &'static [Action] {
     match context {
         Context::Grid => GRID_ACTIONS,
@@ -607,11 +618,11 @@ mod tests {
     fn keys_are_written_back_as_they_are_read() {
         for text in [
             "p", "P", "?", "/", ".", "C-d", "M-x", "C-Space", "Space", "Enter", "Esc", "F5",
-            "PageDown", "C-M-k", "S-Up",
+            "PageDown", "C-M-k", "S-Up", "Delete", "Insert", "F24",
         ] {
             assert_eq!(KeySpec::parse(text).unwrap().to_string(), text);
         }
-        for bad in ["", "pp", "F13", "Ctrl+d", "C-"] {
+        for bad in ["", "pp", "F25", "Ctrl+d", "C-"] {
             assert!(KeySpec::parse(bad).is_err(), "{bad:?}");
         }
     }
@@ -711,7 +722,7 @@ mod tests {
         let text: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
         assert_eq!(text.len(), 7, "{text:#?}");
         assert!(
-            text[0].starts_with("prefix: x would stop you typing it"),
+            text[0].starts_with("prefix: x would no longer reach the session"),
             "{text:?}"
         );
         assert!(
@@ -766,5 +777,44 @@ mod tests {
         m.set_keys(Context::Grid, Palette, &[k]);
         assert_eq!(m.keys(Context::Grid, Up), []);
         assert_eq!(m.keys(Context::Grid, Palette), [k]);
+    }
+
+    #[test]
+    fn altgr_characters_are_the_characters() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let m = Keymap::defaults();
+        assert_eq!(
+            m.action(Context::Grid, &ev(KeyCode::Char(']'), altgr)),
+            Some(NextTab)
+        );
+        assert_eq!(
+            m.action(Context::Grid, &ev(KeyCode::Char('['), altgr)),
+            Some(PrevTab)
+        );
+        assert_eq!(
+            KeySpec::of(&ev(KeyCode::Char('k'), altgr)).to_string(),
+            "C-M-k",
+            "a letter keeps both"
+        );
+    }
+
+    #[test]
+    fn the_prefix_needs_ctrl_or_alt() {
+        for bad in ["Enter", "Tab", "Backspace", "Up", "F5", "x"] {
+            let key = KeySpec::parse(bad).unwrap();
+            assert!(Keymap::refuses_prefix(&key).is_some(), "{bad}");
+        }
+        for good in ["C-a", "C-Space", "M-a", "C-F5"] {
+            assert_eq!(
+                Keymap::refuses_prefix(&KeySpec::parse(good).unwrap()),
+                None,
+                "{good}"
+            );
+        }
+        assert!(Keymap::writable(&KeySpec::parse("Delete").unwrap()));
+        assert!(!Keymap::writable(&KeySpec::new(
+            KeyCode::CapsLock,
+            KeyModifiers::NONE
+        )));
     }
 }

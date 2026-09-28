@@ -113,7 +113,8 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
     match cmd {
         ConfigCmd::Path => println!("{}", paths.config_path().display()),
         ConfigCmd::Check => {
-            let (_, problems) = config_file::load(paths);
+            let (config, mut problems) = config_file::load(paths);
+            problems.extend(termist_tui::keys::problems(&config));
             if !problems.is_empty() {
                 print_problems(&problems);
                 return ExitCode::FAILURE;
@@ -138,7 +139,7 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match config_file::import(paths, &text) {
+            match config_file::import(paths, &text, termist_tui::keys::problems) {
                 Ok(Ok(())) => println!("termist: imported into {}", paths.config_path().display()),
                 Ok(Err(problems)) => {
                     print_problems(&problems);

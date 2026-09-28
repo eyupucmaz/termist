@@ -323,7 +323,9 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let lines = help_lines(app);
             let area = centered(body, 78, body.height);
             let room = area.height.saturating_sub(2) as usize;
-            let first = (*scroll).min(lines.len().saturating_sub(room));
+            let end = lines.len().saturating_sub(room);
+            app.help_end.set(end);
+            let first = (*scroll).min(end);
             let shown = lines.into_iter().skip(first).take(room).collect();
             boxed(f, t, area, "help", shown);
         }

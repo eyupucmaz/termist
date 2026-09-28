@@ -86,8 +86,31 @@ fn config_path_check_export_and_import() {
         "# mine\ntheme = \"moda\"\n"
     );
 
-    std::fs::write(&path, "theme = \"moda\"\nmystery = 1\n").unwrap();
+    let bad_keys = home.join("keys.toml");
+    std::fs::write(&bad_keys, "prefix = \"x\"\n[keys.grid]\ng = \"fly\"\n").unwrap();
+    let out = termist(home, &["config", "import", bad_keys.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "keys are checked too");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("prefix: x would no longer reach the session"),
+        "{err}"
+    );
+    assert!(
+        err.contains("keys.grid.g: \"fly\" is not a grid action"),
+        "{err}"
+    );
+
+    std::fs::write(
+        &path,
+        "theme = \"moda\"\nmystery = 1\n[keys.focus]\n\"C-q\" = \"help\"\n",
+    )
+    .unwrap();
     let out = termist(home, &["config", "check"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("mystery: unknown setting"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("mystery: unknown setting"), "{err}");
+    assert!(
+        err.contains("keys.focus.C-q: C-q always gets you out"),
+        "{err}"
+    );
 }

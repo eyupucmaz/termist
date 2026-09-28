@@ -30,9 +30,15 @@ fn read(path: &Path, problems: &mut Vec<Problem>) -> Option<String> {
 }
 
 /// Replaces `config.toml` with `text` if it has no problems, keeping the old file as
-/// `config.toml.bak`. Returns the problems instead when there are any.
-pub fn import(paths: &Paths, text: &str) -> io::Result<Result<(), Vec<Problem>>> {
-    let (_, problems) = Config::parse(text, None);
+/// `config.toml.bak`. Returns the problems instead when there are any. `more` checks
+/// what this crate cannot (the keys).
+pub fn import(
+    paths: &Paths,
+    text: &str,
+    more: impl Fn(&Config) -> Vec<Problem>,
+) -> io::Result<Result<(), Vec<Problem>>> {
+    let (config, mut problems) = Config::parse(text, None);
+    problems.extend(more(&config));
     if !problems.is_empty() {
         return Ok(Err(problems));
     }
@@ -41,14 +47,16 @@ pub fn import(paths: &Paths, text: &str) -> io::Result<Result<(), Vec<Problem>>>
 }
 
 /// Writes `config.toml` through a temporary file, keeping the old one as
-/// `config.toml.bak`.
+/// `config.toml.bak`. A config.toml that is a link (dotfiles) stays one: the file it
+/// points to is written, with its permissions kept.
 pub fn write(paths: &Paths, text: &str) -> io::Result<()> {
     std::fs::create_dir_all(&paths.config_dir)?;
-    let path = paths.config_path();
+    let path = std::fs::canonicalize(paths.config_path()).unwrap_or(paths.config_path());
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, text)?;
-    if path.exists() {
-        std::fs::copy(&path, path.with_extension("toml.bak"))?;
+    if let Ok(old) = std::fs::metadata(&path) {
+        std::fs::set_permissions(&tmp, old.permissions())?;
+        std::fs::copy(&path, paths.config_path().with_extension("toml.bak"))?;
     }
     std::fs::rename(&tmp, &path)
 }
@@ -85,12 +93,49 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(&tmp);
         write(&p, "theme = \"moda\"\n").unwrap();
-        let refused = import(&p, "theme = \"nope\"\n").unwrap().unwrap_err();
+        let refused = import(&p, "theme = \"nope\"\n", |_| vec![])
+            .unwrap()
+            .unwrap_err();
         assert_eq!(refused[0].path, "theme");
+        let more = |_: &Config| {
+            vec![Problem {
+                path: "prefix".into(),
+                message: "no".into(),
+            }]
+        };
+        assert!(import(&p, "theme = \"terminal\"\n", more).unwrap().is_err());
         assert_eq!(load(&p).0.theme, "moda", "untouched");
-        import(&p, "theme = \"terminal\"\n").unwrap().unwrap();
+        import(&p, "theme = \"terminal\"\n", |_| vec![])
+            .unwrap()
+            .unwrap();
         assert_eq!(load(&p).0.theme, "terminal");
         let bak = std::fs::read_to_string(p.config_path().with_extension("toml.bak")).unwrap();
         assert_eq!(bak, "theme = \"moda\"\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_config_stays_a_link_and_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(&tmp);
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        let real = tmp.path().join("dotfiles-config.toml");
+        std::fs::write(&real, "theme = \"moda\"\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, p.config_path()).unwrap();
+        write(&p, "theme = \"terminal\"\n").unwrap();
+        assert!(
+            std::fs::symlink_metadata(p.config_path())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "theme = \"terminal\"\n"
+        );
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

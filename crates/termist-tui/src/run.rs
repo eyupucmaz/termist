@@ -181,7 +181,10 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     // A theme that paints nothing shows agents in the host terminal's own colours;
     // they are asked for once, here, in case the settings switch to such a theme.
-    app.host_colors = host_colors::query(Duration::from_millis(150)).map(|(fg, bg)| TermColors {
+    // Every terminal answers the query's last part at once, which ends the wait; the
+    // long limit is for slow links (ssh), whose late answers would otherwise arrive
+    // as keys.
+    app.host_colors = host_colors::query(Duration::from_secs(1)).map(|(fg, bg)| TermColors {
         fg,
         bg,
         ansi: None,
@@ -279,7 +282,15 @@ fn save_settings(paths: &Paths, app: &mut App, actions: Vec<Action>) -> Vec<Acti
         let Action::WriteConfig(edit) = edit else {
             continue;
         };
-        let text = std::fs::read_to_string(paths.config_path()).unwrap_or_default();
+        let text = match std::fs::read_to_string(paths.config_path()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            // Never replace a file that could not be read.
+            Err(e) => {
+                app.message = Some(format!("not saved: config.toml cannot be read ({e})"));
+                continue;
+            }
+        };
         let saved = settings::apply(&text, &edit)
             .and_then(|new| config_file::write(paths, &new).map_err(|e| e.to_string()));
         if let Err(e) = saved {
@@ -453,5 +464,26 @@ mod tests {
                 .unwrap()
                 .starts_with("not saved: config.toml is not valid TOML")
         );
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let latin1 = b"# caf\xe9\ntheme = \"moda\"\n";
+        std::fs::write(paths.config_path(), latin1).unwrap();
+        let mut app = App::new();
+        let edit = Action::WriteConfig(settings::ConfigEdit::Set {
+            key: "theme",
+            value: "uskudar".into(),
+        });
+        save_settings(&paths, &mut app, vec![edit]);
+        assert!(
+            app.message
+                .unwrap()
+                .starts_with("not saved: config.toml cannot be read")
+        );
+        assert_eq!(std::fs::read(paths.config_path()).unwrap(), latin1);
     }
 }
