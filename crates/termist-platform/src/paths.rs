@@ -85,6 +85,20 @@ impl Paths {
         self.data_dir.join("termist.db")
     }
 
+    pub fn config_path(&self) -> PathBuf {
+        self.config_dir.join("config.toml")
+    }
+
+    /// Machine-specific settings over `config.toml`; never exported.
+    pub fn config_local_path(&self) -> PathBuf {
+        self.config_dir.join("config.local.toml")
+    }
+
+    /// Marker files for one-time notices the TUI has already shown.
+    pub fn notices_dir(&self) -> PathBuf {
+        self.data_dir.join("notices")
+    }
+
     /// termist's own OpenCode config dir (layered on top of the user's config).
     pub fn opencode_config_dir(&self) -> PathBuf {
         self.data_dir.join("opencode")
@@ -160,5 +174,16 @@ mod tests {
         let p = Paths::under(PathBuf::from("/x"));
         assert_eq!(p.db_path(), PathBuf::from("/x/data/termist.db"));
         assert_eq!(p.opencode_config_dir(), PathBuf::from("/x/data/opencode"));
+        assert_eq!(p.notices_dir(), PathBuf::from("/x/data/notices"));
+    }
+
+    #[test]
+    fn config_files_live_under_the_config_dir() {
+        let p = Paths::under(PathBuf::from("/x"));
+        assert_eq!(p.config_path(), PathBuf::from("/x/config/config.toml"));
+        assert_eq!(
+            p.config_local_path(),
+            PathBuf::from("/x/config/config.local.toml")
+        );
     }
 }

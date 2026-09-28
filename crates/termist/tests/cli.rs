@@ -43,3 +43,51 @@ fn other_usage_errors_still_report_and_fail() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-command"));
 }
+
+fn termist(home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_termist"))
+        .args(args)
+        .env("TERMIST_HOME", home)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn config_path_check_export_and_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let out = termist(home, &["config", "path"]);
+    assert!(out.status.success());
+    let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    assert_eq!(path, home.join("config").join("config.toml"));
+
+    assert!(
+        termist(home, &["config", "check"]).status.success(),
+        "no file is fine"
+    );
+
+    let bad = home.join("bad.toml");
+    std::fs::write(&bad, "theme = \"nope\"\n").unwrap();
+    let out = termist(home, &["config", "import", bad.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown theme \"nope\""));
+    assert!(!path.exists(), "a file with problems is not imported");
+
+    let good = home.join("good.toml");
+    std::fs::write(&good, "# mine\ntheme = \"moda\"\n").unwrap();
+    assert!(
+        termist(home, &["config", "import", good.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let out = termist(home, &["config", "export"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "# mine\ntheme = \"moda\"\n"
+    );
+
+    std::fs::write(&path, "theme = \"moda\"\nmystery = 1\n").unwrap();
+    let out = termist(home, &["config", "check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mystery: unknown setting"));
+}
