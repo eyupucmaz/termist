@@ -187,8 +187,15 @@ fn sound_test(paths: &Paths, name: &str) -> ExitCode {
     match sound::file(&paths.data_dir.join("sounds"), which) {
         Ok(file) => {
             println!("{}", file.display());
-            if !termist_platform::notify::play(&file) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if !termist_platform::notify::play(&file, move || {
+                let _ = tx.send(());
+            }) {
                 eprintln!("termist: no sound player found; termist rings the bell instead");
+            } else if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+                eprintln!(
+                    "termist: the sound player could not play; termist rings the bell instead"
+                );
             }
             ExitCode::SUCCESS
         }

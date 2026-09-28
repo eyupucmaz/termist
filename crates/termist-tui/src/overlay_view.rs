@@ -393,7 +393,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                                 Sounds::Bell => "the terminal bell",
                                 Sounds::Off => "off",
                             };
-                            ("sounds", format!("‹ {sounds} ›{}", local("notify")))
+                            ("sounds", format!("‹ {sounds} ›{}", local("notify.sounds")))
                         }
                         SettingRow::Desktop => {
                             let on = if app.config.notify.desktop {
@@ -401,7 +401,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             } else {
                                 "off"
                             };
-                            ("desktop", format!("‹ {on} ›{}", local("notify")))
+                            ("desktop", format!("‹ {on} ›{}", local("notify.desktop")))
                         }
                         SettingRow::Splash => {
                             let on = if app.config.scenes.splash {
@@ -409,14 +409,17 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             } else {
                                 "off"
                             };
-                            ("splash", format!("‹ {on} ›{}", local("scenes")))
+                            ("splash", format!("‹ {on} ›{}", local("scenes.splash")))
                         }
                         SettingRow::Idle => {
                             let idle = match app.config.scenes.idle_minutes {
                                 0 => "off".to_string(),
                                 m => format!("after {m} min"),
                             };
-                            ("idle", format!("‹ {idle} ›{}", local("scenes")))
+                            (
+                                "idle",
+                                format!("‹ {idle} ›{}", local("scenes.idle_minutes")),
+                            )
                         }
                         SettingRow::Animations => {
                             let on = if app.config.animations { "on" } else { "off" };

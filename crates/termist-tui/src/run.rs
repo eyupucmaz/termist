@@ -118,13 +118,28 @@ fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
     app.local_settings = std::fs::read_to_string(paths.config_local_path())
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .map(|t| t.keys().cloned().collect())
+        .map(|t| local_settings(&t))
         .unwrap_or_default();
     app.message = startup_message(&problems, &app.theme);
     if app.message.is_none() {
         app.message = tmux_notice(paths, &app.keymap, inside_tmux);
     }
     app
+}
+
+/// The settings a config.local.toml sets: `theme`, `notify.sounds` (tables merge key by
+/// key), and `keys` for any key binding.
+fn local_settings(table: &toml::Table) -> Vec<String> {
+    let mut out = Vec::new();
+    for (key, value) in table {
+        match value.as_table() {
+            Some(inner) if key != "keys" => {
+                out.extend(inner.keys().map(|k| format!("{key}.{k}")));
+            }
+            _ => out.push(key.clone()),
+        }
+    }
+    out
 }
 
 /// Inside tmux, C-a is usually tmux's own prefix too: said once, then remembered.
@@ -213,12 +228,21 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
-    let mut alerts = Alerts::from_env();
+    let (bell_tx, mut bell_rx) = unbounded_channel::<()>();
+    let mut alerts = Alerts::from_env(bell_tx);
     app.hour = termist_platform::clock::local_hour();
     let mut hour_read = Instant::now();
     app.start_splash(Instant::now());
     let result: anyhow::Result<()> = async {
         loop {
+            // Here, not only on a timer: steady output (a busy agent's screen) would keep
+            // any timer from ever firing, and the splash from ever ending.
+            let now = Instant::now();
+            if now.duration_since(hour_read) >= Duration::from_secs(60) {
+                app.hour = termist_platform::clock::local_hour();
+                hour_read = now;
+            }
+            app.tick(now);
             let size = terminal.size()?;
             let areas = ui::layout(
                 Rect::new(0, 0, size.width, size.height),
@@ -252,12 +276,9 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                     vec![]
                 }
                 // The next frame of a scene, the end of the splash, the idle screen.
-                _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now).into()), if wake.is_some() => {
-                    if hour_read.elapsed() >= Duration::from_secs(60) {
-                        app.hour = termist_platform::clock::local_hour();
-                        hour_read = Instant::now();
-                    }
-                    app.tick(Instant::now());
+                _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now).into()), if wake.is_some() => vec![],
+                Some(()) = bell_rx.recv() => {
+                    ring_bell();
                     vec![]
                 }
             };
@@ -326,16 +347,19 @@ fn save_settings(paths: &Paths, app: &mut App, actions: Vec<Action>) -> Vec<Acti
 struct Alerts {
     dialect: (notify::Dialect, bool),
     last_sound: Option<Instant>,
+    /// A player that started but could not play asks for the bell here.
+    bell: UnboundedSender<()>,
 }
 
 /// Two sounds within this long are one: several cards finishing together.
 const SOUND_GAP: Duration = Duration::from_secs(1);
 
 impl Alerts {
-    fn from_env() -> Alerts {
+    fn from_env(bell: UnboundedSender<()>) -> Alerts {
         Alerts {
             dialect: notify::dialect(|k| std::env::var(k).ok()),
             last_sound: None,
+            bell,
         }
     }
 
@@ -354,7 +378,10 @@ impl Alerts {
                 .is_none_or(|t| now.duration_since(t) >= SOUND_GAP)
             {
                 self.last_sound = Some(now);
-                sound(paths, app.config.notify.sounds, alert.sound);
+                let bell = self.bell.clone();
+                sound(paths, app.config.notify.sounds, alert.sound, move || {
+                    let _ = bell.send(());
+                });
             }
             if app.config.notify.desktop && !app.window_focused {
                 let (dialect, tmux) = self.dialect;
@@ -369,17 +396,22 @@ impl Alerts {
 }
 
 /// Plays `which` as the settings say: termist's own, the system's, or the bell.
-pub fn sound(paths: &Paths, setting: Sounds, which: Sound) {
+/// `failed` asks for the bell later, if a player starts but cannot play.
+fn sound(paths: &Paths, setting: Sounds, which: Sound, failed: impl FnOnce() + Send + 'static) {
     let played = match setting {
         Sounds::Off => return,
         Sounds::Bell => false,
         Sounds::Istanbul => crate::sound::file(&paths.data_dir.join("sounds"), which)
-            .is_ok_and(|file| notify::play(&file)),
-        Sounds::System => notify::system_sound().is_some_and(|file| notify::play(&file)),
+            .is_ok_and(|file| notify::play(&file, failed)),
+        Sounds::System => notify::system_sound().is_some_and(|file| notify::play(&file, failed)),
     };
     if !played {
-        let _ = stdout().write_all(b"\x07").and_then(|()| stdout().flush());
+        ring_bell();
     }
+}
+
+fn ring_bell() {
+    let _ = stdout().write_all(b"\x07").and_then(|()| stdout().flush());
 }
 
 /// A folder listing, for the folder it lists.
@@ -567,5 +599,14 @@ mod tests {
                 .starts_with("not saved: config.toml cannot be read")
         );
         assert_eq!(std::fs::read(paths.config_path()).unwrap(), latin1);
+    }
+
+    #[test]
+    fn the_local_file_sets_keys_of_tables_not_whole_tables() {
+        let t: toml::Table =
+            "theme = \"moda\"\n[scenes]\npool = [\"galata\"]\n[keys.grid]\ng = \"help\"\n"
+                .parse()
+                .unwrap();
+        assert_eq!(local_settings(&t), ["keys", "scenes.pool", "theme"]);
     }
 }

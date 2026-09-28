@@ -10,18 +10,15 @@ const PLAYERS: &[(&str, &[&str])] = &[("afplay", &[])];
 const PLAYERS: &[(&str, &[&str])] = &[("pw-play", &[]), ("paplay", &[]), ("aplay", &["-q"])];
 
 /// Plays the sound file at `path` without waiting for it; false when no player could
-/// be started (then the caller rings the bell).
-pub fn play(path: &Path) -> bool {
+/// be started (then the caller rings the bell). A player that starts but fails (no
+/// sound server over ssh, a file it cannot decode) calls `failed` from its thread.
+pub fn play(path: &Path, failed: impl FnOnce() + Send + 'static) -> bool {
     #[cfg(unix)]
     {
-        for (program, args) in PLAYERS {
-            if let Some(program) = find(program)
-                && spawn(Command::new(program).args(*args).arg(path))
-            {
-                return true;
-            }
-        }
-        false
+        let Some((program, args)) = PLAYERS.iter().find_map(|(p, a)| Some((find(p)?, *a))) else {
+            return false;
+        };
+        spawn(Command::new(program).args(args).arg(path), failed)
     }
     #[cfg(windows)]
     {
@@ -33,6 +30,7 @@ pub fn play(path: &Path) -> bool {
             Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command"])
                 .arg(script),
+            failed,
         )
     }
 }
@@ -52,8 +50,9 @@ pub fn system_sound() -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
-/// Starts `cmd` detached from our terminal, reaping it on a thread.
-fn spawn(cmd: &mut Command) -> bool {
+/// Starts `cmd` detached from our terminal and reaps it on a thread, which calls
+/// `failed` if it does not succeed.
+fn spawn(cmd: &mut Command, failed: impl FnOnce() + Send + 'static) -> bool {
     match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -61,7 +60,11 @@ fn spawn(cmd: &mut Command) -> bool {
         .spawn()
     {
         Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
+            std::thread::spawn(move || {
+                if !child.wait().is_ok_and(|status| status.success()) {
+                    failed();
+                }
+            });
             true
         }
         Err(_) => false,
@@ -181,9 +184,28 @@ mod tests {
 
     #[test]
     fn a_missing_file_or_player_is_not_a_crash() {
-        let _ = play(Path::new("/nonexistent/termist.wav"));
+        let _ = play(Path::new("/nonexistent/termist.wav"), || {});
         if let Some(sound) = system_sound() {
             assert!(sound.is_file());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_player_that_fails_is_reported() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(spawn(Command::new("false").arg("x"), move || tx
+            .send(())
+            .unwrap()));
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("failed was called");
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert!(spawn(&mut Command::new("true"), move || tx
+            .send(())
+            .unwrap()));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(500))
+                .is_err()
+        );
     }
 }

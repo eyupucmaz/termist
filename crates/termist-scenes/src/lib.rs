@@ -286,10 +286,11 @@ fn stable_seed(text: &str) -> u64 {
         .sum()
 }
 
+/// The rows of an art or mask file; a checkout with CRLF line ends reads the same.
 fn lines(text: &str) -> Vec<Vec<char>> {
-    text.trim_end_matches('\n')
+    text.trim_end_matches(['\n', '\r'])
         .split('\n')
-        .map(|l| l.chars().collect())
+        .map(|l| l.trim_end_matches('\r').chars().collect())
         .collect()
 }
 
@@ -1035,5 +1036,10 @@ mod tests {
             frames.iter().any(|f| (1..24).any(|y| f[y][58].ch == '\'')),
             "a drop falls down column 58"
         );
+    }
+
+    #[test]
+    fn crlf_line_ends_are_not_part_of_the_art() {
+        assert_eq!(lines("ab\r\ncd\r\n"), [vec!['a', 'b'], vec!['c', 'd']]);
     }
 }

@@ -108,7 +108,8 @@ pub struct App {
     /// The host terminal's own colours, if it said; agents get them with a theme that
     /// paints nothing.
     pub host_colors: Option<TermColors>,
-    /// The top-level settings config.local.toml sets: the settings screen leaves them.
+    /// The settings config.local.toml sets (`theme`, `notify.sounds`, and `keys` for any
+    /// key): the settings screen leaves them.
     pub local_settings: Vec<String>,
     /// `C-a z`: the pane's place until termist quits, over the configured one.
     pub pane_override: Option<PanePosition>,
@@ -203,7 +204,7 @@ impl App {
             pane_right: false,
             help_end: std::cell::Cell::new(usize::MAX),
             showing: None,
-            scene: "galata",
+            scene: "",
             scenes: HashMap::new(),
             last_input: Instant::now(),
             started: Instant::now(),
@@ -454,7 +455,9 @@ impl App {
                     self.mode = Mode::Grid;
                 }
                 // You are looking at it: a focused session that finishes is seen.
+                // A scene over the screen hides the pane: nobody is looking.
                 let seen_now = info.status == AgentStatus::Unseen
+                    && self.showing.is_none()
                     && self.selected == Some(id)
                     && self.attached == Some(id)
                     && matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
@@ -474,6 +477,7 @@ impl App {
                 // A sound and a note for a card that starts waiting or finishes, unless
                 // you are looking at it.
                 let watching = self.window_focused
+                    && self.showing.is_none()
                     && self.selected == Some(id)
                     && matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
                 let finishes = status == AgentStatus::Unseen
@@ -484,8 +488,11 @@ impl App {
                 if starts_waiting && idle {
                     self.showing = None;
                     self.last_input = Instant::now();
-                    if matches!(self.mode, Mode::Grid) {
+                    let shown =
+                        !self.archive_view && self.visible_sessions().iter().any(|s| s.id == id);
+                    if matches!(self.mode, Mode::Grid) && shown {
                         self.select(id);
+                        self.repair_selection();
                     }
                 }
                 if self.resume_pending == Some(id) && status == AgentStatus::Fresh {
@@ -1503,9 +1510,8 @@ impl App {
             SettingRow::Animations => "animations",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
-        // config.local.toml wins over the setting, or over its whole table.
-        let top = key.split('.').next().unwrap_or(key);
-        if self.local_settings.iter().any(|k| k == top) {
+        // config.local.toml wins over the settings it sets.
+        if self.local_settings.iter().any(|k| k == key) {
             self.settings_note(format!("{key} is set in config.local.toml"));
             return vec![];
         }
@@ -4348,12 +4354,14 @@ mod tests {
         );
         assert_eq!(app.config.notify.sounds, Sounds::System);
         assert!(!app.config.animations);
-        app.local_settings = vec!["scenes".into()];
+        app.local_settings = vec!["scenes.idle_minutes".into()];
         app.on_key(k(K::Char('k')));
         assert!(
             app.on_key(k(K::Right)).is_empty(),
-            "a table of config.local.toml"
+            "set in config.local.toml"
         );
+        app.on_key(k(K::Char('k')));
+        assert_eq!(app.on_key(k(K::Right)).len(), 1, "the splash is not");
     }
 
     #[test]
@@ -4369,5 +4377,60 @@ mod tests {
         );
         app.screen = ratatui::layout::Rect::new(0, 0, 110, 30);
         assert_eq!(app.next_wake(t0), Some(t0 + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn behind_the_idle_screen_nothing_is_seen_and_everything_is_announced() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        let id = app.selected.unwrap();
+        let focused = s.iter().find(|x| x.id == id).unwrap().clone();
+        app.showing = Some(Showing {
+            name: "galata",
+            since: Instant::now(),
+            kind: ShowKind::Idle,
+        });
+        let actions = update(&mut app, &focused, AgentStatus::Unseen);
+        assert!(
+            !sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkSeen { .. })),
+            "not seen"
+        );
+        assert_eq!(alerts(&actions).len(), 1, "and announced");
+        let actions = update(&mut app, &focused, AgentStatus::NeedsFeedback);
+        assert_eq!(alerts(&actions).len(), 1);
+        assert!(app.showing.is_none());
+    }
+
+    #[test]
+    fn every_scene_can_come_up_first_galata_too() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 1..200u64 {
+            let mut app = App::new();
+            app.rng = seed;
+            app.scene = "";
+            seen.insert(app.pick_scene());
+        }
+        assert!(seen.contains("galata"), "{seen:?}");
+        assert_eq!(seen.len(), 6);
+    }
+
+    #[test]
+    fn a_waiting_card_the_grid_does_not_show_is_not_selected() {
+        let (mut app, s) = app();
+        app.showing = Some(Showing {
+            name: "galata",
+            since: Instant::now(),
+            kind: ShowKind::Idle,
+        });
+        app.archive_view = true;
+        update(&mut app, &s[0], AgentStatus::NeedsFeedback);
+        assert!(app.showing.is_none());
+        assert_ne!(
+            app.selected,
+            Some(s[0].id),
+            "the archive view shows other cards"
+        );
     }
 }

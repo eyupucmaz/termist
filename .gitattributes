@@ -1,0 +1,2 @@
+# Scene art is laid out by column: keep it byte for byte on every OS.
+assets/scenes/** text eol=lf
