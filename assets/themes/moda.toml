@@ -1,0 +1,30 @@
+# Moda: light, a sunset on the Moda shore: cream, peach and coral.
+name = "Moda"
+
+[ui]
+bg = "#fbf4e8"
+fg = "#2b2530"
+dim = "#7d7068"
+border = "#cdb89f"
+accent = "#d9573f"
+focus = "#c9731e"
+warn = "#a8780a"
+error = "#c0392b"
+selection = { fg = "#2b2530", bg = "#f6dcc8" }
+tab_active = { fg = "#2b2530", bg = "#f4c7a8", bold = true }
+
+[status]
+fresh = "#8c7f74"
+running = "#a8780a"
+done = "#2a5aa8"
+ready = "#2e7d4f"
+waiting = "#c0392b"
+closed = "#8c7f74"
+exited = "#9b3b8f"
+disconnected = "#7d7068"
+
+[ansi]
+colors = [
+  "#2b2530", "#c0392b", "#2e7d4f", "#9a6a00", "#2a5aa8", "#9b3b8f", "#0f7f82", "#d8ccbb",
+  "#5a4f58", "#e0503f", "#3f9a63", "#b07f0a", "#3d73c4", "#b8559f", "#1a9a9d", "#f3ebdd",
+]

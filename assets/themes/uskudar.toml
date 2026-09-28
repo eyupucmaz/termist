@@ -1,0 +1,34 @@
+# Üsküdar: dark, after the Iznik tiles of the mosques. The default theme.
+# Colours are "#rrggbb" or an ANSI colour name; a style is a colour or a table
+# with fg, bg, bold and reversed. `bg` paints the whole screen.
+name = "Üsküdar"
+
+[ui]
+bg = "#0f1d2e"
+fg = "#e6edf3"
+dim = "#93a4b8"
+border = "#2c4560"
+accent = "#40c2bd"
+focus = "#e9c46a"
+warn = "#f2cc5b"
+error = "#ff7a6b"
+selection = { fg = "#ffffff", bg = "#1f4b57" }
+tab_active = { fg = "#e6edf3", bg = "#1d3a4a", bold = true }
+
+[status]
+fresh = "#6f8196"
+running = "#f2cc5b"
+done = "#7fb2ff"
+ready = "#5fcf8a"
+waiting = "#ff7a6b"
+closed = "#6f8196"
+exited = "#d68fd6"
+disconnected = "#93a4b8"
+
+# The 16 ANSI colours agents print with: black red green yellow blue magenta cyan white,
+# then the bright ones.
+[ansi]
+colors = [
+  "#1b2b3d", "#ff7a6b", "#5fcf8a", "#f2cc5b", "#7fb2ff", "#d68fd6", "#40c2bd", "#cfd8e3",
+  "#3a5068", "#ff9a8d", "#86e0a8", "#f7dc8a", "#a6c9ff", "#e5b0e5", "#74d9d4", "#ffffff",
+]

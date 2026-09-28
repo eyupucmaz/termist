@@ -1997,6 +1997,7 @@ dependencies = [
  "termist-core",
  "termist-platform",
  "tokio",
+ "toml",
 ]
 
 [[package]]

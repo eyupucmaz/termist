@@ -7,4 +7,5 @@ pub mod overlay;
 pub mod overlay_view;
 pub mod run;
 pub mod text_input;
+pub mod theme;
 pub mod ui;

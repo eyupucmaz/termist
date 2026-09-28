@@ -4,6 +4,7 @@ pub mod config_file;
 pub mod framed;
 pub mod ipc;
 pub mod paths;
+pub mod term;
 
 pub use client::Client;
 pub use paths::Paths;
