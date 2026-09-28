@@ -5,6 +5,7 @@ use crate::keys::{self, Action as KeyAction, Context};
 use crate::overlay::{
     BrowseEntry, CaptureTarget, Overlay, QuickPrompt, SETTING_ROWS, SettingRow, key_rows,
 };
+use crate::scene_view;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::status_style;
@@ -320,8 +321,22 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             );
         }
         Overlay::Help { scroll } => {
-            let lines = help_lines(app);
-            let area = centered(body, 78, body.height);
+            let mut lines = help_lines(app);
+            let mut width = 78;
+            // The About scene on top, where it fits.
+            if let Some(scene) = app.scenes.get(app.scene)
+                && app.theme.draws_scenes()
+                && body.width as usize >= scene.width + 2
+            {
+                width = scene.width as u16 + 2;
+                let n = app.scene_frame(std::time::Instant::now());
+                let mut top = scene_view::lines(scene, app.time_of_day(), n, t);
+                top.push(Line::from(Span::styled(format!(" {}", scene.title), dim())));
+                top.push(Line::default());
+                top.append(&mut lines);
+                lines = top;
+            }
+            let area = centered(body, width, body.height);
             let room = area.height.saturating_sub(2) as usize;
             let end = lines.len().saturating_sub(room);
             app.help_end.set(end);

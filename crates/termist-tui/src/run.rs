@@ -15,7 +15,7 @@ use ratatui::layout::Rect;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Problem};
 use termist_core::{ClientRequest, ServerEvent, TermColors};
 use termist_platform::config_file;
@@ -209,6 +209,9 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
+    app.hour = termist_platform::clock::local_hour();
+    let mut hour_read = Instant::now();
+    app.start_splash(Instant::now());
     let result: anyhow::Result<()> = async {
         loop {
             let size = terminal.size()?;
@@ -224,6 +227,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 return Ok(());
             }
             terminal.draw(|f| ui::draw(f, &app, &areas))?;
+            let wake = app.next_wake(Instant::now());
             let actions = tokio::select! {
                 ev = input_rx.recv() => match ev {
                     Some(Event::Key(k)) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => app.on_key(k),
@@ -237,6 +241,15 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 },
                 Some((dir, listing)) = listing_rx.recv() => {
                     app.listed(&dir, listing);
+                    vec![]
+                }
+                // The next frame of a scene, the end of the splash, the idle screen.
+                _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now).into()), if wake.is_some() => {
+                    if hour_read.elapsed() >= Duration::from_secs(60) {
+                        app.hour = termist_platform::clock::local_hour();
+                        hour_read = Instant::now();
+                    }
+                    app.tick(Instant::now());
                     vec![]
                 }
             };

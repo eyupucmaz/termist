@@ -1974,6 +1974,7 @@ dependencies = [
  "tempfile",
  "termist-core",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2003,6 +2004,7 @@ dependencies = [
  "tempfile",
  "termist-core",
  "termist-platform",
+ "termist-scenes",
  "tokio",
  "toml",
  "toml_edit",
