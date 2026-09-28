@@ -4,8 +4,8 @@
 //! `dim` text, the `accent` of the selected card, one colour per agent status, and the
 //! 16 ANSI colours agents print with. Status colours keep their meaning in every theme.
 use ratatui::style::{Color, Modifier, Style};
-use termist_core::AgentStatus;
 use termist_core::config::ColorDepth;
+use termist_core::{AgentStatus, TermColors};
 use toml::{Table, Value};
 
 pub type Rgb = (u8, u8, u8);
@@ -21,15 +21,6 @@ const SOURCES: [(&str, &str); 3] = [
         include_str!("../../../assets/themes/terminal.toml"),
     ),
 ];
-
-/// The colours a theme tells agents about: default foreground and background, and
-/// the 16 ANSI colours. The pane draws exactly these.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AgentColors {
-    pub fg: Rgb,
-    pub bg: Rgb,
-    pub ansi: [Rgb; 16],
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
@@ -53,8 +44,9 @@ pub struct Theme {
     pub pane_bg: Color,
     /// ANSI colours 0-15 in the pane; `None` leaves them to the host terminal.
     ansi: Option<[Color; 16]>,
-    /// What agents are told, in 24-bit colour; `None` for a theme that paints nothing.
-    pub agent_colors: Option<AgentColors>,
+    /// What agents are told their terminal's colours are, in 24-bit colour (the pane
+    /// draws exactly these); `None` for a theme that paints nothing.
+    pub agent_colors: Option<TermColors>,
     /// The theme asked for could not be drawn with this terminal's colours, and this
     /// one stands in for it.
     pub stands_in_for: Option<&'static str>,
@@ -265,7 +257,11 @@ impl Spec {
             _ => Style::default(),
         };
         let agent_colors = match (self.fg, self.bg, self.ansi) {
-            (Some(fg), Some(bg), Some(ansi)) => Some(AgentColors { fg, bg, ansi }),
+            (Some(fg), Some(bg), Some(ansi)) => Some(TermColors {
+                fg,
+                bg,
+                ansi: Some(ansi),
+            }),
             _ => None,
         };
         Theme {
@@ -495,7 +491,7 @@ mod tests {
         );
         let agents = t.agent_colors.unwrap();
         assert_eq!(agents.bg, (0xfb, 0xf4, 0xe8));
-        assert_eq!(agents.ansi[1], (0xc0, 0x39, 0x2b));
+        assert_eq!(agents.ansi.unwrap()[1], (0xc0, 0x39, 0x2b));
     }
 
     #[test]

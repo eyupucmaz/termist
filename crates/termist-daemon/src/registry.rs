@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
-    ServerEvent, SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, now_ms,
+    ServerEvent, SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, TermColors, now_ms,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -88,6 +88,8 @@ pub struct Registry {
     sessions: Vec<Session>,
     /// The quick prompt's last choice, as the store has it.
     last_launch: Option<LaunchOptions>,
+    /// What agents are told their terminal's colours are: the last client's.
+    colors: TermColors,
     clients: HashMap<ClientId, UnboundedSender<ServerEvent>>,
     notes: UnboundedSender<SessionNote>,
     shutdown: Option<oneshot::Sender<()>>,
@@ -133,6 +135,7 @@ impl Registry {
                 .map(|StoredSession { info, resumable }| Session::new(info, None, resumable))
                 .collect(),
             last_launch,
+            colors: TermColors::default(),
             clients: HashMap::new(),
             notes,
             shutdown: Some(shutdown),
@@ -467,6 +470,12 @@ impl Registry {
                 self.send(client, ServerEvent::Models { harness, recent });
             }
             ClientRequest::RescanHarnesses => self.rescan(std::time::Instant::now()),
+            ClientRequest::SetColors(colors) => {
+                self.colors = colors;
+                for cmd in self.sessions.iter().filter_map(|s| s.cmd.as_ref()) {
+                    let _ = cmd.send(SessionCmd::SetColors(colors));
+                }
+            }
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -908,7 +917,7 @@ impl Registry {
             resume: None,
         });
         let program = launch.spec.program.clone();
-        let cmd = session::spawn(launch.spec, self.notes.clone())
+        let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
             .with_context(|| format!("could not start {} ({program})", kind.label()))?;
         self.remember_launch(&kind, prompt.as_deref(), model.as_deref());
         self.created += 1;
@@ -978,7 +987,7 @@ impl Registry {
             resume: resume.as_deref(),
         });
         let program = launch.spec.program.clone();
-        let cmd = session::spawn(launch.spec, self.notes.clone())
+        let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
             .with_context(|| format!("could not start {} ({program})", kind.label()))?;
         let s = &mut self.sessions[pos];
         s.cmd = Some(cmd); // dropping the old sender ends the old session task

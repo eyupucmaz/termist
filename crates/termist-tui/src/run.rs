@@ -127,6 +127,10 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     )
     .await?;
     write_frame(&mut writer, &ClientRequest::ListState).await?;
+    let mut app = app_from_config(&paths);
+    if let Some(colors) = app.theme.agent_colors {
+        write_frame(&mut writer, &ClientRequest::SetColors(colors)).await?;
+    }
 
     let (server_tx, mut server_rx) = unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
@@ -159,7 +163,6 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
-    let mut app = app_from_config(&paths);
     let result: anyhow::Result<()> = async {
         loop {
             let size = terminal.size()?;
