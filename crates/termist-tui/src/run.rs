@@ -1,5 +1,6 @@
 use crate::app::{Action, App};
 use crate::browse::{self, Listing};
+use crate::keys::Keymap;
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
@@ -96,10 +97,12 @@ fn daemon_cwd() -> PathBuf {
 
 /// The app with the user's settings; what could not be used is said once in the footer.
 fn app_from_config(paths: &Paths) -> App {
-    let (config, problems) = termist_platform::config_file::load(paths);
+    let (config, mut problems) = termist_platform::config_file::load(paths);
     let depth = termist_platform::term::resolve_depth(config.colors);
     let theme = Theme::named(&config.theme, depth);
-    let mut app = App::with_config(config, theme);
+    let (keymap, key_problems) = Keymap::from_config(&config.keys, &config.prefix);
+    problems.extend(key_problems);
+    let mut app = App::with_config(config, theme, keymap);
     app.message = startup_message(&problems, &app.theme);
     app
 }

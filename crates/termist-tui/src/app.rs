@@ -1,5 +1,6 @@
 use crate::browse::Listing;
 use crate::encode::{encode_key, encode_paste};
+use crate::keys::{Action as KeyAction, Context, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
     self, BrowseEntry, ModelChoice, ModelPicker, OpenProject, Overlay, QuickPrompt,
@@ -75,6 +76,7 @@ pub struct App {
     project_pending: Option<ProjectPending>,
     pub config: Config,
     pub theme: Theme,
+    pub keymap: Keymap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,10 +99,10 @@ impl Default for App {
 impl App {
     /// Default settings in the terminal's own colours.
     pub fn new() -> App {
-        App::with_config(Config::default(), Theme::terminal())
+        App::with_config(Config::default(), Theme::terminal(), Keymap::defaults())
     }
 
-    pub fn with_config(config: Config, theme: Theme) -> App {
+    pub fn with_config(config: Config, theme: Theme, keymap: Keymap) -> App {
         App {
             state: StateSnapshot::default(),
             project: None,
@@ -131,6 +133,7 @@ impl App {
             project_pending: None,
             config,
             theme,
+            keymap,
         }
     }
 
@@ -352,7 +355,7 @@ impl App {
                 actions.extend(self.archive_key(key));
             }
             Mode::Focus => {
-                if ctrl && key.code == KeyCode::Char('a') {
+                if self.keymap.prefix.matches(&key) {
                     self.mode = Mode::FocusPrefix;
                 } else if let Some(id) = self.selected {
                     let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
@@ -364,71 +367,24 @@ impl App {
             }
             Mode::FocusPrefix => {
                 self.mode = Mode::Focus;
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Grid,
-                    KeyCode::Char('a') if ctrl => {
-                        if let Some(id) = self.selected {
-                            actions.push(Action::Send(ClientRequest::Input {
-                                session: id,
-                                data: vec![0x01],
-                            }));
-                        }
+                if self.keymap.prefix.matches(&key) {
+                    // The prefix twice sends it to the session.
+                    if let Some(id) = self.selected {
+                        let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
+                        let data = encode_key(&key, &modes);
+                        actions.push(Action::Send(ClientRequest::Input { session: id, data }));
                     }
-                    KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
-                    KeyCode::Char('/') if !ctrl => self.open_palette(),
-                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => {
-                        actions.extend(self.navigate(c))
-                    }
-                    _ => {}
+                } else if let Some(action) = self.keymap.action(Context::Focus, &key) {
+                    actions.extend(self.act(action));
                 }
             }
             Mode::Grid => {
                 // An error message stays up only until the next key.
                 self.message = None;
-                match key.code {
-                    KeyCode::Char('c') if ctrl => self.mode = Mode::ConfirmQuit,
-                    KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
-                    KeyCode::Enter if self.selected.is_some() => actions.extend(self.enter()),
-                    KeyCode::Char('n') if !ctrl => actions.extend(self.open_picker()),
-                    KeyCode::Char('p') if !ctrl => actions.extend(self.open_quick_prompt()),
-                    KeyCode::Char('t') if !ctrl => actions.extend(self.create(SessionKind::Shell)),
-                    KeyCode::Char(' ') if !ctrl => self.open_follow_up(),
-                    KeyCode::Char('r') if !ctrl => self.open_rename(),
-                    KeyCode::Char('a') if !ctrl => {
-                        if let Some(id) = self.selected {
-                            self.mode = Mode::ConfirmArchive(id);
-                        }
-                    }
-                    KeyCode::Char('A') if !ctrl => self.set_archive_view(true),
-                    KeyCode::Char('/') if !ctrl => self.open_palette(),
-                    KeyCode::Char('d') if ctrl => self.half_page(1),
-                    KeyCode::Char('u') if ctrl => self.half_page(-1),
-                    KeyCode::Char('d') => {
-                        if let Some(id) = self.selected {
-                            self.mode = Mode::ConfirmKill(id);
-                        }
-                    }
-                    KeyCode::Char(']') => self.switch_project(1),
-                    KeyCode::Char('[') => self.switch_project(-1),
-                    KeyCode::Char(c @ '1'..='9') => {
-                        let tab = self
-                            .open_projects()
-                            .nth(c as usize - '1' as usize)
-                            .map(|p| p.id);
-                        if let Some(id) = tab {
-                            self.go_to_project(id);
-                        }
-                    }
-                    KeyCode::Char('o') if !ctrl => actions.extend(self.open_project_browser()),
-                    KeyCode::Char('x') if !ctrl => {
-                        if let Some(project) = self.project {
-                            self.mode = Mode::ConfirmClose(project);
-                        }
-                    }
-                    KeyCode::Char(c @ ('.' | ',' | 'h' | 'j' | 'k' | 'l')) => {
-                        actions.extend(self.navigate(c))
-                    }
-                    _ => {}
+                if ctrl && key.code == KeyCode::Char('c') {
+                    self.mode = Mode::ConfirmQuit;
+                } else if let Some(action) = self.keymap.action(Context::Grid, &key) {
+                    actions.extend(self.act(action));
                 }
             }
         }
@@ -1104,24 +1060,86 @@ impl App {
 
     /// The archive view: move, restore (Enter), delete (d), leave (A, Esc). Keys that
     /// start or reach live sessions do nothing here.
+    /// The archive view: Esc leaves and Enter restores; of the grid's keys only moving,
+    /// leaving, killing and quitting work.
     fn archive_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => self.set_archive_view(false),
-            KeyCode::Char('A') if !ctrl => self.set_archive_view(false),
             KeyCode::Enter => return self.restore(),
-            KeyCode::Char('d') if ctrl => self.half_page(1),
-            KeyCode::Char('u') if ctrl => self.half_page(-1),
-            KeyCode::Char('d') => {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.mode = Mode::ConfirmQuit
+            }
+            _ => {
+                if let Some(
+                    action @ (KeyAction::ArchiveView
+                    | KeyAction::HalfPageDown
+                    | KeyAction::HalfPageUp
+                    | KeyAction::Kill
+                    | KeyAction::Quit
+                    | KeyAction::NextTab
+                    | KeyAction::PrevTab
+                    | KeyAction::Left
+                    | KeyAction::Down
+                    | KeyAction::Up
+                    | KeyAction::Right),
+                ) = self.keymap.action(Context::Grid, &key)
+                {
+                    return self.act(action);
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Does what a grid or focus-mode key is bound to.
+    fn act(&mut self, action: KeyAction) -> Vec<Action> {
+        match action {
+            KeyAction::Quit => self.mode = Mode::ConfirmQuit,
+            KeyAction::Focus if self.selected.is_some() => return self.enter(),
+            KeyAction::Focus => {}
+            KeyAction::Grid => self.mode = Mode::Grid,
+            KeyAction::NewSession => return self.open_picker(),
+            KeyAction::QuickPrompt => return self.open_quick_prompt(),
+            KeyAction::NewShell => return self.create(SessionKind::Shell),
+            KeyAction::FollowUp => self.open_follow_up(),
+            KeyAction::Rename => self.open_rename(),
+            KeyAction::Archive => {
+                if let Some(id) = self.selected {
+                    self.mode = Mode::ConfirmArchive(id);
+                }
+            }
+            KeyAction::ArchiveView => self.set_archive_view(!self.archive_view),
+            KeyAction::Palette => self.open_palette(),
+            KeyAction::HalfPageDown => self.half_page(1),
+            KeyAction::HalfPageUp => self.half_page(-1),
+            KeyAction::Kill => {
                 if let Some(id) = self.selected {
                     self.mode = Mode::ConfirmKill(id);
                 }
             }
-            KeyCode::Char('q') => self.mode = Mode::ConfirmQuit,
-            KeyCode::Char(']') => self.switch_project(1),
-            KeyCode::Char('[') => self.switch_project(-1),
-            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => return self.navigate(c),
-            _ => {}
+            KeyAction::NextTab => self.switch_project(1),
+            KeyAction::PrevTab => self.switch_project(-1),
+            KeyAction::Tab(n) => {
+                let tab = self
+                    .open_projects()
+                    .nth(n.saturating_sub(1) as usize)
+                    .map(|p| p.id);
+                if let Some(id) = tab {
+                    self.go_to_project(id);
+                }
+            }
+            KeyAction::OpenProject => return self.open_project_browser(),
+            KeyAction::CloseTab => {
+                if let Some(project) = self.project {
+                    self.mode = Mode::ConfirmClose(project);
+                }
+            }
+            KeyAction::NextAttention => return self.navigate('.'),
+            KeyAction::PrevAttention => return self.navigate(','),
+            KeyAction::Left => return self.navigate('h'),
+            KeyAction::Down => return self.navigate('j'),
+            KeyAction::Up => return self.navigate('k'),
+            KeyAction::Right => return self.navigate('l'),
         }
         vec![]
     }
@@ -3149,5 +3167,82 @@ mod tests {
             panic!("no quick prompt");
         };
         assert_eq!(q.launch.harness, Harness::Codex);
+    }
+
+    #[test]
+    fn keys_match_with_their_exact_modifiers() {
+        let (mut app, _) = app();
+        let selected = app.selected;
+        let project = app.project;
+        for c in ['h', 'j', 'k', 'l', '.', ',', ']', '[', '1', '2'] {
+            assert!(sent(&app.on_key(ctrl(c))).is_empty(), "{c:?}");
+            assert_eq!(app.selected, selected, "Ctrl+{c} does not move");
+            assert_eq!(app.project, project, "Ctrl+{c} does not switch tabs");
+        }
+    }
+
+    fn with_keys(grid: &[(&str, &str)], focus: &[(&str, &str)], prefix: &str) -> App {
+        let (mut app, _) = app();
+        let keys = termist_core::config::KeysConfig {
+            grid: grid
+                .iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+            focus: focus
+                .iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+        };
+        let (keymap, problems) = Keymap::from_config(&keys, prefix);
+        assert!(problems.is_empty(), "{problems:?}");
+        app.keymap = keymap;
+        app
+    }
+
+    #[test]
+    fn a_rebound_key_does_the_action_and_an_unbound_one_nothing() {
+        let mut app = with_keys(&[("g", "quick_prompt"), ("p", "none")], &[], "C-a");
+        app.on_key(k(K::Char('p')));
+        assert!(app.overlays.is_empty(), "p is unbound");
+        app.on_key(k(K::Char('g')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::QuickPrompt(_))));
+    }
+
+    #[test]
+    fn another_prefix_leaves_ctrl_a_to_the_session() {
+        let mut app = with_keys(&[], &[("z", "palette")], "C-Space");
+        let id = app.selected.unwrap();
+        app.on_key(k(K::Enter));
+        let input = |data: Vec<u8>| ClientRequest::Input { session: id, data };
+        assert_eq!(sent(&app.on_key(ctrl('a'))), vec![&input(vec![0x01])]);
+        assert_eq!(app.mode, Mode::Focus);
+        app.on_key(ctrl(' '));
+        assert_eq!(app.mode, Mode::FocusPrefix);
+        assert_eq!(sent(&app.on_key(ctrl(' '))), vec![&input(vec![0x00])]);
+        app.on_key(ctrl(' '));
+        app.on_key(k(K::Char('z')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Palette(_))));
+    }
+
+    #[test]
+    fn after_the_prefix_n_and_t_start_a_session() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Char('n')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Harness(_))));
+        app.on_key(k(K::Esc));
+        app.on_key(ctrl('a'));
+        let actions = app.on_key(k(K::Char('t')));
+        assert!(
+            sent(&actions).iter().any(|r| matches!(
+                r,
+                ClientRequest::CreateSession {
+                    kind: SessionKind::Shell,
+                    ..
+                }
+            )),
+            "{actions:?}"
+        );
     }
 }
