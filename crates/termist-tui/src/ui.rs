@@ -1,5 +1,6 @@
 //! Rendering: header, cards, live pane and footer.
 use crate::app::{App, Mode};
+use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -112,16 +113,27 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     draw_header(f, app, areas.header);
     let sessions = app.project_sessions();
     if sessions.is_empty() {
+        let key = |action| app.keymap.key(Context::Grid, action);
         let text = if !app.connected {
-            "Connecting to the termist daemon…"
+            "Connecting to the termist daemon…".to_string()
         } else if app.state.projects.is_empty() {
-            "No project yet: run termist inside a project folder."
+            "No project yet: run termist inside a project folder.".to_string()
         } else if app.project.is_none() {
-            "No project open · o opens one"
+            match key(Action::OpenProject) {
+                Some(o) => format!("No project open · {o} opens one"),
+                None => "No project open".to_string(),
+            }
         } else if app.archive_view {
-            "Nothing archived in this project.  A: back"
+            match key(Action::ArchiveView) {
+                Some(a) => format!("Nothing archived in this project.  {a}: back"),
+                None => "Nothing archived in this project.  Esc: back".to_string(),
+            }
         } else {
-            "No sessions yet.  p: new task  ·  n: agent  ·  t: shell"
+            let hints: Vec<String> = [Action::QuickPrompt, Action::NewSession, Action::NewShell]
+                .into_iter()
+                .filter_map(|a| Some(format!("{}: {}", key(a)?, a.hint())))
+                .collect();
+            format!("No sessions yet.  {}", hints.join("  ·  "))
         };
         f.render_widget(Paragraph::new(text).style(app.theme.dim), areas.body);
     } else {
@@ -389,27 +401,101 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             };
             (text, t.warn)
         }
-        (_, Mode::Grid) if app.archive_view => (
-            "archive · Enter restore and resume · hjkl move · d delete · A/Esc back · q quit"
-                .into(),
-            t.dim,
-        ),
-        (_, Mode::Grid) => (
-            "p new task · Space follow-up · / sessions · n agent · t shell · Enter focus · \
-             . next● · o open · x close tab · r rename · a archive · A archived · d kill · q quit"
-                .into(),
-            t.dim,
-        ),
-        (_, Mode::Focus) => (
-            "typing into the session · C-a Esc grid · C-a . next● · C-q grid".into(),
-            t.dim,
-        ),
-        (_, Mode::FocusPrefix) => (
-            "C-a …  Esc grid · . , next/prev● · hjkl move · C-a literal".into(),
-            t.focus,
-        ),
+        (_, Mode::Grid) if app.archive_view => (archive_hint(&app.keymap), t.dim),
+        (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
+        (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
+        (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
     };
     f.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// `key hint` for each action that has a key, joined with ` · `.
+fn hints(keymap: &Keymap, context: Context, actions: &[Action]) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|a| Some(format!("{} {}", keymap.key(context, *a)?, a.hint())))
+        .collect()
+}
+
+/// The four move keys as one word when they are single characters (`hjkl`), else
+/// joined with slashes; `None` unless all four are bound.
+fn move_keys(keymap: &Keymap, context: Context) -> Option<String> {
+    let keys =
+        [Action::Left, Action::Down, Action::Up, Action::Right].map(|a| keymap.key(context, a));
+    let keys: Vec<String> = keys.into_iter().collect::<Option<_>>()?;
+    Some(if keys.iter().all(|k| k.chars().count() == 1) {
+        keys.concat()
+    } else {
+        keys.join("/")
+    })
+}
+
+fn grid_hint(keymap: &Keymap) -> String {
+    use Action::*;
+    hints(
+        keymap,
+        Context::Grid,
+        &[
+            QuickPrompt,
+            FollowUp,
+            Palette,
+            NewSession,
+            NewShell,
+            Focus,
+            NextAttention,
+            OpenProject,
+            CloseTab,
+            Rename,
+            Archive,
+            ArchiveView,
+            Kill,
+            Quit,
+        ],
+    )
+    .join(" · ")
+}
+
+fn archive_hint(keymap: &Keymap) -> String {
+    let key = |a| keymap.key(Context::Grid, a);
+    let mut parts = vec![
+        "archive".to_string(),
+        "Enter restore and resume".to_string(),
+    ];
+    parts.extend(move_keys(keymap, Context::Grid).map(|m| format!("{m} move")));
+    parts.extend(key(Action::Kill).map(|k| format!("{k} delete")));
+    parts.push(match key(Action::ArchiveView) {
+        Some(a) => format!("{a}/Esc back"),
+        None => "Esc back".to_string(),
+    });
+    parts.extend(key(Action::Quit).map(|q| format!("{q} quit")));
+    parts.join(" · ")
+}
+
+fn focus_hint(keymap: &Keymap) -> String {
+    let prefix = keymap.prefix;
+    let mut parts = vec!["typing into the session".to_string()];
+    parts.extend(
+        hints(
+            keymap,
+            Context::Focus,
+            &[Action::Grid, Action::NextAttention],
+        )
+        .into_iter()
+        .map(|h| format!("{prefix} {h}")),
+    );
+    parts.push("C-q grid".to_string());
+    parts.join(" · ")
+}
+
+fn prefix_hint(keymap: &Keymap) -> String {
+    let key = |a| keymap.key(Context::Focus, a);
+    let mut parts = hints(keymap, Context::Focus, &[Action::Grid]);
+    if let (Some(next), Some(prev)) = (key(Action::NextAttention), key(Action::PrevAttention)) {
+        parts.push(format!("{next} {prev} next/prev●"));
+    }
+    parts.extend(move_keys(keymap, Context::Focus).map(|m| format!("{m} move")));
+    parts.push(format!("{} literal", keymap.prefix));
+    format!("{} …  {}", keymap.prefix, parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -984,5 +1070,57 @@ mod tests {
         );
         assert_eq!(buf[(34, 0)].fg, Color::Rgb(0xff, 0x7a, 0x6b));
         assert_eq!(buf[(27, 0)].fg, app.theme.dim.fg.unwrap());
+    }
+
+    #[test]
+    fn footers_follow_the_keymap() {
+        let keys = termist_core::config::KeysConfig {
+            grid: [
+                ("g", "quick_prompt"),
+                ("p", "none"),
+                ("Left", "left"),
+                ("h", "none"),
+            ]
+            .into_iter()
+            .map(|(k, a)| (k.to_string(), a.to_string()))
+            .collect(),
+            focus: [("g", "grid")]
+                .into_iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+        };
+        let (keymap, problems) = Keymap::from_config(&keys, "C-Space");
+        assert!(problems.is_empty());
+        let grid = grid_hint(&keymap);
+        assert!(grid.starts_with("g new task · Space follow-up"), "{grid}");
+        assert!(!grid.contains("p new task"));
+        assert_eq!(
+            archive_hint(&keymap),
+            "archive · Enter restore and resume · Left/j/k/l move · d delete · A/Esc back · q quit"
+        );
+        assert_eq!(
+            focus_hint(&keymap),
+            "typing into the session · C-Space Esc grid · C-Space . next● · C-q grid"
+        );
+        assert_eq!(
+            prefix_hint(&keymap),
+            "C-Space …  Esc grid · . , next/prev● · hjkl move · C-Space literal"
+        );
+        let mut app = App::new();
+        app.keymap = keymap;
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(),
+                name: "web".into(),
+                path: "/w".into(),
+                open: true,
+            }],
+            ..StateSnapshot::default()
+        }));
+        let t = render(&mut app, 70, 10);
+        assert_eq!(
+            row(&t, 1),
+            "No sessions yet.  g: new task  ·  n: agent  ·  t: shell"
+        );
     }
 }
