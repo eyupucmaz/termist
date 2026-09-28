@@ -9,8 +9,8 @@ Linux and Windows, in Istanbul.
 
 ![termist: three agents at work, one waiting for an answer](docs/demo.gif)
 
-> **Status: alpha.** `v0.1.0-alpha.1` is the first public build. It is used every day by its author,
-> but expect rough edges; notifications, sounds, themes and settings come next.
+> **Status: beta.** `v0.1.0-beta.1` adds themes, Istanbul scenes, sounds, notifications and settings
+> to the first public build. It is used every day by its author, but expect rough edges.
 
 ## Install
 

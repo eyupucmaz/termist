@@ -1256,7 +1256,12 @@ mod tests {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
         app.on_key(key(K::Char('?')));
-        insta::assert_snapshot!(render(&mut app, 80, 40).backend());
+        // The version is left out: it changes with every release.
+        let text = render(&mut app, 80, 40)
+            .backend()
+            .to_string()
+            .replace(env!("CARGO_PKG_VERSION"), "<version>");
+        insta::assert_snapshot!(text);
     }
 
     #[test]
