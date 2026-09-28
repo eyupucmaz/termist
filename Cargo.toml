@@ -15,6 +15,7 @@ termist-platform = { path = "crates/termist-platform" }
 termist-term = { path = "crates/termist-term" }
 termist-daemon = { path = "crates/termist-daemon" }
 termist-tui = { path = "crates/termist-tui" }
+termist-scenes = { path = "crates/termist-scenes" }
 alacritty_terminal = "0.26"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

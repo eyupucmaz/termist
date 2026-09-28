@@ -1977,6 +1977,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "termist-scenes"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "toml",
+]
+
+[[package]]
 name = "termist-term"
 version = "0.1.0-alpha.1"
 dependencies = [
