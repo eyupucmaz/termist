@@ -21,7 +21,17 @@ impl Version {
             Some((core, pre)) => (core, pre.split('.').map(str::to_string).collect()),
             None => (text, vec![]),
         };
-        let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+        // Only what SemVer allows: the tag also goes into the installer's URL.
+        let identifier =
+            |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        if !pre.iter().all(|p| identifier(p)) {
+            return None;
+        }
+        let mut parts = core.split('.').map(|p| {
+            Some(p)
+                .filter(|p| p.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|p| p.parse::<u64>().ok())
+        });
         let core = [parts.next()??, parts.next()??, parts.next()??];
         parts.next().is_none().then_some(Version { core, pre })
     }
@@ -162,9 +172,14 @@ pub fn run(check_only: bool) -> ExitCode {
         }
     };
     let Some(latest) = Version::parse(&tag) else {
-        eprintln!("termist: the newest release has a tag termist cannot read: {tag}");
+        eprintln!("termist: the newest release has a tag termist cannot read: {tag:?}");
         return ExitCode::FAILURE;
     };
+    // The tag names the download, so it must be exactly the version it reads as.
+    if tag.strip_prefix('v').unwrap_or(&tag) != latest.to_string() {
+        eprintln!("termist: the newest release has a tag termist cannot read: {tag:?}");
+        return ExitCode::FAILURE;
+    }
     if latest <= current {
         println!("termist {current} is up to date (the newest release is {latest})");
         return ExitCode::SUCCESS;
@@ -208,6 +223,7 @@ pub fn run(check_only: bool) -> ExitCode {
 }
 
 /// Runs the release's installer for `tag`, into `prefix` (its PATH set-up untouched).
+/// The URL reaches the shell through the environment, never inside the command line.
 fn install(tag: &str, prefix: &Path, exe: &Path) -> Result<(), String> {
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     #[cfg(unix)]
@@ -215,9 +231,11 @@ fn install(tag: &str, prefix: &Path, exe: &Path) -> Result<(), String> {
         let _ = exe;
         Command::new("sh")
             .arg("-c")
-            .arg(format!(
-                "curl --proto '=https' --tlsv1.2 -LsSf '{base}/termist-installer.sh' | sh"
-            ))
+            .arg("curl --proto '=https' --tlsv1.2 -LsSf \"$TERMIST_INSTALLER_URL\" | sh")
+            .env(
+                "TERMIST_INSTALLER_URL",
+                format!("{base}/termist-installer.sh"),
+            )
             .env("TERMIST_INSTALL_DIR", prefix)
             .env("TERMIST_NO_MODIFY_PATH", "1")
             .status()
@@ -231,7 +249,11 @@ fn install(tag: &str, prefix: &Path, exe: &Path) -> Result<(), String> {
             .map_err(|e| format!("could not move {} aside ({e})", exe.display()))?;
         let status = Command::new("powershell")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
-            .arg(format!("irm '{base}/termist-installer.ps1' | iex"))
+            .arg("irm $env:TERMIST_INSTALLER_URL | iex")
+            .env(
+                "TERMIST_INSTALLER_URL",
+                format!("{base}/termist-installer.ps1"),
+            )
             .env("TERMIST_INSTALL_DIR", prefix)
             .env("TERMIST_NO_MODIFY_PATH", "1")
             .status();
@@ -260,7 +282,19 @@ mod tests {
         assert_eq!(v("v0.1.0-alpha.1"), v("0.1.0-alpha.1"));
         assert_eq!(v("1.2.3").to_string(), "1.2.3");
         assert_eq!(v("0.1.0-alpha.1").to_string(), "0.1.0-alpha.1");
-        for bad in ["", "1.2", "1.2.3.4", "a.b.c", "v1.2.x"] {
+        for bad in [
+            "",
+            "1.2",
+            "1.2.3.4",
+            "a.b.c",
+            "v1.2.x",
+            "+1.2.3",
+            "1.2.3-",
+            "1.2.3-a..b",
+            "1.2.3-a'b",
+            "1.2.3-a/../b",
+            "1.2.3-a b",
+        ] {
             assert_eq!(Version::parse(bad), None, "{bad:?}");
         }
     }
