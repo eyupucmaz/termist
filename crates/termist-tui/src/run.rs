@@ -96,7 +96,7 @@ fn daemon_cwd() -> PathBuf {
 }
 
 /// The app with the user's settings; what could not be used is said once in the footer.
-fn app_from_config(paths: &Paths) -> App {
+fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
     let (config, mut problems) = termist_platform::config_file::load(paths);
     let depth = termist_platform::term::resolve_depth(config.colors);
     let theme = Theme::named(&config.theme, depth);
@@ -104,8 +104,28 @@ fn app_from_config(paths: &Paths) -> App {
     problems.extend(key_problems);
     let mut app = App::with_config(config, theme, keymap);
     app.message = startup_message(&problems, &app.theme);
+    if app.message.is_none() {
+        app.message = tmux_notice(paths, &app.keymap, inside_tmux);
+    }
     app
 }
+
+/// Inside tmux, C-a is usually tmux's own prefix too: said once, then remembered.
+fn tmux_notice(paths: &Paths, keymap: &Keymap, inside_tmux: bool) -> Option<String> {
+    if !inside_tmux || keymap.prefix.to_string() != "C-a" {
+        return None;
+    }
+    let marker = paths.notices_dir().join("tmux-prefix");
+    if marker.exists() {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(paths.notices_dir());
+    let _ = std::fs::write(&marker, "");
+    Some(TMUX_NOTICE.into())
+}
+
+const TMUX_NOTICE: &str =
+    "Inside tmux, C-a is tmux's prefix too · prefix = \"C-Space\" in config.toml frees it";
 
 fn startup_message(problems: &[Problem], theme: &Theme) -> Option<String> {
     match problems {
@@ -131,7 +151,8 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     )
     .await?;
     write_frame(&mut writer, &ClientRequest::ListState).await?;
-    let mut app = app_from_config(&paths);
+    let inside_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    let mut app = app_from_config(&paths, inside_tmux);
     if let Some(colors) = app.theme.agent_colors {
         write_frame(&mut writer, &ClientRequest::SetColors(colors)).await?;
     }
@@ -315,13 +336,13 @@ mod tests {
             "theme = \"moda\"\ncolors = \"truecolor\"\n[agents]\ndefault = \"codex\"\n",
         )
         .unwrap();
-        let app = app_from_config(&paths);
+        let app = app_from_config(&paths, false);
         assert_eq!(app.theme.id, "moda");
         assert_eq!(app.config.agents.default, termist_core::Harness::Codex);
         assert_eq!(app.message, None);
 
         std::fs::write(paths.config_path(), "theme = \"nope\"\ncolors = \"256\"\n").unwrap();
-        let app = app_from_config(&paths);
+        let app = app_from_config(&paths, false);
         assert_eq!(app.theme.id, "uskudar", "the default theme");
         assert_eq!(
             app.message.as_deref(),
@@ -350,5 +371,22 @@ mod tests {
             startup_message(&two, &Theme::terminal()).as_deref(),
             Some("config: 2 problems · termist config check")
         );
+    }
+
+    #[test]
+    fn inside_tmux_the_prefix_notice_is_said_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        let first = tmux_notice(&paths, &Keymap::defaults(), true);
+        let second = tmux_notice(&paths, &Keymap::defaults(), true);
+        let (other, _) = Keymap::from_config(&Default::default(), "C-Space");
+        let tmp2 = tempfile::tempdir().unwrap();
+        let other_paths = Paths::under(tmp2.path().to_path_buf());
+        let with_other_prefix = tmux_notice(&other_paths, &other, true);
+        let outside = tmux_notice(&other_paths, &Keymap::defaults(), false);
+        assert_eq!(first.as_deref(), Some(TMUX_NOTICE));
+        assert_eq!(second, None, "once");
+        assert_eq!(with_other_prefix, None);
+        assert_eq!(outside, None);
     }
 }
