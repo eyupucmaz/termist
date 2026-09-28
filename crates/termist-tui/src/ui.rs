@@ -1,12 +1,15 @@
 //! Rendering: header, cards, live pane and footer.
 use crate::app::{App, Mode};
+use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
+use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use termist_core::config::PanePosition;
 use termist_core::{AgentStatus, Snapshot, cell_flags};
 
 const CARD_W: u16 = 24;
@@ -16,6 +19,8 @@ pub struct Areas {
     pub header: Rect,
     /// Everything between the header and the footer: cards and pane.
     pub body: Rect,
+    /// Where cards and their "more" lines go: above the pane, or left of it.
+    pub cards_zone: Rect,
     pub cards: Rect,
     pub pane: Rect,
     pub pane_inner: Rect,
@@ -26,9 +31,14 @@ pub struct Areas {
     /// Not every card fits: the line above and the line below the cards count the
     /// hidden ones.
     pub scroll_lines: bool,
+    /// The pane is right of the cards, not under them.
+    pub pane_right: bool,
 }
 
-pub fn layout(area: Rect, session_count: usize) -> Areas {
+/// From this many columns up, `auto` puts the pane right of the cards.
+pub const PANE_RIGHT_FROM: u16 = 180;
+
+pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas {
     let header = Rect {
         height: area.height.min(1),
         ..area
@@ -44,32 +54,59 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
         height: area.height.saturating_sub(header.height + footer_h),
         ..area
     };
-    let cards_per_row = (body.width / CARD_W).max(1) as usize;
-    let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
-    let room = body.height / 2;
-    let cards_h = (card_rows * CARD_H).min(room);
-    let scroll_lines = card_rows * CARD_H > room;
-    let (cards, visible_rows) = if scroll_lines {
-        let rows = (cards_h.saturating_sub(2) / CARD_H).max(1);
-        let cards = Rect {
-            y: body.y + 1,
-            height: (rows * CARD_H).min(cards_h.saturating_sub(1)),
+    let pane_right = match position {
+        PanePosition::Right => true,
+        PanePosition::Bottom => false,
+        PanePosition::Auto => area.width >= PANE_RIGHT_FROM,
+    };
+    let (cards_zone, cards_per_row) = if pane_right {
+        // At most two fifths of the width, and always one column of cards.
+        let per_row = (body.width * 2 / 5 / CARD_W).max(1);
+        let zone = Rect {
+            width: (per_row * CARD_W).min(body.width),
             ..body
+        };
+        (zone, per_row as usize)
+    } else {
+        let per_row = (body.width / CARD_W).max(1) as usize;
+        let card_rows = session_count.max(1).div_ceil(per_row) as u16;
+        let zone = Rect {
+            height: (card_rows * CARD_H).min(body.height / 2),
+            ..body
+        };
+        (zone, per_row)
+    };
+    let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
+    let scroll_lines = card_rows * CARD_H > cards_zone.height;
+    let (cards, visible_rows) = if scroll_lines {
+        let rows = (cards_zone.height.saturating_sub(2) / CARD_H).max(1);
+        let cards = Rect {
+            y: cards_zone.y + 1,
+            height: (rows * CARD_H).min(cards_zone.height.saturating_sub(1)),
+            ..cards_zone
         };
         (cards, rows)
     } else {
         (
             Rect {
-                height: cards_h,
-                ..body
+                height: card_rows * CARD_H,
+                ..cards_zone
             },
             card_rows,
         )
     };
-    let pane = Rect {
-        y: body.y + cards_h,
-        height: body.height - cards_h,
-        ..body
+    let pane = if pane_right {
+        Rect {
+            x: cards_zone.right(),
+            width: body.width - cards_zone.width,
+            ..body
+        }
+    } else {
+        Rect {
+            y: body.y + cards_zone.height,
+            height: body.height - cards_zone.height,
+            ..body
+        }
     };
     let pane_inner = Rect {
         x: pane.x + 1,
@@ -80,6 +117,7 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
     Areas {
         header,
         body,
+        cards_zone,
         cards,
         pane,
         pane_inner,
@@ -87,41 +125,54 @@ pub fn layout(area: Rect, session_count: usize) -> Areas {
         cards_per_row,
         card_rows: visible_rows as usize,
         scroll_lines,
+        pane_right,
     }
 }
 
-pub fn status_style(status: AgentStatus) -> (char, Color, &'static str) {
-    match status {
-        AgentStatus::Fresh => ('●', Color::DarkGray, "fresh"),
-        AgentStatus::Running => ('●', Color::Yellow, "running"),
-        AgentStatus::Unseen => ('✓', Color::Blue, "done"),
-        AgentStatus::Finished => ('●', Color::Green, "ready"),
-        AgentStatus::NeedsFeedback => ('◆', Color::Red, "waiting"),
-        AgentStatus::Exited { code: Some(0) } => ('●', Color::DarkGray, "closed"),
-        AgentStatus::Exited { .. } => ('✗', Color::Magenta, "exited"),
-        AgentStatus::Disconnected => ('○', Color::Gray, "disconnected"),
-    }
+/// A status's glyph, its colour in `theme` and its word.
+pub fn status_style(theme: &Theme, status: AgentStatus) -> (char, Color, &'static str) {
+    let (glyph, word) = match status {
+        AgentStatus::Fresh => ('●', "fresh"),
+        AgentStatus::Running => ('●', "running"),
+        AgentStatus::Unseen => ('✓', "done"),
+        AgentStatus::Finished => ('●', "ready"),
+        AgentStatus::NeedsFeedback => ('◆', "waiting"),
+        AgentStatus::Exited { code: Some(0) } => ('●', "closed"),
+        AgentStatus::Exited { .. } => ('✗', "exited"),
+        AgentStatus::Disconnected => ('○', "disconnected"),
+    };
+    (glyph, theme.status(status), word)
 }
 
 pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
+    let area = f.area();
+    f.buffer_mut().set_style(area, app.theme.base);
     draw_header(f, app, areas.header);
     let sessions = app.project_sessions();
     if sessions.is_empty() {
+        let key = |action| app.keymap.key(Context::Grid, action);
         let text = if !app.connected {
-            "Connecting to the termist daemon…"
+            "Connecting to the termist daemon…".to_string()
         } else if app.state.projects.is_empty() {
-            "No project yet: run termist inside a project folder."
+            "No project yet: run termist inside a project folder.".to_string()
         } else if app.project.is_none() {
-            "No project open · o opens one"
+            match key(Action::OpenProject) {
+                Some(o) => format!("No project open · {o} opens one"),
+                None => "No project open".to_string(),
+            }
         } else if app.archive_view {
-            "Nothing archived in this project.  A: back"
+            match key(Action::ArchiveView) {
+                Some(a) => format!("Nothing archived in this project.  {a}: back"),
+                None => "Nothing archived in this project.  Esc: back".to_string(),
+            }
         } else {
-            "No sessions yet.  p: new task  ·  n: agent  ·  t: shell"
+            let hints: Vec<String> = [Action::QuickPrompt, Action::NewSession, Action::NewShell]
+                .into_iter()
+                .filter_map(|a| Some(format!("{}: {}", key(a)?, a.hint())))
+                .collect();
+            format!("No sessions yet.  {}", hints.join("  ·  "))
         };
-        f.render_widget(
-            Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-            areas.body,
-        );
+        f.render_widget(Paragraph::new(text).style(app.theme.dim), areas.body);
     } else {
         let per_row = areas.cards_per_row.max(1);
         let first = app.card_scroll;
@@ -139,7 +190,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             if rect.bottom() > areas.cards.bottom() || rect.right() > areas.cards.right() {
                 continue;
             }
-            draw_card(f, s, Some(s.id) == app.selected, rect);
+            draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
         }
         if areas.scroll_lines {
             let above = first * per_row;
@@ -155,10 +206,9 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                 (above, '↑', line(areas.cards.y.saturating_sub(1))),
                 (below, '↓', line(areas.cards.bottom())),
             ] {
-                if n > 0 && rect.y < areas.pane.y {
+                if n > 0 && rect.y >= areas.cards_zone.y && rect.y < areas.cards_zone.bottom() {
                     f.render_widget(
-                        Paragraph::new(format!("{arrow} {n} more"))
-                            .style(Style::default().fg(Color::DarkGray)),
+                        Paragraph::new(format!("{arrow} {n} more")).style(app.theme.dim),
                         rect,
                     );
                 }
@@ -180,14 +230,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     if app.archive_view {
         spans.push(Span::styled(
             "archive ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            app.theme.archive.add_modifier(Modifier::BOLD),
         ));
     }
     for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
-            Style::default().add_modifier(Modifier::REVERSED)
+            app.theme.tab_active
         } else {
             Style::default()
         };
@@ -205,7 +253,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 .filter(|s| s.project == p.id && s.status == status && !s.archived)
                 .count();
             if n > 0 {
-                let (glyph, color, _) = status_style(status);
+                let (glyph, color, _) = status_style(&app.theme, status);
                 spans.push(Span::styled(
                     format!("{glyph}{n}"),
                     Style::default().fg(color),
@@ -216,9 +264,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // Agents waiting in closed projects; the first thing to go when space is short.
     let waiting = app.waiting_in_closed_projects().len();
     if waiting > 0 {
-        let (glyph, color, _) = status_style(AgentStatus::NeedsFeedback);
+        let (glyph, color, _) = status_style(&app.theme, AgentStatus::NeedsFeedback);
         let marker = [
-            Span::styled("  closed ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  closed ", app.theme.dim),
             Span::styled(format!("{glyph}{waiting}"), Style::default().fg(color)),
         ];
         let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
@@ -229,14 +277,18 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_card(f: &mut Frame, s: &termist_core::SessionInfo, selected: bool, rect: Rect) {
-    let (glyph, color, word) = status_style(s.status);
+fn draw_card(
+    f: &mut Frame,
+    theme: &Theme,
+    s: &termist_core::SessionInfo,
+    selected: bool,
+    rect: Rect,
+) {
+    let (glyph, color, word) = status_style(theme, s.status);
     let border = if selected {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        theme.accent.add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme.border
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -254,7 +306,7 @@ fn draw_card(f: &mut Frame, s: &termist_core::SessionInfo, selected: bool, rect:
         ]),
         Line::from(Span::styled(
             format!("{} · {word}", s.kind.label()),
-            Style::default().fg(Color::DarkGray),
+            theme.dim,
         )),
     ];
     f.render_widget(Paragraph::new(lines).block(block), rect);
@@ -272,9 +324,9 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         if focused { " · typing" } else { "" }
     );
     let border = if focused {
-        Style::default().fg(Color::Yellow)
+        app.theme.focus
     } else {
-        Style::default().fg(Color::DarkGray)
+        app.theme.border
     };
     f.render_widget(
         Block::default()
@@ -284,7 +336,7 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         areas.pane,
     );
     if let Some(screen) = app.screens.get(&info.id) {
-        render_screen(f.buffer_mut(), areas.pane_inner, screen);
+        render_screen(f.buffer_mut(), areas.pane_inner, screen, &app.theme);
         let c = screen.cursor;
         // An overlay on top has the keys; a text box places its own cursor.
         if focused
@@ -297,20 +349,21 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         }
     } else if info.status == AgentStatus::Disconnected {
         f.render_widget(
-            Paragraph::new("Not running. Enter resumes this session.")
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("Not running. Enter resumes this session.").style(app.theme.dim),
             areas.pane_inner,
         );
     }
 }
 
-fn render_screen(buf: &mut Buffer, area: Rect, screen: &Snapshot) {
+fn render_screen(buf: &mut Buffer, area: Rect, screen: &Snapshot, theme: &Theme) {
     for (r, line) in screen.lines.iter().enumerate().take(area.height as usize) {
         for (c, cell) in line.iter().enumerate().take(area.width as usize) {
             if cell.flags & cell_flags::WIDE_SPACER != 0 {
                 continue;
             }
-            let mut style = Style::default().fg(color(cell.fg)).bg(color(cell.bg));
+            let mut style = Style::default()
+                .fg(theme.pane_color(cell.fg, true))
+                .bg(theme.pane_color(cell.bg, false));
             for (flag, modifier) in [
                 (cell_flags::BOLD, Modifier::BOLD),
                 (cell_flags::ITALIC, Modifier::ITALIC),
@@ -331,30 +384,23 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &Snapshot) {
     }
 }
 
-fn color(c: termist_core::Color) -> Color {
-    match c {
-        termist_core::Color::Default => Color::Reset,
-        termist_core::Color::Indexed(i) => Color::Indexed(i),
-        termist_core::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
-
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
     let shows_message = app.mode == Mode::Grid || !app.overlays.is_empty();
     let (text, style) = match (&app.message, app.mode) {
-        (Some(m), _) if shows_message => (m.clone(), Style::default().fg(Color::Red)),
+        (Some(m), _) if shows_message => (m.clone(), t.error),
         _ if !app.overlays.is_empty() => (
             app.overlays
                 .last()
                 .map(overlay_view::hint)
                 .unwrap_or_default()
                 .to_string(),
-            Style::default().fg(Color::Yellow),
+            t.focus,
         ),
         (_, Mode::ConfirmQuit) => (
             "Leave termist? Sessions keep running in the daemon.  y / Enter: quit · any key: stay"
                 .into(),
-            Style::default().fg(Color::Yellow),
+            t.warn,
         ),
         (_, Mode::ConfirmKill(id)) => {
             let name = app
@@ -365,7 +411,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 .map_or("this session", |s| s.display_name());
             (
                 format!("Kill {name}? It stops the process.  y / Enter: kill · any key: cancel"),
-                Style::default().fg(Color::Yellow),
+                t.warn,
             )
         }
         (_, Mode::ConfirmClose(id)) => {
@@ -379,7 +425,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 format!(
                     "Close {name}? Its sessions keep running.  y / Enter: close · any key: cancel"
                 ),
-                Style::default().fg(Color::Yellow),
+                t.warn,
             )
         }
         (_, Mode::ConfirmArchive(id)) => {
@@ -390,29 +436,104 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("Archive {name}? y/N")
             };
-            (text, Style::default().fg(Color::Yellow))
+            (text, t.warn)
         }
-        (_, Mode::Grid) if app.archive_view => (
-            "archive · Enter restore and resume · hjkl move · d delete · A/Esc back · q quit"
-                .into(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        (_, Mode::Grid) => (
-            "p new task · Space follow-up · / sessions · n agent · t shell · Enter focus · \
-             . next● · o open · x close tab · r rename · a archive · A archived · d kill · q quit"
-                .into(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        (_, Mode::Focus) => (
-            "typing into the session · C-a Esc grid · C-a . next● · C-q grid".into(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        (_, Mode::FocusPrefix) => (
-            "C-a …  Esc grid · . , next/prev● · hjkl move · C-a literal".into(),
-            Style::default().fg(Color::Yellow),
-        ),
+        (_, Mode::Grid) if app.archive_view => (archive_hint(&app.keymap), t.dim),
+        (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
+        (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
+        (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
     };
     f.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// `key hint` for each action that has a key, joined with ` · `.
+fn hints(keymap: &Keymap, context: Context, actions: &[Action]) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|a| Some(format!("{} {}", keymap.key(context, *a)?, a.hint())))
+        .collect()
+}
+
+/// The four move keys as one word when they are single characters (`hjkl`), else
+/// joined with slashes; `None` unless all four are bound.
+fn move_keys(keymap: &Keymap, context: Context) -> Option<String> {
+    let keys =
+        [Action::Left, Action::Down, Action::Up, Action::Right].map(|a| keymap.key(context, a));
+    let keys: Vec<String> = keys.into_iter().collect::<Option<_>>()?;
+    Some(if keys.iter().all(|k| k.chars().count() == 1) {
+        keys.concat()
+    } else {
+        keys.join("/")
+    })
+}
+
+fn grid_hint(keymap: &Keymap) -> String {
+    use Action::*;
+    hints(
+        keymap,
+        Context::Grid,
+        &[
+            Help,
+            QuickPrompt,
+            FollowUp,
+            Palette,
+            NewSession,
+            NewShell,
+            Focus,
+            NextAttention,
+            OpenProject,
+            CloseTab,
+            Rename,
+            Archive,
+            ArchiveView,
+            Kill,
+            Quit,
+        ],
+    )
+    .join(" · ")
+}
+
+fn archive_hint(keymap: &Keymap) -> String {
+    let key = |a| keymap.key(Context::Grid, a);
+    let mut parts = vec![
+        "archive".to_string(),
+        "Enter restore and resume".to_string(),
+    ];
+    parts.extend(move_keys(keymap, Context::Grid).map(|m| format!("{m} move")));
+    parts.extend(key(Action::Kill).map(|k| format!("{k} delete")));
+    parts.push(match key(Action::ArchiveView) {
+        Some(a) => format!("{a}/Esc back"),
+        None => "Esc back".to_string(),
+    });
+    parts.extend(key(Action::Quit).map(|q| format!("{q} quit")));
+    parts.join(" · ")
+}
+
+fn focus_hint(keymap: &Keymap) -> String {
+    let prefix = keymap.prefix;
+    let mut parts = vec!["typing into the session".to_string()];
+    parts.extend(
+        hints(
+            keymap,
+            Context::Focus,
+            &[Action::Grid, Action::NextAttention],
+        )
+        .into_iter()
+        .map(|h| format!("{prefix} {h}")),
+    );
+    parts.push("C-q grid".to_string());
+    parts.join(" · ")
+}
+
+fn prefix_hint(keymap: &Keymap) -> String {
+    let key = |a| keymap.key(Context::Focus, a);
+    let mut parts = hints(keymap, Context::Focus, &[Action::Grid]);
+    if let (Some(next), Some(prev)) = (key(Action::NextAttention), key(Action::PrevAttention)) {
+        parts.push(format!("{next} {prev} next/prev●"));
+    }
+    parts.extend(move_keys(keymap, Context::Focus).map(|m| format!("{m} move")));
+    parts.push(format!("{} literal", keymap.prefix));
+    format!("{} …  {}", keymap.prefix, parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -428,7 +549,12 @@ mod tests {
 
     fn render(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        let areas = layout(Rect::new(0, 0, w, h), app.project_sessions().len());
+        let areas = layout(
+            Rect::new(0, 0, w, h),
+            app.project_sessions().len(),
+            app.pane_position(),
+        );
+        app.pane_right = areas.pane_right;
         app.set_card_window(areas.cards_per_row, areas.card_rows);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
@@ -504,11 +630,23 @@ mod tests {
 
     #[test]
     fn status_glyphs_follow_the_prd() {
-        assert_eq!(status_style(AgentStatus::NeedsFeedback).0, '◆');
-        assert_eq!(status_style(AgentStatus::Unseen).0, '✓');
-        assert_eq!(status_style(AgentStatus::Disconnected).0, '○');
-        assert_eq!(status_style(AgentStatus::Exited { code: Some(1) }).0, '✗');
-        assert_eq!(status_style(AgentStatus::Running).2, "running");
+        assert_eq!(
+            status_style(&Theme::terminal(), AgentStatus::NeedsFeedback).0,
+            '◆'
+        );
+        assert_eq!(status_style(&Theme::terminal(), AgentStatus::Unseen).0, '✓');
+        assert_eq!(
+            status_style(&Theme::terminal(), AgentStatus::Disconnected).0,
+            '○'
+        );
+        assert_eq!(
+            status_style(&Theme::terminal(), AgentStatus::Exited { code: Some(1) }).0,
+            '✗'
+        );
+        assert_eq!(
+            status_style(&Theme::terminal(), AgentStatus::Running).2,
+            "running"
+        );
     }
 
     // TestBackend's Display is text-only, so no snapshot would catch a swapped or
@@ -516,35 +654,35 @@ mod tests {
     #[test]
     fn status_style_matches_the_global_table() {
         assert_eq!(
-            status_style(AgentStatus::Fresh),
+            status_style(&Theme::terminal(), AgentStatus::Fresh),
             ('●', Color::DarkGray, "fresh")
         );
         assert_eq!(
-            status_style(AgentStatus::Running),
+            status_style(&Theme::terminal(), AgentStatus::Running),
             ('●', Color::Yellow, "running")
         );
         assert_eq!(
-            status_style(AgentStatus::Unseen),
+            status_style(&Theme::terminal(), AgentStatus::Unseen),
             ('✓', Color::Blue, "done")
         );
         assert_eq!(
-            status_style(AgentStatus::Finished),
+            status_style(&Theme::terminal(), AgentStatus::Finished),
             ('●', Color::Green, "ready")
         );
         assert_eq!(
-            status_style(AgentStatus::NeedsFeedback),
+            status_style(&Theme::terminal(), AgentStatus::NeedsFeedback),
             ('◆', Color::Red, "waiting")
         );
         assert_eq!(
-            status_style(AgentStatus::Exited { code: Some(1) }),
+            status_style(&Theme::terminal(), AgentStatus::Exited { code: Some(1) }),
             ('✗', Color::Magenta, "exited")
         );
         assert_eq!(
-            status_style(AgentStatus::Exited { code: Some(0) }),
+            status_style(&Theme::terminal(), AgentStatus::Exited { code: Some(0) }),
             ('●', Color::DarkGray, "closed")
         );
         assert_eq!(
-            status_style(AgentStatus::Disconnected),
+            status_style(&Theme::terminal(), AgentStatus::Disconnected),
             ('○', Color::Gray, "disconnected")
         );
     }
@@ -592,9 +730,11 @@ mod tests {
         for (w, h) in [(20, 5), (1, 1), (0, 0), (200, 3)] {
             let mut app = fixture();
             let mut t = Terminal::new(TestBackend::new(w.max(1), h.max(1))).unwrap();
-            let areas = layout(Rect::new(0, 0, w, h), 2);
-            t.draw(|f| draw(f, &app, &areas)).unwrap();
-            app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
+            for position in PanePosition::ALL {
+                let areas = layout(Rect::new(0, 0, w, h), 2, position);
+                t.draw(|f| draw(f, &app, &areas)).unwrap();
+                app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
+            }
         }
     }
 
@@ -885,5 +1025,302 @@ mod tests {
         app.on_key(key(K::Char('a')));
         let t = render(&mut app, 60, 16);
         assert_eq!(row(&t, 15), "Stop and archive claude-1? y/N");
+    }
+
+    fn with_theme(mut app: App, id: &str) -> App {
+        app.theme = Theme::named(id, termist_core::config::ColorDepth::TrueColor);
+        app
+    }
+
+    /// A painting theme leaves no cell on the terminal's own background: not the
+    /// grid, not the pane, not an overlay box.
+    #[test]
+    fn a_painting_theme_paints_every_cell() {
+        use ratatui::crossterm::event::KeyCode as K;
+        for id in ["uskudar", "moda"] {
+            let mut app = with_theme(fixture(), id);
+            let bg = app.theme.base.bg.unwrap();
+            for open_palette in [false, true] {
+                if open_palette {
+                    app.on_key(key(K::Char('/')));
+                }
+                let t = render(&mut app, 70, 16);
+                let buf = t.backend().buffer();
+                for y in 0..16 {
+                    for x in 0..70 {
+                        let cell = &buf[(x, y)];
+                        assert_ne!(cell.bg, Color::Reset, "{id} ({x},{y}) {:?}", cell.symbol());
+                    }
+                }
+                assert_eq!(
+                    buf[(69, 7)].bg,
+                    bg,
+                    "{id}: empty space is the theme's ground"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_terminal_theme_paints_nothing() {
+        let mut app = fixture();
+        let t = render(&mut app, 60, 16);
+        assert_eq!(t.backend().buffer()[(59, 7)].bg, Color::Reset);
+    }
+
+    /// Pane cells: the agent's default colours and ANSI 0-15 come from the theme,
+    /// 24-bit colours are drawn as written, and inverse video swaps the theme's pair.
+    #[test]
+    fn the_pane_draws_agent_colours_through_the_theme() {
+        let mut app = with_theme(fixture(), "moda");
+        let id = app.selected.unwrap();
+        let mut snap = Snapshot::blank(10, 2);
+        snap.lines[0][0].ch = 'r';
+        snap.lines[0][0].fg = termist_core::Color::Indexed(1);
+        snap.lines[0][1].ch = 'x';
+        snap.lines[0][1].fg = termist_core::Color::Rgb(1, 2, 3);
+        snap.lines[0][2].ch = 'i';
+        snap.lines[0][2].flags = cell_flags::INVERSE;
+        let before = app.screens[&id].clone();
+        app.on_event(ServerEvent::Screen {
+            session: id,
+            update: diff(Some(&before), &snap).unwrap(),
+        });
+        let t = render(&mut app, 60, 16);
+        let buf = t.backend().buffer();
+        let areas = layout(Rect::new(0, 0, 60, 16), 2, PanePosition::Auto);
+        let (x, y) = (areas.pane_inner.x, areas.pane_inner.y);
+        assert_eq!(buf[(x, y)].symbol(), "r");
+        assert_eq!(buf[(x, y)].fg, Color::Rgb(0xc0, 0x39, 0x2b), "Moda's red");
+        assert_eq!(
+            buf[(x, y)].bg,
+            Color::Rgb(0xfb, 0xf4, 0xe8),
+            "Moda's ground"
+        );
+        assert_eq!(buf[(x + 1, y)].fg, Color::Rgb(1, 2, 3));
+        let inverse = &buf[(x + 2, y)];
+        assert_eq!(inverse.fg, Color::Rgb(0x2b, 0x25, 0x30));
+        assert_eq!(inverse.bg, Color::Rgb(0xfb, 0xf4, 0xe8));
+        assert!(inverse.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn statuses_take_the_themes_colours() {
+        let mut app = with_theme(with_a_closed_project(), "uskudar");
+        let t = render(&mut app, 60, 16);
+        let buf = t.backend().buffer();
+        assert_eq!(
+            buf[(34, 0)].fg,
+            app.theme.status(AgentStatus::NeedsFeedback)
+        );
+        assert_eq!(buf[(34, 0)].fg, Color::Rgb(0xff, 0x7a, 0x6b));
+        assert_eq!(buf[(27, 0)].fg, app.theme.dim.fg.unwrap());
+    }
+
+    #[test]
+    fn footers_follow_the_keymap() {
+        let keys = termist_core::config::KeysConfig {
+            grid: [
+                ("g", "quick_prompt"),
+                ("p", "none"),
+                ("Left", "left"),
+                ("h", "none"),
+            ]
+            .into_iter()
+            .map(|(k, a)| (k.to_string(), a.to_string()))
+            .collect(),
+            focus: [("g", "grid")]
+                .into_iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+        };
+        let (keymap, problems) = Keymap::from_config(&keys, "C-Space");
+        assert!(problems.is_empty());
+        let grid = grid_hint(&keymap);
+        assert!(
+            grid.starts_with("? help · g new task · Space follow-up"),
+            "{grid}"
+        );
+        assert!(!grid.contains("p new task"));
+        assert_eq!(
+            archive_hint(&keymap),
+            "archive · Enter restore and resume · Left/j/k/l move · d delete · A/Esc back · q quit"
+        );
+        assert_eq!(
+            focus_hint(&keymap),
+            "typing into the session · C-Space Esc grid · C-Space . next● · C-q grid"
+        );
+        assert_eq!(
+            prefix_hint(&keymap),
+            "C-Space …  Esc grid · . , next/prev● · hjkl move · C-Space literal"
+        );
+        let mut app = App::new();
+        app.keymap = keymap;
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![ProjectInfo {
+                id: ProjectId::new(),
+                name: "web".into(),
+                path: "/w".into(),
+                open: true,
+            }],
+            ..StateSnapshot::default()
+        }));
+        let t = render(&mut app, 70, 10);
+        assert_eq!(
+            row(&t, 1),
+            "No sessions yet.  g: new task  ·  n: agent  ·  t: shell"
+        );
+    }
+
+    #[test]
+    fn the_help_lists_every_key() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('?')));
+        insta::assert_snapshot!(render(&mut app, 80, 40).backend());
+    }
+
+    #[test]
+    fn the_help_shows_a_rebound_key_and_scrolls_to_its_end_only() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let keys = termist_core::config::KeysConfig {
+            grid: [("g", "quick_prompt"), ("p", "none")]
+                .into_iter()
+                .map(|(k, a)| (k.to_string(), a.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let mut app = fixture();
+        app.keymap = Keymap::from_config(&keys, "C-Space").0;
+        app.on_key(key(K::Char('?')));
+        let text = screen_text(&render(&mut app, 80, 60));
+        assert!(
+            text.contains("g            new task: prompt, CLI, model"),
+            "{text}"
+        );
+        assert!(text.contains("Focus mode, after C-Space"));
+        assert!(text.contains("C-Space C-Space"));
+        render(&mut app, 80, 16);
+        for _ in 0..200 {
+            app.on_key(key(K::Char('j')));
+        }
+        let text = screen_text(&render(&mut app, 80, 16));
+        assert!(
+            text.contains("[keys.grid] and [keys.focus]"),
+            "the last line is in view"
+        );
+        app.on_key(key(K::Char('k')));
+        let text = screen_text(&render(&mut app, 80, 16));
+        assert!(
+            !text.contains("[keys.grid] and [keys.focus]"),
+            "one k from the end moves the view back"
+        );
+        app.on_key(key(K::Esc));
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn the_help_opens_from_focus_mode_and_closes_back_to_it() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('?')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(crate::overlay::Overlay::Help { .. })
+        ));
+        app.on_key(key(K::Char('?')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::Focus);
+    }
+
+    #[test]
+    fn the_settings_and_the_keys_screens() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.on_key(key(K::Char('s')));
+        insta::assert_snapshot!("settings", render(&mut app, 80, 16).backend());
+        for _ in 0..4 {
+            app.on_key(key(K::Char('j')));
+        }
+        app.on_key(key(K::Enter));
+        app.on_key(key(K::Enter));
+        app.on_key(key(K::Char('g')));
+        insta::assert_snapshot!("keys", render(&mut app, 80, 16).backend());
+    }
+
+    #[test]
+    fn auto_puts_the_pane_on_the_right_from_180_columns() {
+        let area = |w| Rect::new(0, 0, w, 40);
+        assert!(!layout(area(179), 3, PanePosition::Auto).pane_right);
+        let wide = layout(area(180), 3, PanePosition::Auto);
+        assert!(wide.pane_right);
+        assert_eq!(wide.cards_per_row, 3, "two fifths of 180 is three cards");
+        assert_eq!(wide.pane.x, 72);
+        assert_eq!(wide.pane.width, 108);
+        assert_eq!(wide.pane.height, 38, "the whole body");
+        assert!(layout(area(100), 3, PanePosition::Right).pane_right);
+        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_right);
+    }
+
+    #[test]
+    fn the_pane_on_the_right() {
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Right;
+        insta::assert_snapshot!(render(&mut app, 80, 12).backend());
+    }
+
+    #[test]
+    fn cards_that_do_not_fit_left_of_the_pane_are_counted() {
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Right;
+        let project = app.state.projects[0].id;
+        let mut state = app.state.clone();
+        for i in 3..=7 {
+            let mut s = state.sessions[1].clone();
+            s.id = SessionId::new();
+            s.project = project;
+            s.name = format!("shell-{i}");
+            state.sessions.push(s);
+        }
+        app.on_event(ServerEvent::State(state));
+        let t = render(&mut app, 80, 16);
+        let left = |y| {
+            row(&t, y)
+                .chars()
+                .take(24)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(left(14), "↓ 4 more", "under the three cards that fit");
+        assert_eq!(left(1), "", "none above");
+    }
+
+    #[test]
+    fn prefix_z_moves_the_pane_until_termist_quits() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        render(&mut app, 100, 20);
+        assert!(!app.pane_right);
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Right);
+        let t = render(&mut app, 100, 20);
+        assert!(
+            t.backend().buffer()[(24, 1)].symbol() == "┌",
+            "the pane starts right of the cards"
+        );
+        app.pane_right = true;
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Bottom);
+        assert_eq!(
+            app.config.pane_position,
+            PanePosition::Auto,
+            "the setting is untouched"
+        );
     }
 }

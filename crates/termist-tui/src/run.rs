@@ -1,5 +1,8 @@
 use crate::app::{Action, App};
 use crate::browse::{self, Listing};
+use crate::keys::Keymap;
+use crate::settings;
+use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
@@ -13,8 +16,11 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use termist_core::{ClientRequest, ServerEvent};
+use termist_core::config::{ColorDepth, Problem};
+use termist_core::{ClientRequest, ServerEvent, TermColors};
+use termist_platform::config_file;
 use termist_platform::framed::write_frame;
+use termist_platform::host_colors;
 use termist_platform::ipc::SendHalf;
 use termist_platform::{Client, Paths};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -91,6 +97,62 @@ fn daemon_cwd() -> PathBuf {
         })
 }
 
+/// The app with the user's settings; what could not be used is said once in the footer.
+fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
+    let (config, mut problems) = termist_platform::config_file::load(paths);
+    let detected = termist_platform::term::resolve_depth(ColorDepth::Auto);
+    let depth = match config.colors {
+        ColorDepth::Auto => detected,
+        depth => depth,
+    };
+    let theme = Theme::named(&config.theme, depth);
+    let (keymap, key_problems) = Keymap::from_config(&config.keys, &config.prefix);
+    problems.extend(key_problems);
+    let mut app = App::with_config(config, theme, keymap);
+    app.config_path = Some(paths.config_path());
+    app.detected_depth = detected;
+    app.local_settings = std::fs::read_to_string(paths.config_local_path())
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    app.message = startup_message(&problems, &app.theme);
+    if app.message.is_none() {
+        app.message = tmux_notice(paths, &app.keymap, inside_tmux);
+    }
+    app
+}
+
+/// Inside tmux, C-a is usually tmux's own prefix too: said once, then remembered.
+fn tmux_notice(paths: &Paths, keymap: &Keymap, inside_tmux: bool) -> Option<String> {
+    if !inside_tmux || keymap.prefix.to_string() != "C-a" {
+        return None;
+    }
+    let marker = paths.notices_dir().join("tmux-prefix");
+    if marker.exists() {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(paths.notices_dir());
+    let _ = std::fs::write(&marker, "");
+    Some(TMUX_NOTICE.into())
+}
+
+const TMUX_NOTICE: &str =
+    "Inside tmux, C-a is tmux's prefix too · s → prefix changes it (C-Space is free)";
+
+fn startup_message(problems: &[Problem], theme: &Theme) -> Option<String> {
+    match problems {
+        [] => theme.stands_in_for.map(|wanted| {
+            format!("{wanted} needs 256 colours; showing the terminal's own (colors = \"256\" if it has them)")
+        }),
+        [one] => Some(format!("config: {one} · termist config check")),
+        many => Some(format!(
+            "config: {} problems · termist config check",
+            many.len()
+        )),
+    }
+}
+
 pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let client = connect_or_spawn(&paths).await?;
     let (mut reader, mut writer) = client.into_split();
@@ -102,6 +164,8 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     )
     .await?;
     write_frame(&mut writer, &ClientRequest::ListState).await?;
+    let inside_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    let mut app = app_from_config(&paths, inside_tmux);
 
     let (server_tx, mut server_rx) = unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
@@ -115,6 +179,17 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     // Query before the input thread exists: `event::read()` holds crossterm's global
     // event-reader lock, and a query that can't take it times out after 2 s.
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    // A theme that paints nothing shows agents in the host terminal's own colours;
+    // they are asked for once, here, in case the settings switch to such a theme.
+    // Every terminal answers the query's last part at once, which ends the wait; the
+    // long limit is for slow links (ssh), whose late answers would otherwise arrive
+    // as keys.
+    app.host_colors = host_colors::query(Duration::from_secs(1)).map(|(fg, bg)| TermColors {
+        fg,
+        bg,
+        ansi: None,
+    });
+    write_frame(&mut writer, &ClientRequest::SetColors(app.agent_colors())).await?;
     let _ = execute!(stdout(), EnableBracketedPaste);
     if enhanced {
         let _ = execute!(
@@ -134,11 +209,15 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
 
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
-    let mut app = App::new();
     let result: anyhow::Result<()> = async {
         loop {
             let size = terminal.size()?;
-            let areas = ui::layout(Rect::new(0, 0, size.width, size.height), app.project_sessions().len());
+            let areas = ui::layout(
+                Rect::new(0, 0, size.width, size.height),
+                app.project_sessions().len(),
+                app.pane_position(),
+            );
+            app.pane_right = areas.pane_right;
             app.set_card_window(areas.cards_per_row, areas.card_rows);
             let resize = app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
             if perform(resize, &mut writer, &listing_tx).await? {
@@ -161,6 +240,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                     vec![]
                 }
             };
+            let actions = save_settings(&paths, &mut app, actions);
             if perform(actions, &mut writer, &listing_tx).await? {
                 return Ok(());
             }
@@ -192,6 +272,34 @@ fn set_panic_hook(enhanced: bool) {
     }));
 }
 
+/// Writes the settings changes among `actions` to config.toml and returns the rest.
+/// A change that cannot be saved still holds until termist quits, and says so.
+fn save_settings(paths: &Paths, app: &mut App, actions: Vec<Action>) -> Vec<Action> {
+    let (edits, rest): (Vec<_>, Vec<_>) = actions
+        .into_iter()
+        .partition(|a| matches!(a, Action::WriteConfig(_)));
+    for edit in edits {
+        let Action::WriteConfig(edit) = edit else {
+            continue;
+        };
+        let text = match std::fs::read_to_string(paths.config_path()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            // Never replace a file that could not be read.
+            Err(e) => {
+                app.message = Some(format!("not saved: config.toml cannot be read ({e})"));
+                continue;
+            }
+        };
+        let saved = settings::apply(&text, &edit)
+            .and_then(|new| config_file::write(paths, &new).map_err(|e| e.to_string()));
+        if let Err(e) = saved {
+            app.message = Some(format!("not saved: {e}"));
+        }
+    }
+    rest
+}
+
 /// A folder listing, for the folder it lists.
 type Listed = (PathBuf, Result<Listing, String>);
 
@@ -214,6 +322,7 @@ async fn perform(
                 });
             }
             Action::Quit => return Ok(true),
+            Action::WriteConfig(_) => {} // saved by `save_settings`
         }
     }
     Ok(false)
@@ -263,5 +372,118 @@ mod tests {
             !paths.daemon_log_path().exists(),
             "no daemon may be spawned for a protocol mismatch"
         );
+    }
+
+    #[test]
+    fn the_config_is_used_and_its_problems_are_said_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_path(),
+            "theme = \"moda\"\ncolors = \"truecolor\"\n[agents]\ndefault = \"codex\"\n",
+        )
+        .unwrap();
+        let app = app_from_config(&paths, false);
+        assert_eq!(app.theme.id, "moda");
+        assert_eq!(app.config.agents.default, termist_core::Harness::Codex);
+        assert_eq!(app.message, None);
+
+        std::fs::write(paths.config_path(), "theme = \"nope\"\ncolors = \"256\"\n").unwrap();
+        let app = app_from_config(&paths, false);
+        assert_eq!(app.theme.id, "uskudar", "the default theme");
+        assert_eq!(
+            app.message.as_deref(),
+            Some(
+                "config: theme: unknown theme \"nope\"; themes: uskudar, moda, terminal · termist config check"
+            )
+        );
+    }
+
+    #[test]
+    fn a_theme_the_terminal_cannot_draw_is_explained() {
+        let theme = Theme::named("moda", termist_core::config::ColorDepth::Ansi16);
+        let message = startup_message(&[], &theme).unwrap();
+        assert!(message.starts_with("moda needs 256 colours"), "{message}");
+        let two = [
+            Problem {
+                path: "a".into(),
+                message: "x".into(),
+            },
+            Problem {
+                path: "b".into(),
+                message: "y".into(),
+            },
+        ];
+        assert_eq!(
+            startup_message(&two, &Theme::terminal()).as_deref(),
+            Some("config: 2 problems · termist config check")
+        );
+    }
+
+    #[test]
+    fn inside_tmux_the_prefix_notice_is_said_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        let first = tmux_notice(&paths, &Keymap::defaults(), true);
+        let second = tmux_notice(&paths, &Keymap::defaults(), true);
+        let (other, _) = Keymap::from_config(&Default::default(), "C-Space");
+        let tmp2 = tempfile::tempdir().unwrap();
+        let other_paths = Paths::under(tmp2.path().to_path_buf());
+        let with_other_prefix = tmux_notice(&other_paths, &other, true);
+        let outside = tmux_notice(&other_paths, &Keymap::defaults(), false);
+        assert_eq!(first.as_deref(), Some(TMUX_NOTICE));
+        assert_eq!(second, None, "once");
+        assert_eq!(with_other_prefix, None);
+        assert_eq!(outside, None);
+    }
+
+    #[test]
+    fn settings_are_saved_into_the_users_own_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "# mine\ntheme = \"uskudar\" # dark\n").unwrap();
+        let mut app = App::new();
+        let edit = |key, value: &str| {
+            Action::WriteConfig(settings::ConfigEdit::Set {
+                key,
+                value: value.into(),
+            })
+        };
+        let rest = save_settings(&paths, &mut app, vec![edit("theme", "moda"), Action::Quit]);
+        assert_eq!(rest, vec![Action::Quit]);
+        let text = std::fs::read_to_string(paths.config_path()).unwrap();
+        assert_eq!(text, "# mine\ntheme = \"moda\" # dark\n");
+        assert_eq!(app.message, None);
+
+        std::fs::write(paths.config_path(), "theme = \"moda\n").unwrap();
+        save_settings(&paths, &mut app, vec![edit("theme", "uskudar")]);
+        assert!(
+            app.message
+                .unwrap()
+                .starts_with("not saved: config.toml is not valid TOML")
+        );
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path().to_path_buf());
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let latin1 = b"# caf\xe9\ntheme = \"moda\"\n";
+        std::fs::write(paths.config_path(), latin1).unwrap();
+        let mut app = App::new();
+        let edit = Action::WriteConfig(settings::ConfigEdit::Set {
+            key: "theme",
+            value: "uskudar".into(),
+        });
+        save_settings(&paths, &mut app, vec![edit]);
+        assert!(
+            app.message
+                .unwrap()
+                .starts_with("not saved: config.toml cannot be read")
+        );
+        assert_eq!(std::fs::read(paths.config_path()).unwrap(), latin1);
     }
 }

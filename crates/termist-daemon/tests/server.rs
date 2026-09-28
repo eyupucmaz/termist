@@ -1589,3 +1589,48 @@ async fn after_claude_clear_a_resume_starts_a_new_conversation() {
     assert_ne!(fresh, "cleared-1");
     wait_screen_text(&mut c, s.id, &format!("--session-id {fresh}")).await;
 }
+
+/// Agents ask their terminal for its colours (OSC 11) to pick a light or dark look; they
+/// get the colours the client says it draws with, in new and in running sessions.
+#[tokio::test]
+async fn colour_queries_are_answered_with_the_clients_colours() {
+    let d = start(shell_config()).await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, d._tmp.path().to_path_buf()).await;
+    let colors = |bg| TermColors {
+        fg: (0x2b, 0x25, 0x30),
+        bg,
+        ansi: None,
+    };
+    c.send(&ClientRequest::SetColors(colors((0x0f, 0x1d, 0x2e))))
+        .await
+        .unwrap();
+    let s = create(&mut c, project, SessionKind::Shell).await;
+    c.send(&ClientRequest::Attach {
+        session: s.id,
+        cols: 60,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    // Reads the answer raw and prints it as characters, so it shows as text.
+    let ask = b"stty -icanon -echo min 0 time 10; printf '\\033]11;?\\007'; \
+        dd bs=64 count=1 2>/dev/null | od -An -c | tr -d ' \\n'; stty sane; echo\r";
+    c.send(&ClientRequest::Input {
+        session: s.id,
+        data: ask.to_vec(),
+    })
+    .await
+    .unwrap();
+    wait_screen_text(&mut c, s.id, "rgb:0f0f/1d1d/2e2e").await;
+    c.send(&ClientRequest::SetColors(colors((0xfb, 0xf4, 0xe8))))
+        .await
+        .unwrap();
+    c.send(&ClientRequest::Input {
+        session: s.id,
+        data: ask.to_vec(),
+    })
+    .await
+    .unwrap();
+    wait_screen_text(&mut c, s.id, "rgb:fbfb/f4f4/e8e8").await;
+}

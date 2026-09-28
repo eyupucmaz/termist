@@ -1,11 +1,13 @@
-use crate::model::{Harness, HarnessInfo, LaunchOptions, SessionInfo, SessionKind, StateSnapshot};
+use crate::model::{
+    Harness, HarnessInfo, LaunchOptions, SessionInfo, SessionKind, StateSnapshot, TermColors,
+};
 use crate::screen::ScreenUpdate;
 use crate::{ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -99,6 +101,9 @@ pub enum ClientRequest {
     /// Looks again for the agent CLIs that were missing; every client gets the
     /// result as `Harnesses`.
     RescanHarnesses,
+    /// The colours the client draws agents with; every session answers colour queries
+    /// with them from now on. The last client to send them wins.
+    SetColors(TermColors),
     Shutdown,
 }
 

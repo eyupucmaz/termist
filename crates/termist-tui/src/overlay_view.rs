@@ -1,14 +1,19 @@
 //! Drawing the overlay stack: each overlay is a box centred over the body, drawn
 //! bottom to top, so a picker opened from the quick prompt sits on top of it.
 use crate::app::App;
-use crate::overlay::{BrowseEntry, Overlay, QuickPrompt};
+use crate::keys::{self, Action as KeyAction, Context};
+use crate::overlay::{
+    BrowseEntry, CaptureTarget, Overlay, QuickPrompt, SETTING_ROWS, SettingRow, key_rows,
+};
 use crate::text_input::TextInput;
+use crate::theme::Theme;
 use crate::ui::status_style;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use termist_core::config::{ColorDepth, PanePosition};
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -23,8 +28,9 @@ pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Clears `area` and draws a bordered box titled `title` holding `lines`.
-fn boxed(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
+fn boxed(f: &mut Frame, theme: &Theme, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     f.render_widget(Clear, area);
+    f.buffer_mut().set_style(area, theme.base);
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -35,16 +41,12 @@ fn boxed(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     );
 }
 
-fn highlighted(style: Style, on: bool) -> Style {
+fn highlighted(theme: &Theme, style: Style, on: bool) -> Style {
     if on {
-        style.add_modifier(Modifier::REVERSED)
+        style.patch(theme.selection)
     } else {
         style
     }
-}
-
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
 }
 
 /// A list in a box: a query line when the list is typed into, the rows (scrolled to
@@ -58,18 +60,18 @@ struct ListBox {
     extra: Vec<Line<'static>>,
 }
 
-fn draw_list(f: &mut Frame, body: Rect, list: ListBox) {
+fn draw_list(f: &mut Frame, theme: &Theme, body: Rect, list: ListBox) {
     let fixed = list.query.is_some() as u16 + list.extra.len() as u16 + 2;
     let area = centered(body, list.width, fixed + (list.rows.len() as u16).max(1));
     let room = area.height.saturating_sub(fixed).max(1) as usize;
     let first = list.highlight.saturating_sub(room - 1);
     let mut lines = Vec::new();
     if let Some(q) = list.query {
-        lines.push(Line::from(Span::styled(format!("> {q}"), dim())));
+        lines.push(Line::from(Span::styled(format!("> {q}"), theme.dim)));
     }
     lines.extend(list.rows.into_iter().skip(first).take(room));
     lines.extend(list.extra);
-    boxed(f, area, &list.title, lines);
+    boxed(f, theme, area, &list.title, lines);
 }
 
 /// The lines of `input` that fit `width` × `height`, scrolled to keep the cursor in
@@ -89,10 +91,18 @@ fn input_view(input: &TextInput, width: u16, height: usize) -> (Vec<Line<'static
 }
 
 /// A one-line text box; the cursor shows when it is the top overlay.
-fn text_box(f: &mut Frame, body: Rect, title: &str, width: u16, input: &TextInput, top: bool) {
+fn text_box(
+    f: &mut Frame,
+    theme: &Theme,
+    body: Rect,
+    title: &str,
+    width: u16,
+    input: &TextInput,
+    top: bool,
+) {
     let area = centered(body, width, 3);
     let (lines, (cx, _)) = input_view(input, area.width.saturating_sub(2), 1);
-    boxed(f, area, title, lines);
+    boxed(f, theme, area, title, lines);
     if top && area.height == 3 {
         f.set_cursor_position((area.x + 1 + cx, area.y + 1));
     }
@@ -131,6 +141,9 @@ pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
 
 /// Draws one overlay; `top` is the one that gets the keys (and the cursor).
 pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) {
+    let t = &app.theme;
+    let dim = || t.dim;
+    let highlighted = |style, on| highlighted(t, style, on);
     match overlay {
         Overlay::Harness(picker) => {
             let rows = picker
@@ -146,6 +159,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "new session".into(),
@@ -165,7 +179,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let (mut lines, (cx, cy)) = input_view(&q.input, inner_w, rows);
             lines.resize(rows, Line::default());
             lines.push(Line::from(Span::styled(launch_line(app, q), dim())));
-            boxed(f, area, "new task", lines);
+            boxed(f, t, area, "new task", lines);
             if top && area.height > 3 {
                 f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
             }
@@ -195,6 +209,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             }
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: format!("model · {}", m.harness.id()),
@@ -206,7 +221,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
-        Overlay::ModelName(input) => text_box(f, body, "model name", 48, input, top),
+        Overlay::ModelName(input) => text_box(f, t, body, "model name", 48, input, top),
         Overlay::FollowUp { session, input } => {
             let name = app
                 .state
@@ -214,9 +229,9 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .iter()
                 .find(|s| s.id == *session)
                 .map_or("?", |s| s.display_name());
-            text_box(f, body, &format!("follow-up · {name}"), 64, input, top);
+            text_box(f, t, body, &format!("follow-up · {name}"), 64, input, top);
         }
-        Overlay::Rename { input, .. } => text_box(f, body, "rename", 48, input, top),
+        Overlay::Rename { input, .. } => text_box(f, t, body, "rename", 48, input, top),
         Overlay::Palette(picker) => {
             let rows = picker
                 .visible()
@@ -228,7 +243,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         .iter()
                         .find(|p| p.id == s.project)
                         .map_or("", |p| p.name.as_str());
-                    let (glyph, color, word) = status_style(s.status);
+                    let (glyph, color, word) = status_style(t, s.status);
                     Some(Line::from(vec![
                         Span::styled(format!(" {glyph} "), Style::default().fg(color)),
                         Span::styled(
@@ -241,6 +256,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "sessions".into(),
@@ -271,17 +287,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                     BrowseEntry::Dir(d) => Line::from(vec![
                         Span::styled(
                             if d.git { " ● " } else { "   " },
-                            Style::default().fg(Color::Green),
+                            Style::default().fg(t.status(termist_core::AgentStatus::Finished)),
                         ),
                         Span::styled(format!("{}/", d.name), highlighted(Style::default(), on)),
                     ]),
                 })
                 .collect();
             let note = if let Some(e) = &open.error {
-                Some(Span::styled(
-                    format!(" {e}"),
-                    Style::default().fg(Color::Red),
-                ))
+                Some(Span::styled(format!(" {e}"), t.error))
             } else if open.loading {
                 Some(Span::styled(" reading…", dim()))
             } else if open.truncated {
@@ -294,6 +307,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             };
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: format!("open project · {}", open.dir.display()),
@@ -304,6 +318,156 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                     extra: note.map(Line::from).into_iter().collect(),
                 },
             );
+        }
+        Overlay::Help { scroll } => {
+            let lines = help_lines(app);
+            let area = centered(body, 78, body.height);
+            let room = area.height.saturating_sub(2) as usize;
+            let end = lines.len().saturating_sub(room);
+            app.help_end.set(end);
+            let first = (*scroll).min(end);
+            let shown = lines.into_iter().skip(first).take(room).collect();
+            boxed(f, t, area, "help", shown);
+        }
+        Overlay::Settings(view) => {
+            let depth = app.config.colors;
+            let colours = match depth {
+                ColorDepth::Auto => format!("auto ({} here)", depth_name(app.detected_depth)),
+                other => depth_name(other).to_string(),
+            };
+            let local = |key: &str| {
+                if app.local_settings.iter().any(|k| k == key) {
+                    "  (config.local.toml)"
+                } else {
+                    ""
+                }
+            };
+            let rows = SETTING_ROWS
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let (name, value) = match row {
+                        SettingRow::Theme => (
+                            "theme",
+                            format!(
+                                "‹ {} ›{}",
+                                Theme::name_of(&app.config.theme),
+                                local("theme")
+                            ),
+                        ),
+                        SettingRow::Colors => {
+                            ("colours", format!("‹ {colours} ›{}", local("colors")))
+                        }
+                        SettingRow::Prefix => (
+                            "prefix",
+                            format!("{}{}", app.keymap.prefix, local("prefix")),
+                        ),
+                        SettingRow::Pane => {
+                            let place = match app.config.pane_position {
+                                PanePosition::Auto => "auto (right from 180 columns)",
+                                PanePosition::Bottom => "under the cards",
+                                PanePosition::Right => "right of the cards",
+                            };
+                            ("pane", format!("‹ {place} ›{}", local("pane_position")))
+                        }
+                        SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
+                    };
+                    Line::from(Span::styled(
+                        format!(" {name:<9} {value}"),
+                        highlighted(Style::default(), i == view.row),
+                    ))
+                })
+                .collect();
+            let path = app
+                .config_path
+                .as_ref()
+                .map_or("default settings".to_string(), |p| p.display().to_string());
+            let mut extra = vec![
+                Line::default(),
+                Line::from(Span::styled(format!(" {path}"), dim())),
+            ];
+            if let Some(note) = &view.note {
+                extra.push(Line::from(Span::styled(format!(" {note}"), t.warn)));
+            }
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "settings".into(),
+                    width: 64,
+                    query: None,
+                    rows,
+                    highlight: view.row,
+                    extra,
+                },
+            );
+        }
+        Overlay::Keys(view) => {
+            let prefix = app.keymap.prefix.to_string();
+            let rows = key_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(i, (context, action))| {
+                    let keys: Vec<String> = app
+                        .keymap
+                        .keys(context, action)
+                        .iter()
+                        .map(|k| match context {
+                            Context::Grid => k.to_string(),
+                            Context::Focus => format!("{prefix} {k}"),
+                        })
+                        .collect();
+                    let keys = if keys.is_empty() {
+                        "—".to_string()
+                    } else {
+                        keys.join(" ")
+                    };
+                    let place = match context {
+                        Context::Grid => "grid",
+                        Context::Focus => "focus",
+                    };
+                    Line::from(vec![
+                        Span::styled(format!(" {place:<6}"), dim()),
+                        Span::styled(
+                            format!("{keys:<14} {}", action.label()),
+                            highlighted(Style::default(), i == view.row),
+                        ),
+                    ])
+                })
+                .collect();
+            let extra = view
+                .note
+                .iter()
+                .map(|note| Line::from(Span::styled(format!(" {note}"), t.warn)))
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "keys".into(),
+                    width: 72,
+                    query: None,
+                    rows,
+                    highlight: view.row,
+                    extra,
+                },
+            );
+        }
+        Overlay::KeyCapture(capture) => {
+            let what = match capture.target {
+                CaptureTarget::Prefix => "press the new prefix".to_string(),
+                CaptureTarget::Key(_, action) => {
+                    format!("press the new key for: {}", action.label())
+                }
+            };
+            let mut lines = vec![Line::from(format!(" {what}"))];
+            if let Some(note) = &capture.note {
+                lines.push(Line::from(Span::styled(format!(" {note}"), t.warn)));
+            }
+            let area = centered(body, 68, lines.len() as u16 + 2);
+            boxed(f, t, area, "new key", lines);
         }
         Overlay::Project(picker) => {
             let rows = picker
@@ -317,6 +481,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .collect();
             draw_list(
                 f,
+                t,
                 body,
                 ListBox {
                     title: "project".into(),
@@ -350,5 +515,112 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::OpenProject(_) => {
             "type to filter · Enter open · → in · ← up · Tab open this folder · Esc close"
         }
+        Overlay::Help { .. } => "j/k scroll · Esc close",
+        Overlay::Settings(_) => "j/k choose · ←/→ change · Enter set · Esc close",
+        Overlay::Keys(_) => "j/k choose · Enter new key · Backspace no key · R default · Esc back",
+        Overlay::KeyCapture(c) if c.conflict.is_some() => "Enter swap · Esc cancel",
+        Overlay::KeyCapture(_) => "press a key · Esc cancel",
     }
+}
+
+fn depth_name(depth: ColorDepth) -> &'static str {
+    match depth {
+        ColorDepth::Auto => "auto",
+        ColorDepth::TrueColor => "24-bit",
+        ColorDepth::Ansi256 => "256 colours",
+        ColorDepth::Ansi16 => "16 colours",
+    }
+}
+
+/// Every key: the grid's and focus mode's as bound now, then the fixed ones.
+pub fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let t = &app.theme;
+    let heading =
+        |text: String| Line::from(Span::styled(text, t.accent.add_modifier(Modifier::BOLD)));
+    let row = |key: String, what: &str| {
+        Line::from(vec![
+            Span::raw(format!("  {key:<12} ")),
+            Span::styled(what.to_string(), t.dim),
+        ])
+    };
+    let mut lines = vec![Line::from(format!(
+        "termist {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        app.config_path
+            .as_ref()
+            .map_or("default settings".to_string(), |p| p.display().to_string())
+    ))];
+    let prefix = app.keymap.prefix.to_string();
+    for (context, title) in [
+        (Context::Grid, "Grid".to_string()),
+        (Context::Focus, format!("Focus mode, after {prefix}")),
+    ] {
+        lines.push(Line::default());
+        lines.push(heading(title));
+        let mut tabs_done = false;
+        for action in keys::actions(context) {
+            let keys = app.keymap.keys(context, *action);
+            if let KeyAction::Tab(_) = action {
+                // Nine tab keys read as one line.
+                if !tabs_done {
+                    tabs_done = true;
+                    let tabs: Vec<String> = (1..=9)
+                        .filter_map(|n| app.keymap.key(context, KeyAction::Tab(n)))
+                        .collect();
+                    let digits: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
+                    if tabs == digits {
+                        lines.push(row("1-9".into(), "project tab 1 to 9"));
+                    } else if !tabs.is_empty() {
+                        lines.push(row(tabs.join(" "), "project tab 1 to 9"));
+                    }
+                }
+                continue;
+            }
+            if keys.is_empty() {
+                continue;
+            }
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            lines.push(row(keys.join(" "), action.label()));
+        }
+        if context == Context::Focus {
+            lines.push(row(
+                format!("{prefix} {prefix}"),
+                "send the prefix to the session",
+            ));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(heading("Anywhere".into()));
+    lines.push(row("C-q".into(), "out of anything, back to the grid"));
+    lines.push(row("C-c".into(), "quit"));
+    lines.push(Line::default());
+    lines.push(heading("Text boxes".into()));
+    for (key, what) in [
+        ("Enter", "send"),
+        ("Alt+Enter", "new line (also Shift+Enter, C-j)"),
+        ("↑ ↓", "earlier prompts, or lines"),
+        ("C-a C-e", "start, end of the line"),
+        ("C-u C-k", "delete to the start, to the end"),
+        ("Alt+← →", "a word back, forward"),
+        ("Esc", "close"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("Lists".into()));
+    for (key, what) in [
+        ("letters", "filter, where the list can be typed into"),
+        ("↑ ↓ C-n C-p", "choose"),
+        ("j k", "choose, where the list cannot be typed into"),
+        ("Enter", "pick"),
+        ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Grid and focus keys change in config.toml: [keys.grid] and [keys.focus]",
+        t.dim,
+    )));
+    lines
 }

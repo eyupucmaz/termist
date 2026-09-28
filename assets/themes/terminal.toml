@@ -1,0 +1,24 @@
+# Terminal: the host terminal's own colours. Nothing is painted; agents draw with
+# the terminal's palette. Also what a 16-colour terminal falls back to.
+name = "Terminal"
+
+[ui]
+dim = "dark_gray"
+border = "dark_gray"
+accent = "cyan"
+focus = "yellow"
+warn = "yellow"
+error = "red"
+archive = "magenta"
+selection = { reversed = true }
+tab_active = { reversed = true }
+
+[status]
+fresh = "dark_gray"
+running = "yellow"
+done = "blue"
+ready = "green"
+waiting = "red"
+closed = "dark_gray"
+exited = "magenta"
+disconnected = "gray"

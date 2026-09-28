@@ -11,4 +11,5 @@ rmp-serde.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 uuid.workspace = true

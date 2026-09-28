@@ -9,7 +9,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, Rgb, StdSyncHandler};
 use std::sync::mpsc;
 use std::time::Instant;
-use termist_core::{Cursor, Modes, Snapshot};
+use termist_core::{Cursor, Modes, Snapshot, TermColors};
 
 #[derive(Clone, Debug)]
 pub struct TermConfig {
@@ -17,8 +17,8 @@ pub struct TermConfig {
     pub rows: u16,
     pub scrollback: usize,
     pub xtversion: String,
-    pub fg: (u8, u8, u8),
-    pub bg: (u8, u8, u8),
+    /// What colour queries are answered with, unless the child set a colour itself.
+    pub colors: TermColors,
 }
 
 impl TermConfig {
@@ -28,8 +28,7 @@ impl TermConfig {
             rows,
             scrollback: 10_000,
             xtversion: format!("termist {}", env!("CARGO_PKG_VERSION")),
-            fg: (0xd8, 0xd8, 0xd8),
-            bg: (0x1e, 0x1e, 0x1e),
+            colors: TermColors::default(),
         }
     }
 }
@@ -140,6 +139,11 @@ impl TermCore {
         });
     }
 
+    /// The colours later queries are answered with.
+    pub fn set_colors(&mut self, colors: TermColors) {
+        self.cfg.colors = colors;
+    }
+
     pub fn size(&self) -> (u16, u16) {
         (self.cfg.cols, self.cfg.rows)
     }
@@ -199,9 +203,11 @@ impl TermCore {
             return c;
         }
         let rgb = |(r, g, b): (u8, u8, u8)| Rgb { r, g, b };
+        let colors = &self.cfg.colors;
         match index {
-            256 | 258 => rgb(self.cfg.fg), // foreground, cursor
-            257 => rgb(self.cfg.bg),       // background
+            256 | 258 => rgb(colors.fg), // foreground, cursor
+            257 => rgb(colors.bg),       // background
+            i if i < 16 && colors.ansi.is_some() => rgb(colors.ansi.unwrap()[i]),
             i => convert::xterm_rgb(i),
         }
     }
@@ -281,10 +287,42 @@ mod tests {
     }
 
     #[test]
-    fn background_colour_query_gets_the_host_background() {
+    fn colour_queries_get_a_dark_terminal_until_told_otherwise() {
         let mut t = core();
         let r = replies(&t.feed(b"\x1b]11;?\x07"));
         assert_eq!(r, vec![b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07".to_vec()]);
+    }
+
+    #[test]
+    fn colour_queries_get_the_colours_set_later() {
+        let mut t = core();
+        t.set_colors(TermColors {
+            fg: (0x2b, 0x25, 0x30),
+            bg: (0xfb, 0xf4, 0xe8),
+            ansi: Some([(0xc0, 0x39, 0x2b); 16]),
+        });
+        let r = replies(&t.feed(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07\x1b]4;196;?\x07"));
+        assert_eq!(
+            r,
+            vec![
+                b"\x1b]10;rgb:2b2b/2525/3030\x07".to_vec(),
+                b"\x1b]11;rgb:fbfb/f4f4/e8e8\x07".to_vec(),
+                b"\x1b]4;1;rgb:c0c0/3939/2b2b\x07".to_vec(),
+                b"\x1b]4;196;rgb:ffff/0000/0000\x07".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_colour_the_child_set_itself_wins_over_the_theme() {
+        let mut t = core();
+        t.set_colors(TermColors {
+            ansi: Some([(0, 0, 0); 16]),
+            ..TermColors::default()
+        });
+        t.feed(b"\x1b]4;1;rgb:12/34/56\x07");
+        let r = replies(&t.feed(b"\x1b]4;1;?\x07"));
+        assert_eq!(r, vec![b"\x1b]4;1;rgb:1212/3434/5656\x07".to_vec()]);
     }
 
     #[test]

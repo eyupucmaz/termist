@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use termist_core::env::should_scrub;
 use termist_core::screen::diff;
-use termist_core::{ServerEvent, SessionId, Snapshot};
+use termist_core::{ServerEvent, SessionId, Snapshot, TermColors};
 use termist_term::{TermConfig, TermCore, TermEvent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -36,6 +36,8 @@ pub enum SessionCmd {
     Detach {
         client: ClientId,
     },
+    /// What the child's colour queries are answered with from now on.
+    SetColors(TermColors),
     Kill,
 }
 
@@ -55,8 +57,10 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// Starts `spec` in a PTY; its colour queries are answered with `colors`.
 pub fn spawn(
     spec: SpawnSpec,
+    colors: TermColors,
     notes: UnboundedSender<SessionNote>,
 ) -> anyhow::Result<UnboundedSender<SessionCmd>> {
     let pair = native_pty_system().openpty(pty_size(spec.cols, spec.rows))?;
@@ -118,7 +122,10 @@ pub fn spawn(
 
     let (cmd_tx, mut cmd_rx): (UnboundedSender<SessionCmd>, UnboundedReceiver<SessionCmd>) =
         unbounded_channel();
-    let mut term = TermCore::new(TermConfig::new(spec.cols, spec.rows));
+    let mut term = TermCore::new(TermConfig {
+        colors,
+        ..TermConfig::new(spec.cols, spec.rows)
+    });
     tokio::spawn(async move {
         let mut attached: HashMap<ClientId, (UnboundedSender<ServerEvent>, Option<Snapshot>)> =
             HashMap::new();
@@ -177,6 +184,7 @@ pub fn spawn(
                         dirty = true;
                     }
                     Some(SessionCmd::Detach { client }) => { attached.remove(&client); }
+                    Some(SessionCmd::SetColors(colors)) => term.set_colors(colors),
                 },
                 _ = tokio::time::sleep_until(sync_deadline.unwrap_or_else(Instant::now).into()),
                     if sync_deadline.is_some() => {
@@ -262,14 +270,24 @@ mod tests {
     #[tokio::test]
     async fn output_reaches_an_attached_client() {
         let (notes, _n) = unbounded_channel();
-        let cmd = spawn(spec("printf 'hello from pty'; sleep 5"), notes).unwrap();
+        let cmd = spawn(
+            spec("printf 'hello from pty'; sleep 5"),
+            TermColors::default(),
+            notes,
+        )
+        .unwrap();
         wait_for_text(&cmd, "hello from pty").await;
     }
 
     #[tokio::test]
     async fn input_is_written_to_the_pty() {
         let (notes, _n) = unbounded_channel();
-        let cmd = spawn(spec("read line; echo \"got:$line\"; sleep 5"), notes).unwrap();
+        let cmd = spawn(
+            spec("read line; echo \"got:$line\"; sleep 5"),
+            TermColors::default(),
+            notes,
+        )
+        .unwrap();
         cmd.send(SessionCmd::Input(b"ping\r".to_vec())).unwrap();
         wait_for_text(&cmd, "got:ping").await;
     }
@@ -279,7 +297,7 @@ mod tests {
         // raw mode so the 6-byte CPR reply reaches `head` without a newline
         let script = "stty raw -echo; printf '\\033[6n'; head -c 6 >/dev/null; stty sane; echo answered; sleep 5";
         let (notes, _n) = unbounded_channel();
-        let cmd = spawn(spec(script), notes).unwrap();
+        let cmd = spawn(spec(script), TermColors::default(), notes).unwrap();
         wait_for_text(&cmd, "answered").await;
     }
 
@@ -291,7 +309,7 @@ mod tests {
         let (notes, mut notes_rx) = unbounded_channel();
         let s = spec(script);
         let id = s.id;
-        let _cmd = spawn(s, notes).unwrap();
+        let _cmd = spawn(s, TermColors::default(), notes).unwrap();
         let exited = timeout(Duration::from_secs(3), async {
             loop {
                 if let Some(SessionNote::Exited(sid, code)) = notes_rx.recv().await {
@@ -309,7 +327,7 @@ mod tests {
         let (notes, mut notes_rx) = unbounded_channel();
         let s = spec("echo bye; exit 3");
         let id = s.id;
-        let cmd = spawn(s, notes).unwrap();
+        let cmd = spawn(s, TermColors::default(), notes).unwrap();
         let exited = timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(SessionNote::Exited(sid, code)) = notes_rx.recv().await {
@@ -332,7 +350,7 @@ mod tests {
         let (notes, mut notes_rx) = unbounded_channel();
         let s = spec("stty raw -echo; echo ready; sleep 30");
         let id = s.id;
-        let cmd = spawn(s, notes).unwrap();
+        let cmd = spawn(s, TermColors::default(), notes).unwrap();
         wait_for_text(&cmd, "ready").await;
         for _ in 0..64 {
             cmd.send(SessionCmd::Input(vec![b'x'; 1024])).unwrap();
@@ -360,7 +378,12 @@ mod tests {
     #[tokio::test]
     async fn title_changes_are_noted() {
         let (notes, mut notes_rx) = unbounded_channel();
-        let cmd = spawn(spec("printf '\\033]0;Fix Login\\007'; sleep 5"), notes).unwrap();
+        let cmd = spawn(
+            spec("printf '\\033]0;Fix Login\\007'; sleep 5"),
+            TermColors::default(),
+            notes,
+        )
+        .unwrap();
         let title = timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(SessionNote::Title(_, t)) = notes_rx.recv().await {

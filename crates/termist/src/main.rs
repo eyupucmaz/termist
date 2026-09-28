@@ -22,6 +22,11 @@ enum Cmd {
     Daemon,
     /// Stop the daemon and every session it owns
     Kill,
+    /// Show, check, back up or restore your settings
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Forward an agent hook event to the daemon (called by agent CLIs)
     #[command(hide = true)]
     Hook {
@@ -29,6 +34,18 @@ enum Cmd {
         harness: String,
         event: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print where config.toml lives
+    Path,
+    /// Report every setting that is not used as written
+    Check,
+    /// Print config.toml (not config.local.toml), to keep a copy
+    Export,
+    /// Replace config.toml with FILE, once it checks clean (the old one is kept as .bak)
+    Import { file: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -57,6 +74,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(Cmd::Config { cmd }) = &cli.cmd {
+        return config(&paths, cmd);
+    }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let tui = cli.cmd.is_none();
     let result = runtime.block_on(async move {
@@ -67,7 +87,7 @@ fn main() -> ExitCode {
                 termist_daemon::server::run(paths, DaemonConfig::from_env()).await
             }
             Some(Cmd::Kill) => kill(&paths).await,
-            Some(Cmd::Hook { .. }) => unreachable!("handled above"),
+            Some(Cmd::Hook { .. } | Cmd::Config { .. }) => unreachable!("handled above"),
         }
     });
     if tui {
@@ -81,6 +101,59 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
+    use termist_platform::config_file;
+    let print_problems = |problems: &[termist_core::config::Problem]| {
+        for p in problems {
+            eprintln!("termist: {p}");
+        }
+    };
+    match cmd {
+        ConfigCmd::Path => println!("{}", paths.config_path().display()),
+        ConfigCmd::Check => {
+            let (config, mut problems) = config_file::load(paths);
+            problems.extend(termist_tui::keys::problems(&config));
+            if !problems.is_empty() {
+                print_problems(&problems);
+                return ExitCode::FAILURE;
+            }
+            println!("termist: the config is fine");
+        }
+        ConfigCmd::Export => match std::fs::read_to_string(paths.config_path()) {
+            Ok(text) => print!("{text}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("termist: no config.toml yet; every setting is at its default");
+            }
+            Err(e) => {
+                eprintln!("termist: {}: {e}", paths.config_path().display());
+                return ExitCode::FAILURE;
+            }
+        },
+        ConfigCmd::Import { file } => {
+            let text = match std::fs::read_to_string(file) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("termist: {}: {e}", file.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            match config_file::import(paths, &text, termist_tui::keys::problems) {
+                Ok(Ok(())) => println!("termist: imported into {}", paths.config_path().display()),
+                Ok(Err(problems)) => {
+                    print_problems(&problems);
+                    eprintln!("termist: not imported; config.toml is unchanged");
+                    return ExitCode::FAILURE;
+                }
+                Err(e) => {
+                    eprintln!("termist: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// Where a hook sends its event: the daemon that spawned the agent exports its

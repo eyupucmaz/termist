@@ -182,6 +182,11 @@ mod tests {
                 name: "login bug".into(),
             },
             ClientRequest::RescanHarnesses,
+            ClientRequest::SetColors(crate::TermColors {
+                fg: (1, 2, 3),
+                bg: (4, 5, 6),
+                ansi: Some([(7, 8, 9); 16]),
+            }),
         ];
         for req in requests {
             dec.push(&encode_frame(&req).unwrap());

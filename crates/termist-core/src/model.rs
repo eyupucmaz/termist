@@ -50,6 +50,26 @@ pub struct LaunchOptions {
 }
 
 /// Whether the daemon found a harness's CLI when it started.
+/// The colours an agent is told about when it asks (OSC 10, 11 and 4): its default
+/// foreground and background and, when a theme sets them, the 16 ANSI colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermColors {
+    pub fg: (u8, u8, u8),
+    pub bg: (u8, u8, u8),
+    pub ansi: Option<[(u8, u8, u8); 16]>,
+}
+
+impl Default for TermColors {
+    /// A dark terminal, for when nothing better is known.
+    fn default() -> Self {
+        TermColors {
+            fg: (0xd8, 0xd8, 0xd8),
+            bg: (0x1e, 0x1e, 0x1e),
+            ansi: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: Harness,

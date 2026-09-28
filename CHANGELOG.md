@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Themes.** Üsküdar (dark, the default) and Moda (light) paint the whole screen, the agents' own
+  colours included; the terminal theme keeps your terminal's colours. With 256 colours the themes are
+  matched to the nearest ones; with 16, the terminal theme stands in.
+- **Agents see the right colours.** An agent that asks its terminal for its colours is told the ones
+  termist draws it with, so it picks a light look on Moda. With the terminal theme, termist asks your
+  terminal first.
+- **Settings (`s`).** Theme, colours, prefix, where the pane goes, and every key of the grid and of
+  focus mode. Changes apply at once and are saved to `config.toml`, keeping your comments.
+- **`config.toml`**, with `config.local.toml` over it. A mistake in it never stops termist: it is
+  reported once and that setting keeps its default. `termist config path|check|export|import`.
+- **Help (`?`)** lists every key as it is bound now.
+- **The pane goes right of the cards** from 180 columns (`pane_position`); `C-a z` moves it for the
+  rest of the run.
+- After the prefix, `n` and `t` start an agent or a shell, as in the grid.
+- Inside tmux, termist says once that `C-a` is tmux's prefix too.
+
+### Changed
+
+- A key matches with exactly its modifiers: Ctrl+h, Ctrl+] or Ctrl+1 no longer do what h, ] or 1 do.
+- The daemon speaks protocol 4: after upgrading, `termist kill` the old daemon once.
+
 ## 0.1.0-alpha.1 - 2026-09-27
 
 The first public build of termist, mission control for your coding agents.
