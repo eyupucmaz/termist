@@ -1,0 +1,7 @@
+# The settings the recordings run with: one scene, and no sounds or notifications.
+[scenes]
+pool = ["galata"]
+
+[notify]
+sounds = "off"
+desktop = false
