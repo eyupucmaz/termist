@@ -5,6 +5,7 @@ use crate::keys::{self, Action as KeyAction, Context};
 use crate::overlay::{
     BrowseEntry, CaptureTarget, Overlay, QuickPrompt, SETTING_ROWS, SettingRow, key_rows,
 };
+use crate::scene_view;
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::status_style;
@@ -13,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use termist_core::config::{ColorDepth, PanePosition};
+use termist_core::config::{ColorDepth, PanePosition, Sounds};
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -320,8 +321,22 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             );
         }
         Overlay::Help { scroll } => {
-            let lines = help_lines(app);
-            let area = centered(body, 78, body.height);
+            let mut lines = help_lines(app);
+            let mut width = 78;
+            // The About scene on top, where it fits.
+            if let Some(scene) = app.scenes.get(app.scene)
+                && app.theme.draws_scenes()
+                && body.width as usize >= scene.width + 2
+            {
+                width = scene.width as u16 + 2;
+                let n = app.scene_frame(std::time::Instant::now());
+                let mut top = scene_view::lines(scene, app.time_of_day(), n, t);
+                top.push(Line::from(Span::styled(format!(" {}", scene.title), dim())));
+                top.push(Line::default());
+                top.append(&mut lines);
+                lines = top;
+            }
+            let area = centered(body, width, body.height);
             let room = area.height.saturating_sub(2) as usize;
             let end = lines.len().saturating_sub(room);
             app.help_end.set(end);
@@ -371,6 +386,45 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             ("pane", format!("‹ {place} ›{}", local("pane_position")))
                         }
                         SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
+                        SettingRow::Sounds => {
+                            let sounds = match app.config.notify.sounds {
+                                Sounds::Istanbul => "istanbul (vapur waits, martı done)",
+                                Sounds::System => "the system's",
+                                Sounds::Bell => "the terminal bell",
+                                Sounds::Off => "off",
+                            };
+                            ("sounds", format!("‹ {sounds} ›{}", local("notify.sounds")))
+                        }
+                        SettingRow::Desktop => {
+                            let on = if app.config.notify.desktop {
+                                "on, when the terminal is not in front"
+                            } else {
+                                "off"
+                            };
+                            ("desktop", format!("‹ {on} ›{}", local("notify.desktop")))
+                        }
+                        SettingRow::Splash => {
+                            let on = if app.config.scenes.splash {
+                                "on"
+                            } else {
+                                "off"
+                            };
+                            ("splash", format!("‹ {on} ›{}", local("scenes.splash")))
+                        }
+                        SettingRow::Idle => {
+                            let idle = match app.config.scenes.idle_minutes {
+                                0 => "off".to_string(),
+                                m => format!("after {m} min"),
+                            };
+                            (
+                                "idle",
+                                format!("‹ {idle} ›{}", local("scenes.idle_minutes")),
+                            )
+                        }
+                        SettingRow::Animations => {
+                            let on = if app.config.animations { "on" } else { "off" };
+                            ("animation", format!("‹ {on} ›{}", local("animations")))
+                        }
                     };
                     Line::from(Span::styled(
                         format!(" {name:<9} {value}"),

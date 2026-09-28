@@ -59,14 +59,24 @@ pub enum SettingRow {
     Prefix,
     Pane,
     Keys,
+    Sounds,
+    Desktop,
+    Splash,
+    Idle,
+    Animations,
 }
 
-pub const SETTING_ROWS: [SettingRow; 5] = [
+pub const SETTING_ROWS: [SettingRow; 10] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
     SettingRow::Pane,
     SettingRow::Keys,
+    SettingRow::Sounds,
+    SettingRow::Desktop,
+    SettingRow::Splash,
+    SettingRow::Idle,
+    SettingRow::Animations,
 ];
 
 /// What a captured key will be.

@@ -497,6 +497,7 @@ fn the_tui_draws_its_first_frame_at_once_and_enables_keyboard_enhancement() {
             pixel_height: 0,
         })
         .unwrap();
+    no_splash(&home);
     let mut cmd = CommandBuilder::new(BIN);
     cmd.cwd(&project_dir);
     cmd.env("TERMIST_HOME", &home);
@@ -583,6 +584,13 @@ struct Tui {
     _child: KillOnDrop,
 }
 
+/// These tests drive the grid: the opening scene, which takes the first key, is off.
+fn no_splash(home: &Path) {
+    let config = home.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[scenes]\nsplash = false\n").unwrap();
+}
+
 impl Tui {
     fn spawn(home: &Path, cwd: &Path, envs: &[(&str, &Path)]) -> Tui {
         use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -595,6 +603,7 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
+        no_splash(home);
         let mut cmd = CommandBuilder::new(BIN);
         cmd.cwd(cwd);
         cmd.env("TERMIST_HOME", home);
@@ -697,7 +706,9 @@ async fn quick_prompt_and_follow_up_through_the_real_tui() {
 
     let mark = tui.mark();
     tui.keys(b"p");
-    tui.wait_for("new task", mark);
+    // The quick prompt's footer: its title may land on cells already showing the
+    // empty grid's "p: new task", which are then not written again.
+    tui.wait_for("Alt+Enter newline", mark);
     tui.keys(b"fix the login redirect");
     // Ctrl+O, "type a model…", effort three steps right (high), Enter
     tui.keys(b"\x0fjlll\r");

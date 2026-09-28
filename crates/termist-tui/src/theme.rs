@@ -50,6 +50,8 @@ pub struct Theme {
     /// The theme asked for could not be drawn with this terminal's colours, and this
     /// one stands in for it.
     pub stands_in_for: Option<&'static str>,
+    /// The colours this terminal draws.
+    pub depth: ColorDepth,
 }
 
 impl Theme {
@@ -83,6 +85,16 @@ impl Theme {
     /// The host terminal's own colours, as today: the theme tests and a bare `App` use.
     pub fn terminal() -> Theme {
         Theme::named("terminal", ColorDepth::TrueColor)
+    }
+
+    /// A 24-bit colour as this terminal can draw it.
+    pub fn rgb(&self, rgb: Rgb) -> Color {
+        fit(rgb, self.depth)
+    }
+
+    /// Whether this terminal can draw the scenes: 256 colours at least.
+    pub fn draws_scenes(&self) -> bool {
+        self.depth != ColorDepth::Ansi16
     }
 
     pub fn status(&self, status: AgentStatus) -> Color {
@@ -292,6 +304,7 @@ impl Spec {
             ansi: self.ansi.map(|a| a.map(|c| fit(c, depth))),
             agent_colors,
             stands_in_for: None,
+            depth,
         }
     }
 }

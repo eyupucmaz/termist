@@ -2,6 +2,7 @@
 use crate::app::{App, Mode};
 use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
+use crate::scene_view::{self, ShowKind, Showing};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -9,8 +10,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use std::time::Instant;
 use termist_core::config::PanePosition;
 use termist_core::{AgentStatus, Snapshot, cell_flags};
+use termist_scenes::TimeOfDay;
 
 const CARD_W: u16 = 24;
 const CARD_H: u16 = 4;
@@ -144,33 +147,90 @@ pub fn status_style(theme: &Theme, status: AgentStatus) -> (char, Color, &'stati
     (glyph, theme.status(status), word)
 }
 
+/// "Galata Kulesi · gece", under a scene.
+fn scene_caption(app: &App, scene: &termist_scenes::Scene) -> Line<'static> {
+    let when = match app.time_of_day() {
+        TimeOfDay::Sabah => "sabah",
+        TimeOfDay::Gunduz => "gündüz",
+        TimeOfDay::Aksam => "gün batımı",
+        TimeOfDay::Gece => "gece",
+    };
+    Line::from(Span::styled(
+        format!("{} · {when}", scene.title),
+        app.theme.dim,
+    ))
+}
+
+/// A scene in `area` with `caption` under it; the wordmark when it is not loaded.
+fn draw_scene(f: &mut Frame, app: &App, name: &str, area: Rect, caption: Vec<Line<'static>>) {
+    let n = app.scene_frame(Instant::now());
+    match app.scenes.get(name) {
+        Some(scene) => {
+            scene_view::draw(
+                f.buffer_mut(),
+                area,
+                scene,
+                app.time_of_day(),
+                n,
+                &app.theme,
+                scene_caption(app, scene),
+                &caption,
+            );
+        }
+        None => scene_view::wordmark(f.buffer_mut(), area, &app.theme, &caption),
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     let area = f.area();
     f.buffer_mut().set_style(area, app.theme.base);
+    match app.showing {
+        Some(Showing {
+            kind: ShowKind::Splash,
+            name,
+            ..
+        }) => {
+            let version = Line::from(Span::styled(
+                format!("termist {}", env!("CARGO_PKG_VERSION")),
+                app.theme.dim,
+            ));
+            draw_scene(f, app, name, area, vec![version]);
+            return;
+        }
+        Some(Showing {
+            kind: ShowKind::Idle,
+            name,
+            ..
+        }) => {
+            draw_header(f, app, areas.header);
+            draw_scene(f, app, name, areas.body, vec![]);
+            f.render_widget(
+                Paragraph::new("any key: back").style(app.theme.dim),
+                areas.footer,
+            );
+            return;
+        }
+        None => {}
+    }
     draw_header(f, app, areas.header);
     let sessions = app.project_sessions();
-    if sessions.is_empty() {
-        let key = |action| app.keymap.key(Context::Grid, action);
+    if sessions.is_empty() && app.connected && !app.archive_view {
+        let hint = empty_hint(app);
+        draw_scene(
+            f,
+            app,
+            app.scene,
+            areas.body,
+            vec![Line::from(Span::styled(hint, app.theme.dim))],
+        );
+    } else if sessions.is_empty() {
         let text = if !app.connected {
             "Connecting to the termist daemon…".to_string()
-        } else if app.state.projects.is_empty() {
-            "No project yet: run termist inside a project folder.".to_string()
-        } else if app.project.is_none() {
-            match key(Action::OpenProject) {
-                Some(o) => format!("No project open · {o} opens one"),
-                None => "No project open".to_string(),
-            }
-        } else if app.archive_view {
-            match key(Action::ArchiveView) {
+        } else {
+            match app.keymap.key(Context::Grid, Action::ArchiveView) {
                 Some(a) => format!("Nothing archived in this project.  {a}: back"),
                 None => "Nothing archived in this project.  Esc: back".to_string(),
             }
-        } else {
-            let hints: Vec<String> = [Action::QuickPrompt, Action::NewSession, Action::NewShell]
-                .into_iter()
-                .filter_map(|a| Some(format!("{}: {}", key(a)?, a.hint())))
-                .collect();
-            format!("No sessions yet.  {}", hints.join("  ·  "))
         };
         f.render_widget(Paragraph::new(text).style(app.theme.dim), areas.body);
     } else {
@@ -446,6 +506,25 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(text).style(style), area);
 }
 
+/// What to do on an empty grid.
+fn empty_hint(app: &App) -> String {
+    let key = |action| app.keymap.key(Context::Grid, action);
+    if app.state.projects.is_empty() {
+        "No project yet: run termist inside a project folder.".to_string()
+    } else if app.project.is_none() {
+        match key(Action::OpenProject) {
+            Some(o) => format!("No project open · {o} opens one"),
+            None => "No project open".to_string(),
+        }
+    } else {
+        let hints: Vec<String> = [Action::QuickPrompt, Action::NewSession, Action::NewShell]
+            .into_iter()
+            .filter_map(|a| Some(format!("{}: {}", key(a)?, a.hint())))
+            .collect();
+        format!("No sessions yet.  {}", hints.join("  ·  "))
+    }
+}
+
 /// `key hint` for each action that has a key, joined with ` · `.
 fn hints(keymap: &Keymap, context: Context, actions: &[Action]) -> Vec<String> {
     actions
@@ -702,10 +781,11 @@ mod tests {
         let t = render(&mut app, 60, 10);
         assert_eq!(row(&t, 1), "Connecting to the termist daemon…");
         app.on_event(ServerEvent::State(StateSnapshot::default()));
-        let t = render(&mut app, 60, 10);
-        assert_eq!(
-            row(&t, 1),
-            "No project yet: run termist inside a project folder."
+        let text = screen_text(&render(&mut app, 60, 10));
+        assert!(text.contains("No project yet: run termist inside a project folder."));
+        assert!(
+            text.contains(scene_view::WORDMARK),
+            "too small for the scene"
         );
     }
 
@@ -898,7 +978,7 @@ mod tests {
         app.on_event(ServerEvent::State(state));
         let t = render(&mut app, 60, 10);
         assert_eq!(row(&t, 0), " termist   closed ◆1", "its agent still waits");
-        assert_eq!(row(&t, 1), "No project open · o opens one");
+        assert!(screen_text(&t).contains("No project open · o opens one"));
     }
 
     #[test]
@@ -1166,9 +1246,8 @@ mod tests {
             ..StateSnapshot::default()
         }));
         let t = render(&mut app, 70, 10);
-        assert_eq!(
-            row(&t, 1),
-            "No sessions yet.  g: new task  ·  n: agent  ·  t: shell"
+        assert!(
+            screen_text(&t).contains("No sessions yet.  g: new task  ·  n: agent  ·  t: shell")
         );
     }
 

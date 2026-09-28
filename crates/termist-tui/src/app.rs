@@ -6,19 +6,29 @@ use crate::overlay::{
     self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
+use crate::scene_view::{self, ShowKind, Showing};
 use crate::settings::ConfigEdit;
+use crate::sound::Sound;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use termist_core::TermColors;
-use termist_core::config::{ColorDepth, Config, PanePosition, THEMES};
+use termist_core::config::{ColorDepth, Config, PanePosition, Sounds, THEMES};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
     next_in_attention,
 };
+use termist_scenes::{Scene, TimeOfDay};
+
+/// What ←/→ steps through for the idle screen, in minutes; 0 is off.
+const IDLE_CHOICES: [u32; 6] = [0, 5, 10, 15, 30, 60];
+
+/// How long the splash stays at most.
+const SPLASH: Duration = Duration::from_secs(1);
 
 /// How many earlier prompts the quick prompt asks for.
 const PROMPT_HISTORY: u32 = 50;
@@ -44,7 +54,16 @@ pub enum Action {
     ListDir(PathBuf),
     /// Save a settings change to config.toml.
     WriteConfig(ConfigEdit),
+    /// An agent started waiting or finished: a sound, and a desktop notification when
+    /// the terminal is not in front.
+    Alert(Alert),
     Quit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alert {
+    pub sound: Sound,
+    pub text: String,
 }
 
 pub struct App {
@@ -89,7 +108,8 @@ pub struct App {
     /// The host terminal's own colours, if it said; agents get them with a theme that
     /// paints nothing.
     pub host_colors: Option<TermColors>,
-    /// The top-level settings config.local.toml sets: the settings screen leaves them.
+    /// The settings config.local.toml sets (`theme`, `notify.sounds`, and `keys` for any
+    /// key): the settings screen leaves them.
     pub local_settings: Vec<String>,
     /// `C-a z`: the pane's place until termist quits, over the configured one.
     pub pane_override: Option<PanePosition>,
@@ -97,6 +117,23 @@ pub struct App {
     pub pane_right: bool,
     /// How far the help can scroll in the last frame: its last line at the bottom.
     pub help_end: std::cell::Cell<usize>,
+    /// A scene over the screen: the splash, or the idle screen.
+    pub showing: Option<Showing>,
+    /// The scene of the empty grid and the help, picked at start.
+    pub scene: &'static str,
+    /// The scenes picked so far, loaded.
+    pub scenes: HashMap<&'static str, Scene>,
+    /// The last key or paste: the idle screen comes `idle_minutes` after it.
+    pub last_input: Instant,
+    /// When termist started: the empty grid's scene moves from here.
+    pub started: Instant,
+    /// The hour on the local clock, for the scenes' palettes.
+    pub hour: u32,
+    /// The whole screen at the last frame: a scene moves only where it fits.
+    pub screen: ratatui::layout::Rect,
+    /// The terminal window is in front (focus reports; assumed without them).
+    pub window_focused: bool,
+    rng: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,11 +156,16 @@ impl Default for App {
 impl App {
     /// Default settings in the terminal's own colours.
     pub fn new() -> App {
-        App::with_config(Config::default(), Theme::terminal(), Keymap::defaults())
+        let mut app = App::with_config(Config::default(), Theme::terminal(), Keymap::defaults());
+        // The same scene on every run, for tests.
+        app.rng = 1;
+        app.scene = "";
+        app.scene = app.pick_scene();
+        app
     }
 
     pub fn with_config(config: Config, theme: Theme, keymap: Keymap) -> App {
-        App {
+        let mut app = App {
             state: StateSnapshot::default(),
             project: None,
             selected: None,
@@ -161,6 +203,165 @@ impl App {
             pane_override: None,
             pane_right: false,
             help_end: std::cell::Cell::new(usize::MAX),
+            showing: None,
+            scene: "",
+            scenes: HashMap::new(),
+            last_input: Instant::now(),
+            started: Instant::now(),
+            hour: 12,
+            window_focused: true,
+            screen: ratatui::layout::Rect::default(),
+            rng: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_nanos() as u64 | 1),
+        };
+        app.scene = app.pick_scene();
+        app
+    }
+
+    fn alert(&self, id: SessionId, waiting: bool) -> Option<Action> {
+        let s = self.state.sessions.iter().find(|s| s.id == id)?;
+        if s.archived {
+            return None;
+        }
+        let project = self
+            .state
+            .projects
+            .iter()
+            .find(|p| p.id == s.project)
+            .map_or("", |p| p.name.as_str());
+        let (sound, what) = if waiting {
+            (Sound::Vapur, "waits for you")
+        } else {
+            (Sound::Marti, "is done")
+        };
+        Some(Action::Alert(Alert {
+            sound,
+            text: format!("{} · {project} {what}", s.display_name()),
+        }))
+    }
+
+    /// A scene from the configured pool, never the one shown last, loaded.
+    pub fn pick_scene(&mut self) -> &'static str {
+        let pool: Vec<&'static str> = termist_scenes::names()
+            .filter(|n| self.config.scenes.pool.iter().any(|p| p == n))
+            .collect();
+        let pool = if pool.is_empty() {
+            termist_scenes::names().collect()
+        } else {
+            pool
+        };
+        let fresh: Vec<&'static str> = pool
+            .iter()
+            .copied()
+            .filter(|n| pool.len() == 1 || *n != self.scene)
+            .collect();
+        // xorshift: enough to vary the scene from one start to the next.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        let name = fresh[(self.rng % fresh.len() as u64) as usize];
+        if !self.scenes.contains_key(name)
+            && let Ok(scene) = Scene::load(name)
+        {
+            self.scenes.insert(name, scene);
+        }
+        name
+    }
+
+    pub fn time_of_day(&self) -> TimeOfDay {
+        TimeOfDay::from_hour(self.hour)
+    }
+
+    /// The splash, if the settings want it and the terminal can draw it.
+    pub fn start_splash(&mut self, now: Instant) {
+        if self.config.scenes.splash && self.theme.draws_scenes() {
+            self.showing = Some(Showing {
+                name: self.scene,
+                since: now,
+                kind: ShowKind::Splash,
+            });
+        }
+    }
+
+    /// The frame of the scene on screen: counted from when it came up.
+    pub fn scene_frame(&self, now: Instant) -> u64 {
+        let since = self.showing.map_or(self.started, |s| s.since);
+        scene_view::frame_number(now.saturating_duration_since(since), self.config.animations)
+    }
+
+    /// Ends the splash after its second and brings up the idle screen when it is due.
+    pub fn tick(&mut self, now: Instant) {
+        match self.showing {
+            Some(Showing {
+                kind: ShowKind::Splash,
+                since,
+                ..
+            }) if now.saturating_duration_since(since) >= SPLASH => self.showing = None,
+            None if self.idle_due(now) => {
+                let name = self.pick_scene();
+                self.scene = name;
+                self.showing = Some(Showing {
+                    name,
+                    since: now,
+                    kind: ShowKind::Idle,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn idle_due(&self, now: Instant) -> bool {
+        let minutes = self.config.scenes.idle_minutes;
+        minutes > 0
+            && self.theme.draws_scenes()
+            && now.saturating_duration_since(self.last_input)
+                >= Duration::from_secs(minutes as u64 * 60)
+    }
+
+    /// When the screen must be drawn again with nothing else happening: the next frame
+    /// of a moving scene, the end of the splash, or the idle screen.
+    pub fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let frame = now + Duration::from_millis(1000 / scene_view::FPS);
+        // A scene that does not fit is the wordmark, which does not move.
+        let fits = |name: &str, spare_rows: u16, spare_cols: u16| {
+            self.scenes.get(name).is_some_and(|scene| {
+                self.screen.width as usize >= scene.width + spare_cols as usize
+                    && self.screen.height as usize >= scene.height + spare_rows as usize
+            })
+        };
+        let scene_up = match self.showing {
+            Some(Showing {
+                name,
+                kind: ShowKind::Splash,
+                ..
+            }) => fits(name, 3, 0),
+            Some(Showing { name, .. }) => fits(name, 2 + 2, 0),
+            None if matches!(self.overlays.last(), Some(Overlay::Help { .. })) => {
+                fits(self.scene, 2, 2)
+            }
+            None => {
+                self.connected
+                    && self.project_sessions().is_empty()
+                    && !self.archive_view
+                    && self.overlays.is_empty()
+                    && fits(self.scene, 2 + 3, 0)
+            }
+        };
+        if scene_up && self.config.animations && self.theme.draws_scenes() {
+            return Some(frame);
+        }
+        match self.showing {
+            Some(Showing {
+                kind: ShowKind::Splash,
+                since,
+                ..
+            }) => Some(since + SPLASH),
+            Some(_) => None,
+            None if self.config.scenes.idle_minutes > 0 && self.theme.draws_scenes() => Some(
+                self.last_input + Duration::from_secs(self.config.scenes.idle_minutes as u64 * 60),
+            ),
+            None => None,
         }
     }
 
@@ -231,6 +432,17 @@ impl App {
             }
             ServerEvent::SessionUpdated(info) => {
                 let (id, status) = (info.id, info.status);
+                let before = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.status);
+                // An agent that starts waiting ends the idle screen, on its card.
+                let starts_waiting = status == AgentStatus::NeedsFeedback
+                    && before.is_some_and(|b| b != AgentStatus::NeedsFeedback)
+                    && !info.archived;
+                let idle = matches!(self.showing, Some(s) if s.kind == ShowKind::Idle);
                 // Archived elsewhere while focused here: back to the grid.
                 if info.archived
                     && !self.archive_view
@@ -243,7 +455,9 @@ impl App {
                     self.mode = Mode::Grid;
                 }
                 // You are looking at it: a focused session that finishes is seen.
+                // A scene over the screen hides the pane: nobody is looking.
                 let seen_now = info.status == AgentStatus::Unseen
+                    && self.showing.is_none()
                     && self.selected == Some(id)
                     && self.attached == Some(id)
                     && matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
@@ -259,6 +473,27 @@ impl App {
                 self.repair_selection();
                 if seen_now {
                     actions.push(Action::Send(ClientRequest::MarkSeen { session: id }));
+                }
+                // A sound and a note for a card that starts waiting or finishes, unless
+                // you are looking at it.
+                let watching = self.window_focused
+                    && self.showing.is_none()
+                    && self.selected == Some(id)
+                    && matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
+                let finishes = status == AgentStatus::Unseen
+                    && before.is_some_and(|b| b != AgentStatus::Unseen);
+                if (starts_waiting || finishes) && !watching {
+                    actions.extend(self.alert(id, starts_waiting));
+                }
+                if starts_waiting && idle {
+                    self.showing = None;
+                    self.last_input = Instant::now();
+                    let shown =
+                        !self.archive_view && self.visible_sessions().iter().any(|s| s.id == id);
+                    if matches!(self.mode, Mode::Grid) && shown {
+                        self.select(id);
+                        self.repair_selection();
+                    }
                 }
                 if self.resume_pending == Some(id) && status == AgentStatus::Fresh {
                     self.resume_pending = None;
@@ -329,6 +564,11 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        self.last_input = Instant::now();
+        // A key on a scene only takes it away.
+        if self.showing.take().is_some() {
+            return vec![];
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('q') {
             // Ctrl+Q always gets you out: every overlay closes and focus mode ends.
@@ -420,6 +660,10 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: &str) -> Vec<Action> {
+        self.last_input = Instant::now();
+        if self.showing.take().is_some() {
+            return vec![];
+        }
         if let Some(top) = self.overlays.last_mut() {
             if let Some(input) = top.text_input_mut() {
                 input.insert_str(text);
@@ -1259,13 +1503,59 @@ impl App {
             SettingRow::Theme => "theme",
             SettingRow::Colors => "colors",
             SettingRow::Pane => "pane_position",
+            SettingRow::Sounds => "notify.sounds",
+            SettingRow::Desktop => "notify.desktop",
+            SettingRow::Splash => "scenes.splash",
+            SettingRow::Idle => "scenes.idle_minutes",
+            SettingRow::Animations => "animations",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
+        // config.local.toml wins over the settings it sets.
         if self.local_settings.iter().any(|k| k == key) {
             self.settings_note(format!("{key} is set in config.local.toml"));
             return vec![];
         }
         let next = |len: usize, at: usize| (at as isize + step).rem_euclid(len as isize) as usize;
+        let quiet = |app: &mut App| {
+            if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+                v.note = None;
+            }
+        };
+        match row {
+            SettingRow::Sounds => {
+                let all = Sounds::ALL;
+                let at = all
+                    .iter()
+                    .position(|x| *x == self.config.notify.sounds)
+                    .unwrap_or(0);
+                self.config.notify.sounds = all[next(all.len(), at)];
+                quiet(self);
+                let value = self.config.notify.sounds.id().to_string();
+                return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
+            }
+            SettingRow::Desktop | SettingRow::Splash | SettingRow::Animations => {
+                let flag = match row {
+                    SettingRow::Desktop => &mut self.config.notify.desktop,
+                    SettingRow::Splash => &mut self.config.scenes.splash,
+                    _ => &mut self.config.animations,
+                };
+                *flag = !*flag;
+                let value = *flag;
+                quiet(self);
+                return vec![Action::WriteConfig(ConfigEdit::SetBool { key, value })];
+            }
+            SettingRow::Idle => {
+                let at = IDLE_CHOICES
+                    .iter()
+                    .position(|m| *m == self.config.scenes.idle_minutes)
+                    .unwrap_or(2);
+                self.config.scenes.idle_minutes = IDLE_CHOICES[next(IDLE_CHOICES.len(), at)];
+                quiet(self);
+                let value = self.config.scenes.idle_minutes as i64;
+                return vec![Action::WriteConfig(ConfigEdit::SetInt { key, value })];
+            }
+            _ => {}
+        }
         let value = match row {
             SettingRow::Theme => {
                 let at = THEMES
@@ -3842,6 +4132,305 @@ mod tests {
         assert!(
             writes(&app.on_key(k(K::Delete))).len() == 1,
             "Delete has a name"
+        );
+    }
+
+    #[test]
+    fn the_splash_goes_after_a_second_or_at_a_key_and_the_key_is_not_used() {
+        let (mut app, _) = app();
+        app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let t0 = Instant::now();
+        app.start_splash(t0);
+        assert!(app.showing.is_some());
+        app.tick(t0 + Duration::from_millis(500));
+        assert!(app.showing.is_some());
+        assert_eq!(
+            app.next_wake(t0).unwrap(),
+            t0 + Duration::from_millis(100),
+            "it moves"
+        );
+        app.tick(t0 + Duration::from_secs(1));
+        assert_eq!(app.showing, None);
+
+        app.start_splash(Instant::now());
+        assert!(app.on_key(k(K::Char('p'))).is_empty());
+        assert!(app.showing.is_none());
+        assert!(app.overlays.is_empty(), "the key only took the splash away");
+
+        app.config.scenes.splash = false;
+        app.start_splash(Instant::now());
+        assert!(app.showing.is_none());
+    }
+
+    #[test]
+    fn after_the_idle_minutes_a_scene_comes_and_a_waiting_agent_ends_it() {
+        let (mut app, s) = app();
+        app.config.scenes.idle_minutes = 10;
+        let now = Instant::now();
+        app.last_input = now - Duration::from_secs(9 * 60);
+        app.tick(now);
+        assert!(app.showing.is_none());
+        assert_eq!(
+            app.next_wake(now),
+            Some(app.last_input + Duration::from_secs(600))
+        );
+        app.last_input = now - Duration::from_secs(10 * 60);
+        app.tick(now);
+        let shown = app.showing.unwrap();
+        assert_eq!(shown.kind, ShowKind::Idle);
+        assert!(app.scenes.contains_key(shown.name));
+
+        let mut waiting = s[1].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        assert!(app.showing.is_none(), "a red agent ends the idle screen");
+        assert_eq!(app.selected, Some(s[1].id), "on its card");
+    }
+
+    #[test]
+    fn no_idle_screen_when_it_is_off_or_the_terminal_has_16_colours() {
+        let (mut app, _) = app();
+        let now = Instant::now();
+        app.last_input = now - Duration::from_secs(3600);
+        app.config.scenes.idle_minutes = 0;
+        app.tick(now);
+        assert!(app.showing.is_none());
+        app.config.scenes.idle_minutes = 10;
+        app.theme = Theme::named("moda", ColorDepth::Ansi16);
+        app.tick(now);
+        assert!(app.showing.is_none());
+    }
+
+    #[test]
+    fn scenes_come_from_the_pool_and_never_twice_in_a_row() {
+        let (mut app, _) = app();
+        app.config.scenes.pool = vec!["galata".into(), "vapur".into()];
+        let mut last = app.pick_scene();
+        for _ in 0..20 {
+            app.scene = last;
+            let next = app.pick_scene();
+            assert!(["galata", "vapur"].contains(&next));
+            assert_ne!(next, last);
+            last = next;
+        }
+        app.config.scenes.pool = vec!["galata".into()];
+        app.scene = "galata";
+        assert_eq!(app.pick_scene(), "galata", "a pool of one repeats");
+    }
+
+    #[test]
+    fn without_animations_the_scene_stands_still() {
+        let (mut app, _) = app();
+        app.config.animations = false;
+        let t0 = Instant::now();
+        app.start_splash(t0);
+        assert_eq!(app.scene_frame(t0 + Duration::from_secs(3)), 0);
+        assert_eq!(
+            app.next_wake(t0),
+            Some(t0 + Duration::from_secs(1)),
+            "only the splash's end"
+        );
+    }
+
+    fn alerts(actions: &[Action]) -> Vec<&Alert> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Alert(alert) => Some(alert),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn update(app: &mut App, info: &SessionInfo, status: AgentStatus) -> Vec<Action> {
+        let mut info = info.clone();
+        info.status = status;
+        app.on_event(ServerEvent::SessionUpdated(info))
+    }
+
+    #[test]
+    fn a_card_that_starts_waiting_or_finishes_is_announced() {
+        let (mut app, s) = app();
+        let waiting = update(&mut app, &s[1], AgentStatus::NeedsFeedback);
+        assert_eq!(
+            alerts(&waiting),
+            [&Alert {
+                sound: Sound::Vapur,
+                text: format!("{} · api waits for you", s[1].display_name()),
+            }]
+        );
+        assert!(
+            alerts(&update(&mut app, &s[1], AgentStatus::NeedsFeedback)).is_empty(),
+            "once"
+        );
+        let done = update(&mut app, &s[1], AgentStatus::Unseen);
+        assert_eq!(alerts(&done)[0].sound, Sound::Marti);
+        assert!(alerts(&done)[0].text.ends_with("is done"));
+        assert!(alerts(&update(&mut app, &s[1], AgentStatus::Running)).is_empty());
+    }
+
+    #[test]
+    fn the_card_you_are_typing_into_is_not_announced_unless_you_are_away() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        let id = app.selected.unwrap();
+        let focused = s.iter().find(|x| x.id == id).unwrap().clone();
+        assert!(alerts(&update(&mut app, &focused, AgentStatus::NeedsFeedback)).is_empty());
+        update(&mut app, &focused, AgentStatus::Running);
+        app.window_focused = false;
+        assert_eq!(
+            alerts(&update(&mut app, &focused, AgentStatus::NeedsFeedback)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn archived_cards_and_the_first_state_are_quiet() {
+        let (mut app, s) = app();
+        let mut archived = s[2].clone();
+        archived.archived = true;
+        archived.status = AgentStatus::NeedsFeedback;
+        assert!(alerts(&app.on_event(ServerEvent::SessionUpdated(archived))).is_empty());
+        let mut state = app.state.clone();
+        for x in &mut state.sessions {
+            x.status = AgentStatus::Unseen;
+        }
+        assert!(alerts(&app.on_event(ServerEvent::State(state))).is_empty());
+    }
+
+    #[test]
+    fn sounds_notifications_and_scenes_are_set_from_the_settings() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        for _ in 0..5 {
+            app.on_key(k(K::Char('j')));
+        }
+        let edits: Vec<ConfigEdit> = [
+            app.on_key(k(K::Right)),
+            {
+                app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Enter))
+            },
+            {
+                app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Right))
+            },
+            {
+                app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Left))
+            },
+            {
+                app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Right))
+            },
+        ]
+        .into_iter()
+        .flat_map(|actions| writes(&actions).into_iter().cloned().collect::<Vec<_>>())
+        .collect();
+        assert_eq!(
+            edits,
+            [
+                ConfigEdit::Set {
+                    key: "notify.sounds",
+                    value: "system".into()
+                },
+                ConfigEdit::SetBool {
+                    key: "notify.desktop",
+                    value: false
+                },
+                ConfigEdit::SetBool {
+                    key: "scenes.splash",
+                    value: false
+                },
+                ConfigEdit::SetInt {
+                    key: "scenes.idle_minutes",
+                    value: 5
+                },
+                ConfigEdit::SetBool {
+                    key: "animations",
+                    value: false
+                },
+            ]
+        );
+        assert_eq!(app.config.notify.sounds, Sounds::System);
+        assert!(!app.config.animations);
+        app.local_settings = vec!["scenes.idle_minutes".into()];
+        app.on_key(k(K::Char('k')));
+        assert!(
+            app.on_key(k(K::Right)).is_empty(),
+            "set in config.local.toml"
+        );
+        app.on_key(k(K::Char('k')));
+        assert_eq!(app.on_key(k(K::Right)).len(), 1, "the splash is not");
+    }
+
+    #[test]
+    fn a_scene_moves_only_where_it_fits() {
+        let (mut app, _) = app();
+        let t0 = Instant::now();
+        app.start_splash(t0);
+        app.screen = ratatui::layout::Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            app.next_wake(t0),
+            Some(t0 + SPLASH),
+            "the wordmark stands still"
+        );
+        app.screen = ratatui::layout::Rect::new(0, 0, 110, 30);
+        assert_eq!(app.next_wake(t0), Some(t0 + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn behind_the_idle_screen_nothing_is_seen_and_everything_is_announced() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        let id = app.selected.unwrap();
+        let focused = s.iter().find(|x| x.id == id).unwrap().clone();
+        app.showing = Some(Showing {
+            name: "galata",
+            since: Instant::now(),
+            kind: ShowKind::Idle,
+        });
+        let actions = update(&mut app, &focused, AgentStatus::Unseen);
+        assert!(
+            !sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkSeen { .. })),
+            "not seen"
+        );
+        assert_eq!(alerts(&actions).len(), 1, "and announced");
+        let actions = update(&mut app, &focused, AgentStatus::NeedsFeedback);
+        assert_eq!(alerts(&actions).len(), 1);
+        assert!(app.showing.is_none());
+    }
+
+    #[test]
+    fn every_scene_can_come_up_first_galata_too() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 1..200u64 {
+            let mut app = App::new();
+            app.rng = seed;
+            app.scene = "";
+            seen.insert(app.pick_scene());
+        }
+        assert!(seen.contains("galata"), "{seen:?}");
+        assert_eq!(seen.len(), 6);
+    }
+
+    #[test]
+    fn a_waiting_card_the_grid_does_not_show_is_not_selected() {
+        let (mut app, s) = app();
+        app.showing = Some(Showing {
+            name: "galata",
+            since: Instant::now(),
+            kind: ShowKind::Idle,
+        });
+        app.archive_view = true;
+        update(&mut app, &s[0], AgentStatus::NeedsFeedback);
+        assert!(app.showing.is_none());
+        assert_ne!(
+            app.selected,
+            Some(s[0].id),
+            "the archive view shows other cards"
         );
     }
 }

@@ -17,6 +17,15 @@
 - **Help (`?`)** lists every key as it is bound now.
 - **The pane goes right of the cards** from 180 columns (`pane_position`); `C-a z` moves it for the
   rest of the run.
+- **Istanbul scenes.** Galata, Kız Kulesi, Ayasofya, the Bosphorus Bridge, a vapur with its gulls and
+  the Basilica Cistern, in the colours of the hour and gently moving: for a second at start (any key
+  skips it), on an empty grid, after `idle_minutes` without a key (an agent that starts waiting ends
+  it), and at the top of the help. Too small a terminal, or 16 colours, gets a one-line wordmark.
+- **Sounds.** A ferry's horn when an agent waits for you, a seagull when one is done, made by code (no
+  sound files, no audio library). `notify.sounds`: `istanbul`, `system`, `bell` or `off`.
+  `termist sound test vapur|marti` plays one.
+- **Desktop notifications** when the terminal is not in front, asked of the terminal itself (Ghostty,
+  WezTerm, kitty, iTerm2 and others; through tmux too).
 - After the prefix, `n` and `t` start an agent or a shell, as in the grid.
 - Inside tmux, termist says once that `C-a` is tmux's prefix too.
 

@@ -27,12 +27,26 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Hear the sounds: `termist sound test vapur` (waiting) or `marti` (done)
+    Sound {
+        #[command(subcommand)]
+        cmd: SoundCmd,
+    },
     /// Forward an agent hook event to the daemon (called by agent CLIs)
     #[command(hide = true)]
     Hook {
         #[arg(long)]
         harness: String,
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SoundCmd {
+    /// Play a sound as termist would, and print where its file is
+    Test {
+        #[arg(default_value = "vapur")]
+        name: String,
     },
 }
 
@@ -77,6 +91,12 @@ fn main() -> ExitCode {
     if let Some(Cmd::Config { cmd }) = &cli.cmd {
         return config(&paths, cmd);
     }
+    if let Some(Cmd::Sound {
+        cmd: SoundCmd::Test { name },
+    }) = &cli.cmd
+    {
+        return sound_test(&paths, name);
+    }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let tui = cli.cmd.is_none();
     let result = runtime.block_on(async move {
@@ -87,7 +107,9 @@ fn main() -> ExitCode {
                 termist_daemon::server::run(paths, DaemonConfig::from_env()).await
             }
             Some(Cmd::Kill) => kill(&paths).await,
-            Some(Cmd::Hook { .. } | Cmd::Config { .. }) => unreachable!("handled above"),
+            Some(Cmd::Hook { .. } | Cmd::Config { .. } | Cmd::Sound { .. }) => {
+                unreachable!("handled above")
+            }
         }
     });
     if tui {
@@ -154,6 +176,34 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn sound_test(paths: &Paths, name: &str) -> ExitCode {
+    use termist_tui::sound::{self, Sound};
+    let Some(which) = Sound::from_name(name) else {
+        eprintln!("termist: no sound {name:?}; sounds: vapur, marti");
+        return ExitCode::FAILURE;
+    };
+    match sound::file(&paths.data_dir.join("sounds"), which) {
+        Ok(file) => {
+            println!("{}", file.display());
+            let (tx, rx) = std::sync::mpsc::channel();
+            if !termist_platform::notify::play(&file, move || {
+                let _ = tx.send(());
+            }) {
+                eprintln!("termist: no sound player found; termist rings the bell instead");
+            } else if rx.recv_timeout(Duration::from_secs(3)).is_ok() {
+                eprintln!(
+                    "termist: the sound player could not play; termist rings the bell instead"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("termist: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Where a hook sends its event: the daemon that spawned the agent exports its

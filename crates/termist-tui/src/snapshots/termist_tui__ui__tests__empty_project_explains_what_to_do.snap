@@ -3,11 +3,11 @@ source: crates/termist-tui/src/ui.rs
 expression: "render(&mut app, 60, 10).backend()"
 ---
 " termist   web                                              "
-"No sessions yet.  p: new task  ·  n: agent  ·  t: shell     "
 "                                                            "
 "                                                            "
+"                termist · terminal istanbul                 "
 "                                                            "
-"                                                            "
+"  No sessions yet.  p: new task  ·  n: agent  ·  t: shell   "
 "                                                            "
 "                                                            "
 "                                                            "
