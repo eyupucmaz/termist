@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.0-beta.4 - 2026-09-30
+
+You can scroll back through what an agent wrote.
+
+### Added
+
+- **Scroll back through a session's output.** Turn the wheel over the pane, press `PgUp` in the grid or
+  `Ctrl+a [` while typing into a card. Then `↑`/`↓` or `j`/`k` move a line, `PgUp`/`PgDn` a page,
+  `Ctrl+u`/`Ctrl+d` half a page and `g` goes to the oldest line; `q`, `Esc`, `G` or scrolling to the
+  bottom takes you back to the live screen. The pane's title shows how far back you are, and output
+  that arrives meanwhile does not move the view. Nothing you press while scrolling reaches the agent.
+- **Full-screen agents scroll themselves.** Claude Code and OpenCode keep their own history: the wheel
+  goes to them, and `PgUp` or `Ctrl+a [` asks them to scroll. Before, the wheel reached Claude Code as
+  arrow keys and walked its prompt history instead.
+- **termist takes the mouse** so the wheel works. To select text, hold `Shift` while you drag. Set
+  `mouse = false` (or turn it off in the settings, `s`) to give the mouse back to your terminal. Inside
+  tmux, the wheel needs tmux's `set -g mouse on`.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions
+can stop, `termist kill` and start `termist` again: until then the new TUI cannot reach the old daemon.
+Agents you stop this way come back with `Enter` on their card.
+
 ## 0.1.0-beta.3 - 2026-09-30
 
 The follow-up box has room for what you want to say.
@@ -8,13 +32,14 @@ The follow-up box has room for what you want to say.
 
 - **A follow-up takes several lines** (`Space`). `Alt+Enter`, `Shift+Enter` or `C-j` starts a new line
   and `Enter` sends it all to the agent as one message.
-- **Prompt boxes grow with the text.** The follow-up and the new task (`g`) boxes are 72 columns wide
+- **Prompt boxes grow with the text.** The follow-up and the new task (`p`) boxes are 72 columns wide
   and 4 rows tall, grow to 10 rows as you type, and wrap long lines at a word instead of sliding them
   sideways.
 
 ### Updating
 
-`termist update`, then, when your sessions can stop, `termist kill` and start `termist` again.
+`termist update`, then quit termist (`q`) and start it again. The daemon did not change, so your
+sessions keep running; no `termist kill` is needed.
 
 ## 0.1.0-beta.2 - 2026-09-28
 
