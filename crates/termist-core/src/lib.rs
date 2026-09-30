@@ -14,5 +14,7 @@ pub use model::{
     TermColors,
 };
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
-pub use screen::{Cell, Color, Cursor, Modes, ScreenUpdate, Snapshot, cell_flags};
+pub use screen::{
+    Cell, Color, Cursor, Modes, ScreenUpdate, Scroll, ScrollPos, Snapshot, cell_flags,
+};
 pub use status::{AgentStatus, Signal, attention_order, next_in_attention, now_ms};

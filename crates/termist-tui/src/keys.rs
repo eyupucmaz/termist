@@ -47,6 +47,8 @@ pub enum Action {
     Settings,
     /// Focus mode: the pane under the cards or right of them, until termist quits.
     TogglePane,
+    /// Back through the pane's history, a page at a time; the scroll keys take over.
+    ScrollBack,
 }
 
 use Action::*;
@@ -67,6 +69,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     Right,
     HalfPageDown,
     HalfPageUp,
+    ScrollBack,
     NextTab,
     PrevTab,
     Tab(1),
@@ -103,6 +106,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     Up,
     Right,
     TogglePane,
+    ScrollBack,
     Help,
 ];
 
@@ -138,6 +142,7 @@ impl Action {
             Help => "help",
             Settings => "settings",
             TogglePane => "toggle_pane",
+            ScrollBack => "scroll_back",
         }
     }
 
@@ -177,6 +182,7 @@ impl Action {
             Help => "help",
             Settings => "settings",
             TogglePane => "pane",
+            ScrollBack => "scroll back",
         }
     }
 
@@ -211,6 +217,7 @@ impl Action {
             Help => "this help",
             Settings => "settings: theme, colours, prefix, pane, keys",
             TogglePane => "pane under or right of the cards, until you quit",
+            ScrollBack => "scroll back through the session's output",
         }
     }
 }
@@ -395,6 +402,7 @@ impl Keymap {
             ("l", Right),
             ("C-d", HalfPageDown),
             ("C-u", HalfPageUp),
+            ("PageUp", ScrollBack),
             ("]", NextTab),
             ("[", PrevTab),
             ("o", OpenProject),
@@ -427,6 +435,7 @@ impl Keymap {
             ("k", Up),
             ("l", Right),
             ("z", TogglePane),
+            ("[", ScrollBack),
             ("?", Help),
         ]
         .into_iter()

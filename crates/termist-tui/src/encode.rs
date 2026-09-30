@@ -92,6 +92,19 @@ fn tilde_key(out: &mut Vec<u8>, code: u8, param: u8) {
     }
 }
 
+/// A wheel notch at `col`, `row` (0-based, inside the pane) for a program that asked
+/// for mouse reports: SGR when it asked for that, the X10 bytes otherwise (which stop
+/// at column and row 222).
+pub fn encode_wheel(up: bool, col: u16, row: u16, modes: &Modes) -> Vec<u8> {
+    let button = if up { 64 } else { 65 };
+    if modes.sgr_mouse {
+        format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
+    } else {
+        let at = |n: u16| (n.min(222) + 33) as u8;
+        vec![0x1b, b'[', b'M', 32 + button, at(col), at(row)]
+    }
+}
+
 pub fn encode_paste(text: &str, modes: &Modes) -> Vec<u8> {
     if modes.bracketed_paste {
         [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~"].concat()
@@ -107,6 +120,26 @@ mod tests {
 
     fn key(code: K, mods: M) -> Vec<u8> {
         encode_key(&KeyEvent::new(code, mods), &Modes::default())
+    }
+
+    #[test]
+    fn a_wheel_notch_is_reported_the_way_the_program_asked() {
+        let sgr = Modes {
+            mouse_reporting: true,
+            sgr_mouse: true,
+            ..Modes::default()
+        };
+        assert_eq!(encode_wheel(true, 4, 9, &sgr), b"\x1b[<64;5;10M");
+        assert_eq!(encode_wheel(false, 0, 0, &sgr), b"\x1b[<65;1;1M");
+        let x10 = Modes {
+            mouse_reporting: true,
+            ..Modes::default()
+        };
+        assert_eq!(
+            encode_wheel(true, 4, 9, &x10),
+            vec![0x1b, b'[', b'M', 96, 37, 42]
+        );
+        assert_eq!(encode_wheel(false, 500, 0, &x10)[4], 255, "clamped");
     }
 
     #[test]

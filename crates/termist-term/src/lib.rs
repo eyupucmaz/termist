@@ -3,13 +3,13 @@ mod convert;
 mod scan;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll as GridScroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, Rgb, StdSyncHandler};
 use std::sync::mpsc;
 use std::time::Instant;
-use termist_core::{Cursor, Modes, Snapshot, TermColors};
+use termist_core::{Cursor, Modes, Scroll, ScrollPos, Snapshot, TermColors};
 
 #[derive(Clone, Debug)]
 pub struct TermConfig {
@@ -152,16 +152,36 @@ impl TermCore {
         convert::modes(*self.term.mode())
     }
 
+    /// Moves the view through the history. Output that comes while the view is back
+    /// there leaves it on the same lines.
+    pub fn scroll(&mut self, scroll: Scroll) {
+        self.term.scroll_display(match scroll {
+            Scroll::Lines(n) => GridScroll::Delta(n),
+            Scroll::Top => GridScroll::Top,
+            Scroll::Bottom => GridScroll::Bottom,
+        });
+    }
+
+    /// The view shows history, not the live screen.
+    pub fn scrolled_back(&self) -> bool {
+        self.term.grid().display_offset() != 0
+    }
+
+    /// The screen as the view shows it: the live screen, or history lines when the view
+    /// is scrolled back (then without a cursor).
     pub fn snapshot(&self) -> Snapshot {
         let grid = self.term.grid();
         let (rows, cols) = (grid.screen_lines(), grid.columns());
+        let offset = grid.display_offset();
         let lines = (0..rows)
             .map(|l| {
-                let row = &grid[Line(l as i32)];
+                let row = &grid[Line(l as i32 - offset as i32)];
                 (0..cols).map(|c| convert::cell(&row[Column(c)])).collect()
             })
             .collect();
         let p = grid.cursor.point;
+        let mut modes = self.modes();
+        modes.show_cursor &= offset == 0;
         Snapshot {
             cols: cols as u16,
             rows: rows as u16,
@@ -170,7 +190,11 @@ impl TermCore {
                 row: p.line.0.max(0) as u16,
                 col: p.column.0 as u16,
             },
-            modes: self.modes(),
+            modes,
+            scroll: ScrollPos {
+                offset: offset as u32,
+                history: grid.history_size() as u32,
+            },
         }
     }
 
@@ -243,6 +267,74 @@ mod tests {
         assert_eq!(s.line_text(0), "hello");
         assert_eq!((s.cursor.row, s.cursor.col), (0, 5));
         assert_eq!((s.cols, s.rows), (20, 5));
+    }
+
+    /// Lines "1" to "n", each on its own row.
+    fn numbered(t: &mut TermCore, n: usize) {
+        let text: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        t.feed(text.join("\r\n").as_bytes());
+    }
+
+    #[test]
+    fn scrolling_back_shows_the_history_and_hides_the_cursor() {
+        let mut t = core();
+        numbered(&mut t, 12);
+        let live = t.snapshot();
+        assert_eq!(live.line_text(4), "12");
+        assert_eq!(
+            live.scroll,
+            ScrollPos {
+                offset: 0,
+                history: 7
+            }
+        );
+        assert!(live.modes.show_cursor);
+
+        t.scroll(Scroll::Lines(3));
+        let s = t.snapshot();
+        assert_eq!(s.line_text(0), "5");
+        assert_eq!(s.line_text(4), "9");
+        assert_eq!(
+            s.scroll,
+            ScrollPos {
+                offset: 3,
+                history: 7
+            }
+        );
+        assert!(!s.modes.show_cursor, "no cursor over the history");
+
+        t.scroll(Scroll::Top);
+        assert_eq!(t.snapshot().line_text(0), "1");
+        t.scroll(Scroll::Lines(100));
+        assert_eq!(t.snapshot().scroll.offset, 7, "the oldest line stops it");
+        t.scroll(Scroll::Lines(-2));
+        assert_eq!(t.snapshot().scroll.offset, 5);
+        t.scroll(Scroll::Bottom);
+        assert_eq!(t.snapshot(), live);
+    }
+
+    #[test]
+    fn a_scrolled_view_stays_put_while_output_comes() {
+        let mut t = core();
+        numbered(&mut t, 12);
+        t.scroll(Scroll::Lines(3));
+        t.feed(b"\r\n13\r\n14");
+        let s = t.snapshot();
+        assert_eq!(s.line_text(0), "5", "the same lines as before the output");
+        assert_eq!(s.scroll.offset, 5);
+        t.scroll(Scroll::Bottom);
+        assert_eq!(t.snapshot().line_text(4), "14");
+    }
+
+    #[test]
+    fn a_full_screen_program_has_no_history_to_scroll() {
+        let mut t = core();
+        numbered(&mut t, 12);
+        t.feed(b"\x1b[?1049h\x1b[Hfull screen");
+        t.scroll(Scroll::Lines(3));
+        let s = t.snapshot();
+        assert_eq!(s.line_text(0), "full screen");
+        assert_eq!(s.scroll, ScrollPos::default());
     }
 
     #[test]

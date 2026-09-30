@@ -494,6 +494,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             let on = if app.config.animations { "on" } else { "off" };
                             ("animation", format!("‹ {on} ›{}", local("animations")))
                         }
+                        SettingRow::Mouse => {
+                            let on = if app.config.mouse {
+                                "on: the wheel scrolls, Shift+drag selects"
+                            } else {
+                                "off: the terminal's own"
+                            };
+                            ("mouse", format!("‹ {on} ›{}", local("mouse")))
+                        }
                     };
                     Line::from(Span::styled(
                         format!(" {name:<9} {value}"),
@@ -726,6 +734,18 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("C-u C-k", "delete to the start, to the end"),
         ("Alt+← →", "a word back, forward"),
         ("Esc", "close"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("Scrolling back".into()));
+    for (key, what) in [
+        ("wheel", "over the pane: its history (Shift+drag selects)"),
+        ("↑ ↓ j k", "a line"),
+        ("PgUp PgDn", "a page (also C-b, C-f)"),
+        ("C-u C-d", "half a page"),
+        ("g", "the oldest line"),
+        ("q Esc G", "back to the live screen"),
     ] {
         lines.push(row(key.into(), what));
     }
