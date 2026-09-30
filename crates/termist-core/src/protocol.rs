@@ -1,13 +1,13 @@
 use crate::model::{
     Harness, HarnessInfo, LaunchOptions, SessionInfo, SessionKind, StateSnapshot, TermColors,
 };
-use crate::screen::ScreenUpdate;
+use crate::screen::{ScreenUpdate, Scroll};
 use crate::{ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -47,6 +47,12 @@ pub enum ClientRequest {
         session: SessionId,
         cols: u16,
         rows: u16,
+    },
+    /// Moves the session's view through its history. The view is the session's, not
+    /// the client's; Attach and Input take it back to the live screen.
+    Scroll {
+        session: SessionId,
+        scroll: Scroll,
     },
     MarkSeen {
         session: SessionId,

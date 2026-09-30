@@ -1,5 +1,5 @@
 use crate::browse::Listing;
-use crate::encode::{encode_key, encode_paste};
+use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
@@ -10,17 +10,18 @@ use crate::scene_view::{self, ShowKind, Showing};
 use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use termist_core::TermColors;
 use termist_core::config::{ColorDepth, Config, PanePosition, Sounds, THEMES};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
     next_in_attention,
 };
+use termist_core::{Scroll, TermColors};
 use termist_scenes::{Scene, TimeOfDay};
 
 /// What ←/→ steps through for the idle screen, in minutes; 0 is off.
@@ -31,6 +32,9 @@ const SPLASH: Duration = Duration::from_secs(1);
 
 /// How many earlier prompts the quick prompt asks for.
 const PROMPT_HISTORY: u32 = 50;
+
+/// Lines one wheel notch scrolls.
+const WHEEL_LINES: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -72,6 +76,11 @@ pub struct App {
     pub screens: HashMap<SessionId, Snapshot>,
     pub attached: Option<SessionId>,
     pub pane: (u16, u16),
+    /// Where the last frame drew the pane's inside: the wheel scrolls only over it.
+    pub pane_area: Rect,
+    /// The pane shows the attached session's history: the scroll keys have the
+    /// keyboard, on top of the grid or focus mode.
+    pub scrolling: bool,
     pub cards_per_row: usize,
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
@@ -171,6 +180,8 @@ impl App {
             screens: HashMap::new(),
             attached: None,
             pane: (0, 0),
+            pane_area: Rect::default(),
+            scrolling: false,
             cards_per_row: 1,
             card_rows: 1,
             card_scroll: 0,
@@ -571,12 +582,16 @@ impl App {
                 }
             }
             self.mode = Mode::Grid;
-            return vec![];
+            return self.stop_scrolling();
         }
         let mut actions = Vec::new();
         if !self.overlays.is_empty() {
             actions.extend(self.overlay_key(key));
             actions.extend(self.sync_attachment());
+            return actions;
+        }
+        if self.scrolling && matches!(self.mode, Mode::Grid | Mode::Focus) {
+            actions.extend(self.scroll_key(key));
             return actions;
         }
         match self.mode {
@@ -665,12 +680,125 @@ impl App {
         }
         match (self.mode, self.selected) {
             (Mode::Focus, Some(id)) => {
+                // The daemon shows the live screen again for any input.
+                self.scrolling = false;
                 let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
                 vec![Action::Send(ClientRequest::Input {
                     session: id,
                     data: encode_paste(text, &modes),
                 })]
             }
+            _ => vec![],
+        }
+    }
+
+    /// The wheel over the pane. A program that asked for the mouse gets the notch; a
+    /// full-screen one that did not gets arrow keys (it keeps no history); otherwise the
+    /// view moves through the session's history.
+    pub fn on_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        let up = match ev.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return vec![],
+        };
+        if self.showing.is_some()
+            || !self.overlays.is_empty()
+            || !matches!(self.mode, Mode::Grid | Mode::Focus)
+            || !self.pane_area.contains(Position::new(ev.column, ev.row))
+        {
+            return vec![];
+        }
+        let Some(id) = self.attached else {
+            return vec![];
+        };
+        self.last_input = Instant::now();
+        let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
+        if modes.mouse_reporting {
+            let (col, row) = (ev.column - self.pane_area.x, ev.row - self.pane_area.y);
+            let data = encode_wheel(up, col, row, &modes);
+            return vec![Action::Send(ClientRequest::Input { session: id, data })];
+        }
+        if modes.alt_screen {
+            let arrow = KeyEvent::from(if up { KeyCode::Up } else { KeyCode::Down });
+            let data = encode_key(&arrow, &modes).repeat(WHEEL_LINES as usize);
+            return vec![Action::Send(ClientRequest::Input { session: id, data })];
+        }
+        match (up, self.scrolling) {
+            (true, false) => self.start_scrolling(WHEEL_LINES),
+            (true, true) => self.scroll_by(Scroll::Lines(WHEEL_LINES as i32)),
+            (false, true) => self.scroll_down(WHEEL_LINES),
+            (false, false) => vec![],
+        }
+    }
+
+    /// Starts scrolling the pane `lines` back, if its session has history to show. A
+    /// full-screen program (Claude Code, OpenCode) keeps its own history: it gets a
+    /// PageUp and scrolls itself.
+    fn start_scrolling(&mut self, lines: u32) -> Vec<Action> {
+        let Some((id, screen)) = self
+            .attached
+            .and_then(|id| self.screens.get(&id).map(|s| (id, s)))
+        else {
+            return vec![];
+        };
+        if screen.modes.alt_screen {
+            let data = encode_key(&KeyEvent::from(KeyCode::PageUp), &screen.modes);
+            return vec![Action::Send(ClientRequest::Input { session: id, data })];
+        }
+        if screen.scroll.history == 0 {
+            self.message = Some("nothing to scroll back to yet".into());
+            return vec![];
+        }
+        self.scrolling = true;
+        self.scroll_by(Scroll::Lines(lines as i32))
+    }
+
+    fn scroll_by(&self, scroll: Scroll) -> Vec<Action> {
+        match self.attached {
+            Some(session) => vec![Action::Send(ClientRequest::Scroll { session, scroll })],
+            None => vec![],
+        }
+    }
+
+    /// Forward `lines`; reaching the live screen stops scrolling.
+    fn scroll_down(&mut self, lines: u32) -> Vec<Action> {
+        let offset = self
+            .attached
+            .and_then(|id| self.screens.get(&id))
+            .map_or(0, |s| s.scroll.offset);
+        if lines >= offset {
+            return self.stop_scrolling();
+        }
+        self.scroll_by(Scroll::Lines(-(lines as i32)))
+    }
+
+    /// Back to the live screen, and the keys back to the grid or the session.
+    fn stop_scrolling(&mut self) -> Vec<Action> {
+        if !std::mem::take(&mut self.scrolling) {
+            return vec![];
+        }
+        self.scroll_by(Scroll::Bottom)
+    }
+
+    /// Keys while the pane shows history. None of them reaches the session.
+    fn scroll_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let page = self.pane.1.max(1) as u32;
+        let half = (page / 2).max(1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => self.scroll_by(Scroll::Lines(1)),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_by(Scroll::Lines(page as i32)),
+            KeyCode::Char('b') if ctrl => self.scroll_by(Scroll::Lines(page as i32)),
+            KeyCode::PageDown => self.scroll_down(page),
+            KeyCode::Char('f') if ctrl => self.scroll_down(page),
+            KeyCode::Char('u') if ctrl => self.scroll_by(Scroll::Lines(half as i32)),
+            KeyCode::Char('d') if ctrl => self.scroll_down(half),
+            KeyCode::Char('g') | KeyCode::Home => self.scroll_by(Scroll::Top),
+            KeyCode::Char('G') | KeyCode::End | KeyCode::Char('q') | KeyCode::Esc => {
+                self.stop_scrolling()
+            }
+            KeyCode::Char('c') if ctrl => self.stop_scrolling(),
             _ => vec![],
         }
     }
@@ -1067,6 +1195,9 @@ impl App {
             .get(&session)
             .map(|s| s.modes)
             .unwrap_or_default();
+        if self.attached == Some(session) {
+            self.scrolling = false;
+        }
         vec![
             Action::Send(ClientRequest::Input {
                 session,
@@ -1383,6 +1514,7 @@ impl App {
             KeyAction::Palette => self.open_palette(),
             KeyAction::HalfPageDown => self.half_page(1),
             KeyAction::HalfPageUp => self.half_page(-1),
+            KeyAction::ScrollBack => return self.start_scrolling(self.pane.1.max(1) as u32),
             KeyAction::Kill => {
                 if let Some(id) = self.selected {
                     self.mode = Mode::ConfirmKill(id);
@@ -1501,6 +1633,7 @@ impl App {
             SettingRow::Splash => "scenes.splash",
             SettingRow::Idle => "scenes.idle_minutes",
             SettingRow::Animations => "animations",
+            SettingRow::Mouse => "mouse",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets.
@@ -1526,10 +1659,14 @@ impl App {
                 let value = self.config.notify.sounds.id().to_string();
                 return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
             }
-            SettingRow::Desktop | SettingRow::Splash | SettingRow::Animations => {
+            SettingRow::Desktop
+            | SettingRow::Splash
+            | SettingRow::Animations
+            | SettingRow::Mouse => {
                 let flag = match row {
                     SettingRow::Desktop => &mut self.config.notify.desktop,
                     SettingRow::Splash => &mut self.config.scenes.splash,
+                    SettingRow::Mouse => &mut self.config.mouse,
                     _ => &mut self.config.animations,
                 };
                 *flag = !*flag;
@@ -1920,6 +2057,8 @@ impl App {
             return vec![];
         }
         let mut actions = Vec::new();
+        // The daemon opens a card on its live screen.
+        self.scrolling = false;
         if let Some(old) = self.attached.take() {
             actions.push(Action::Send(ClientRequest::Detach { session: old }));
         }
@@ -3048,6 +3187,187 @@ mod tests {
         app.on_key(k(K::Char(' ')));
         type_text(&mut app, "hello");
         assert_eq!(sent(&app.on_key(k(K::Enter))).len(), 2);
+    }
+
+    /// The attached card's screen as the daemon last sent it: `offset` lines back out
+    /// of `history`.
+    fn history(app: &mut App, offset: u32, history: u32) -> SessionId {
+        let id = app.attached.unwrap();
+        let mut screen = Snapshot::blank(80, 20);
+        screen.scroll = termist_core::ScrollPos { offset, history };
+        app.screens.insert(id, screen);
+        id
+    }
+
+    fn scrolls(actions: &[Action]) -> Vec<Scroll> {
+        sent(actions)
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::Scroll { scroll, .. } => Some(*scroll),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wheel(app: &mut App, up: bool, column: u16, row: u16) -> Vec<Action> {
+        app.on_mouse(MouseEvent {
+            kind: if up {
+                MouseEventKind::ScrollUp
+            } else {
+                MouseEventKind::ScrollDown
+            },
+            column,
+            row,
+            modifiers: M::NONE,
+        })
+    }
+
+    #[test]
+    fn scroll_back_takes_the_keys_until_q_and_none_reach_the_session() {
+        let (mut app, _) = app();
+        history(&mut app, 0, 500);
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        app.on_key(ctrl('a'));
+        let actions = app.on_key(k(K::Char('[')));
+        assert!(app.scrolling);
+        assert_eq!(scrolls(&actions), vec![Scroll::Lines(20)], "a page back");
+        history(&mut app, 20, 500);
+        for (key, expected) in [
+            (k(K::Char('k')), Scroll::Lines(1)),
+            (k(K::Up), Scroll::Lines(1)),
+            (k(K::PageUp), Scroll::Lines(20)),
+            (ctrl('u'), Scroll::Lines(10)),
+            (k(K::Char('j')), Scroll::Lines(-1)),
+            (ctrl('d'), Scroll::Lines(-10)),
+            (k(K::Char('g')), Scroll::Top),
+        ] {
+            let actions = app.on_key(key);
+            assert_eq!(scrolls(&actions), vec![expected], "{key:?}");
+            assert_eq!(sent(&actions).len(), 1, "nothing else is sent for {key:?}");
+        }
+        assert!(sent(&app.on_key(k(K::Char('x')))).is_empty(), "not typed");
+        assert_eq!(scrolls(&app.on_key(k(K::Char('q')))), vec![Scroll::Bottom]);
+        assert!(!app.scrolling);
+        assert_eq!(app.mode, Mode::Focus, "back to typing into the session");
+    }
+
+    #[test]
+    fn scrolling_down_to_the_live_screen_ends_it() {
+        let (mut app, _) = app();
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        assert!(app.scrolling);
+        history(&mut app, 12, 500);
+        assert_eq!(scrolls(&app.on_key(k(K::PageDown))), vec![Scroll::Bottom]);
+        assert!(!app.scrolling);
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    #[test]
+    fn there_is_nothing_to_scroll_without_history() {
+        let (mut app, _) = app();
+        history(&mut app, 0, 0);
+        assert!(sent(&app.on_key(k(K::PageUp))).is_empty());
+        assert!(!app.scrolling);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("nothing to scroll back to yet")
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_pane_scrolls_the_history() {
+        let (mut app, _) = app();
+        app.pane_area = Rect::new(0, 10, 80, 20);
+        history(&mut app, 0, 500);
+        assert!(
+            sent(&wheel(&mut app, true, 5, 3)).is_empty(),
+            "over the cards"
+        );
+        assert_eq!(
+            scrolls(&wheel(&mut app, true, 5, 12)),
+            vec![Scroll::Lines(3)]
+        );
+        assert!(app.scrolling);
+        history(&mut app, 6, 500);
+        assert_eq!(
+            scrolls(&wheel(&mut app, true, 5, 12)),
+            vec![Scroll::Lines(3)]
+        );
+        assert_eq!(
+            scrolls(&wheel(&mut app, false, 5, 12)),
+            vec![Scroll::Lines(-3)]
+        );
+        history(&mut app, 3, 500);
+        assert_eq!(
+            scrolls(&wheel(&mut app, false, 5, 12)),
+            vec![Scroll::Bottom]
+        );
+        assert!(!app.scrolling);
+        assert!(
+            sent(&wheel(&mut app, false, 5, 12)).is_empty(),
+            "already live"
+        );
+    }
+
+    #[test]
+    fn a_program_that_wants_the_mouse_gets_the_wheel() {
+        let (mut app, _) = app();
+        app.pane_area = Rect::new(0, 10, 80, 20);
+        let id = history(&mut app, 0, 0);
+        let modes = &mut app.screens.get_mut(&id).unwrap().modes;
+        modes.alt_screen = true;
+        modes.mouse_reporting = true;
+        modes.sgr_mouse = true;
+        assert_eq!(
+            sent(&wheel(&mut app, true, 5, 12)),
+            vec![&ClientRequest::Input {
+                session: id,
+                data: b"\x1b[<64;6;3M".to_vec()
+            }]
+        );
+        app.screens.get_mut(&id).unwrap().modes.mouse_reporting = false;
+        assert_eq!(
+            sent(&wheel(&mut app, false, 5, 12)),
+            vec![&ClientRequest::Input {
+                session: id,
+                data: b"\x1b[B\x1b[B\x1b[B".to_vec()
+            }],
+            "a full-screen program without the mouse gets arrow keys"
+        );
+        assert_eq!(
+            sent(&app.on_key(k(K::PageUp))),
+            vec![&ClientRequest::Input {
+                session: id,
+                data: b"\x1b[5~".to_vec()
+            }],
+            "scroll back is its own PageUp"
+        );
+        assert!(!app.scrolling, "its keys stay its own");
+    }
+
+    #[test]
+    fn another_card_or_ctrl_q_ends_scrolling() {
+        let (mut app, s) = app();
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        assert!(app.scrolling);
+        app.on_key(k(K::Char('q')));
+        app.on_key(k(K::Char('l')));
+        assert_eq!(app.attached, Some(s[1].id));
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        assert!(app.scrolling);
+        app.on_key(k(K::Char('q')));
+        app.on_key(k(K::Char('h')));
+        assert!(!app.scrolling);
+
+        let (mut app, _) = self::app();
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        app.on_key(ctrl('q'));
+        assert!(!app.scrolling, "C-q gets out of scrolling too");
     }
 
     #[test]

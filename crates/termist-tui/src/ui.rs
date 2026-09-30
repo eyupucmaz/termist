@@ -377,13 +377,17 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         return;
     };
     let focused = matches!(app.mode, Mode::Focus | Mode::FocusPrefix);
-    let title = format!(
-        " {} — {}{} ",
-        info.display_name(),
-        info.kind.label(),
-        if focused { " · typing" } else { "" }
-    );
-    let border = if focused {
+    let screen = app.screens.get(&info.id);
+    let back = screen.map_or(0, |s| s.scroll.offset);
+    let state = match screen {
+        Some(s) if app.scrolling || back > 0 => {
+            format!(" · ↑ {}/{}", s.scroll.offset, s.scroll.history)
+        }
+        _ if focused => " · typing".to_string(),
+        _ => String::new(),
+    };
+    let title = format!(" {} — {}{state} ", info.display_name(), info.kind.label());
+    let border = if focused || app.scrolling {
         app.theme.focus
     } else {
         app.theme.border
@@ -400,6 +404,7 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         let c = screen.cursor;
         // An overlay on top has the keys; a text box places its own cursor.
         if focused
+            && !app.scrolling
             && app.overlays.is_empty()
             && screen.modes.show_cursor
             && c.col < areas.pane_inner.width
@@ -498,6 +503,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             };
             (text, t.warn)
         }
+        (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
         (_, Mode::Grid) if app.archive_view => (archive_hint(&app.keymap), t.dim),
         (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
         (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
@@ -545,6 +551,10 @@ fn move_keys(keymap: &Keymap, context: Context) -> Option<String> {
         keys.join("/")
     })
 }
+
+/// The footer while the pane shows history; these keys are fixed.
+const SCROLL_HINT: &str =
+    "history · ↑↓ j/k line · PgUp/PgDn page · C-u/C-d half · g top · q/Esc/G back to live";
 
 fn grid_hint(keymap: &Keymap) -> String {
     use Action::*;

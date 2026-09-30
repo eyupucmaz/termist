@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use termist_core::env::should_scrub;
 use termist_core::screen::diff;
-use termist_core::{ServerEvent, SessionId, Snapshot, TermColors};
+use termist_core::{Scroll, ServerEvent, SessionId, Snapshot, TermColors};
 use termist_term::{TermConfig, TermCore, TermEvent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -24,7 +24,10 @@ pub struct SpawnSpec {
 }
 
 pub enum SessionCmd {
+    /// Also takes the view back to the live screen.
     Input(Vec<u8>),
+    /// Moves the view through the history; every attached client sees it move.
+    Scroll(Scroll),
     Resize {
         cols: u16,
         rows: u16,
@@ -169,7 +172,17 @@ pub fn spawn(
                         break;
                     }
                     Some(SessionCmd::Kill) => { let _ = killer.kill(); }
-                    Some(SessionCmd::Input(data)) => { let _ = write_tx.send(data); }
+                    Some(SessionCmd::Input(data)) => {
+                        let _ = write_tx.send(data);
+                        if term.scrolled_back() {
+                            term.scroll(Scroll::Bottom);
+                            dirty = true;
+                        }
+                    }
+                    Some(SessionCmd::Scroll(scroll)) => {
+                        term.scroll(scroll);
+                        dirty = true;
+                    }
                     Some(SessionCmd::Resize { cols, rows }) => {
                         if cols > 0 && rows > 0 && (cols, rows) != term.size() {
                             if let Err(e) = master.resize(pty_size(cols, rows)) {
@@ -180,6 +193,8 @@ pub fn spawn(
                         }
                     }
                     Some(SessionCmd::Attach { client, out }) => {
+                        // A card opens on its live screen.
+                        term.scroll(Scroll::Bottom);
                         attached.insert(client, (out, None));
                         dirty = true;
                     }
@@ -290,6 +305,53 @@ mod tests {
         .unwrap();
         cmd.send(SessionCmd::Input(b"ping\r".to_vec())).unwrap();
         wait_for_text(&cmd, "got:ping").await;
+    }
+
+    /// Applies updates from `rx` onto `screen` until `done` holds for it.
+    async fn until(
+        rx: &mut UnboundedReceiver<ServerEvent>,
+        screen: &mut Snapshot,
+        done: impl Fn(&Snapshot) -> bool,
+    ) {
+        timeout(Duration::from_secs(5), async {
+            while !done(screen) {
+                if let Some(ServerEvent::Screen { update, .. }) = rx.recv().await {
+                    screen.apply(&update);
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never got there; last screen: {:?}", screen.scroll));
+    }
+
+    #[tokio::test]
+    async fn the_view_scrolls_back_and_input_brings_it_to_the_live_screen() {
+        let (notes, _n) = unbounded_channel();
+        let cmd = spawn(
+            spec("seq 1 20; read line; echo \"got:$line\"; sleep 5"),
+            TermColors::default(),
+            notes,
+        )
+        .unwrap();
+        let (out, mut rx) = unbounded_channel();
+        cmd.send(SessionCmd::Attach {
+            client: ClientId(1),
+            out,
+        })
+        .unwrap();
+        let mut screen = Snapshot::default();
+        until(&mut rx, &mut screen, |s| {
+            (0..s.rows as usize).any(|r| s.line_text(r) == "20")
+        })
+        .await;
+        cmd.send(SessionCmd::Scroll(Scroll::Top)).unwrap();
+        until(&mut rx, &mut screen, |s| s.scroll.offset > 0).await;
+        assert_eq!(screen.line_text(0), "1");
+        cmd.send(SessionCmd::Input(b"ping\r".to_vec())).unwrap();
+        until(&mut rx, &mut screen, |s| {
+            s.scroll.offset == 0 && (0..s.rows as usize).any(|r| s.line_text(r) == "got:ping")
+        })
+        .await;
     }
 
     #[tokio::test]

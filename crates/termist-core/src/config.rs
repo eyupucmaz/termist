@@ -160,6 +160,9 @@ pub struct Config {
     pub theme: String,
     pub colors: ColorDepth,
     pub animations: bool,
+    /// termist takes the mouse: the wheel scrolls a session's history. Off, the
+    /// terminal keeps it (its own selection, no Shift needed).
+    pub mouse: bool,
     pub editor: Option<String>,
     pub scenes: ScenesConfig,
     pub notify: NotifyConfig,
@@ -176,6 +179,7 @@ impl Default for Config {
             theme: "uskudar".into(),
             colors: ColorDepth::Auto,
             animations: true,
+            mouse: true,
             editor: None,
             scenes: ScenesConfig::default(),
             notify: NotifyConfig {
@@ -275,6 +279,7 @@ impl Reader<'_> {
                 .choice(&mut t, "", "colors", &ColorDepth::ALL, ColorDepth::id)
                 .unwrap_or(d.colors),
             animations: self.bool(&mut t, "", "animations").unwrap_or(d.animations),
+            mouse: self.bool(&mut t, "", "mouse").unwrap_or(d.mouse),
             editor: self.string(&mut t, "", "editor").filter(|e| !e.is_empty()),
             scenes: self.scenes(&mut t),
             notify: self.notify(&mut t),

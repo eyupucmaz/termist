@@ -6,9 +6,9 @@ use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
-    Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::supports_keyboard_enhancement;
@@ -209,6 +209,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     });
     write_frame(&mut writer, &ClientRequest::SetColors(app.agent_colors())).await?;
     let _ = execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
+    let mut mouse_on = set_mouse(false, app.config.mouse);
     if enhanced {
         let _ = execute!(
             stdout(),
@@ -220,6 +221,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let (input_tx, mut input_rx) = unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
+            // Mouse capture reports every move; only buttons and the wheel are used.
+            if let Event::Mouse(m) = &ev
+                && matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
+            {
+                continue;
+            }
             if input_tx.send(ev).is_err() {
                 break;
             }
@@ -249,6 +256,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 app.pane_position(),
             );
             app.pane_right = areas.pane_right;
+            app.pane_area = areas.pane_inner;
             app.screen = Rect::new(0, 0, size.width, size.height);
             app.set_card_window(areas.cards_per_row, areas.card_rows);
             let resize = app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
@@ -261,6 +269,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 ev = input_rx.recv() => match ev {
                     Some(Event::Key(k)) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => app.on_key(k),
                     Some(Event::Paste(text)) => app.on_paste(&text),
+                    Some(Event::Mouse(m)) => app.on_mouse(m),
                     Some(Event::FocusGained) => { app.window_focused = true; vec![] }
                     Some(Event::FocusLost) => { app.window_focused = false; vec![] }
                     Some(_) => vec![],
@@ -282,6 +291,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 }
             };
             let actions = save_settings(&paths, &mut app, actions);
+            mouse_on = set_mouse(mouse_on, app.config.mouse);
             let actions = alerts.give(&paths, &app, actions);
             if perform(actions, &mut writer, &listing_tx).await? {
                 return Ok(());
@@ -300,7 +310,24 @@ fn undo_terminal_modes(enhanced: bool) {
     if enhanced {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(stdout(), DisableBracketedPaste, DisableFocusChange);
+    let _ = execute!(
+        stdout(),
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableMouseCapture
+    );
+}
+
+/// Takes the mouse from the terminal, or gives it back, when `wanted` changes.
+fn set_mouse(on: bool, wanted: bool) -> bool {
+    if on != wanted {
+        let _ = if wanted {
+            execute!(stdout(), EnableMouseCapture)
+        } else {
+            execute!(stdout(), DisableMouseCapture)
+        };
+    }
+    wanted
 }
 
 /// On a panic, pops the keyboard flags and disables bracketed paste, then runs the

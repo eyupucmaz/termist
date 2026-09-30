@@ -398,6 +398,13 @@ impl Registry {
                     let _ = cmd.send(SessionCmd::Resize { cols, rows });
                 }
             }
+            ClientRequest::Scroll { session, scroll } => {
+                if let Some(s) = self.session(session)
+                    && let Some(cmd) = &s.cmd
+                {
+                    let _ = cmd.send(SessionCmd::Scroll(scroll));
+                }
+            }
             ClientRequest::MarkSeen { session } => self.signal(session, Signal::Seen),
             ClientRequest::KillSession { session } => {
                 if let Some(pos) = self.sessions.iter().position(|s| s.info.id == session) {

@@ -58,6 +58,24 @@ pub struct Cursor {
     pub col: u16,
 }
 
+/// How far back the screen shows: `offset` lines above the live screen, out of the
+/// `history` lines the session keeps. `offset` 0 is the live screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollPos {
+    pub offset: u32,
+    pub history: u32,
+}
+
+/// A move through a session's history; the view stays where it is while output comes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scroll {
+    /// Positive goes back (up), negative forward (down).
+    Lines(i32),
+    Top,
+    /// The live screen.
+    Bottom,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub cols: u16,
@@ -65,9 +83,11 @@ pub struct Snapshot {
     pub lines: Vec<Vec<Cell>>,
     pub cursor: Cursor,
     pub modes: Modes,
+    pub scroll: ScrollPos,
 }
 
-/// Rows that changed since the last snapshot a client saw, plus cursor and modes.
+/// Rows that changed since the last snapshot a client saw, plus cursor, modes and
+/// where the view is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenUpdate {
     pub cols: u16,
@@ -75,6 +95,7 @@ pub struct ScreenUpdate {
     pub changed: Vec<(u16, Vec<Cell>)>,
     pub cursor: Cursor,
     pub modes: Modes,
+    pub scroll: ScrollPos,
 }
 
 impl Snapshot {
@@ -88,6 +109,7 @@ impl Snapshot {
                 show_cursor: true,
                 ..Modes::default()
             },
+            scroll: ScrollPos::default(),
         }
     }
 
@@ -102,6 +124,7 @@ impl Snapshot {
         }
         self.cursor = u.cursor;
         self.modes = u.modes;
+        self.scroll = u.scroll;
     }
 
     pub fn line_text(&self, row: usize) -> String {
@@ -131,7 +154,11 @@ pub fn diff(old: Option<&Snapshot>, new: &Snapshot) -> Option<ScreenUpdate> {
         .collect();
     if same_shape {
         let o = old.unwrap();
-        if changed.is_empty() && o.cursor == new.cursor && o.modes == new.modes {
+        if changed.is_empty()
+            && o.cursor == new.cursor
+            && o.modes == new.modes
+            && o.scroll == new.scroll
+        {
             return None;
         }
     }
@@ -141,6 +168,7 @@ pub fn diff(old: Option<&Snapshot>, new: &Snapshot) -> Option<ScreenUpdate> {
         changed,
         cursor: new.cursor,
         modes: new.modes,
+        scroll: new.scroll,
     })
 }
 
@@ -188,6 +216,21 @@ mod tests {
         let u = diff(Some(&old), &moved).unwrap();
         assert!(u.changed.is_empty());
         assert_eq!(u.cursor.col, 2);
+    }
+
+    #[test]
+    fn a_new_scroll_position_is_an_update_and_apply_keeps_it() {
+        let old = snap_with(&["ab"]);
+        let mut scrolled = old.clone();
+        scrolled.scroll = ScrollPos {
+            offset: 3,
+            history: 40,
+        };
+        let u = diff(Some(&old), &scrolled).unwrap();
+        assert!(u.changed.is_empty());
+        let mut copy = old.clone();
+        copy.apply(&u);
+        assert_eq!(copy, scrolled);
     }
 
     #[test]
