@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-beta.3 - 2026-09-30
+
+The follow-up box has room for what you want to say.
+
+### Changed
+
+- **A follow-up takes several lines** (`Space`). `Alt+Enter`, `Shift+Enter` or `C-j` starts a new line
+  and `Enter` sends it all to the agent as one message.
+- **Prompt boxes grow with the text.** The follow-up and the new task (`g`) boxes are 72 columns wide
+  and 4 rows tall, grow to 10 rows as you type, and wrap long lines at a word instead of sliding them
+  sideways.
+
+### Updating
+
+`termist update`, then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.1.0-beta.2 - 2026-09-28
 
 termist's sound is now a real seagull, and it stays quiet until you ask for it.
