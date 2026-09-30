@@ -908,6 +908,25 @@ mod tests {
     }
 
     #[test]
+    fn a_follow_up_box_wraps_and_grows_with_its_lines() {
+        use ratatui::crossterm::event::{KeyCode as K, KeyEvent, KeyModifiers as M};
+        let mut app = fixture();
+        let mut info = app.selected_info().unwrap().clone();
+        info.status = AgentStatus::Running;
+        app.on_event(ServerEvent::SessionUpdated(info));
+        app.on_key(key(K::Char(' ')));
+        let typed =
+            |app: &mut App, s: &str| s.chars().for_each(|c| _ = app.on_key(key(K::Char(c))));
+        typed(
+            &mut app,
+            "the tests pass now, so look at the login redirect again and keep it short",
+        );
+        app.on_key(KeyEvent::new(K::Enter, M::ALT));
+        typed(&mut app, "then commit");
+        insta::assert_snapshot!(render(&mut app, 80, 20).backend());
+    }
+
+    #[test]
     fn the_model_picker_offers_the_efforts_of_the_cli() {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
