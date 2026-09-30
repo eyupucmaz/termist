@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.0--beta.2-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.0--beta.3-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -29,7 +29,7 @@
 
 > [!NOTE]
 > **termist is in beta.** The beta adds themes, Istanbul scenes, sounds, notifications and settings
-> to the first public build; `v0.1.0-beta.2` is the newest. It is used every day by its author, but expect rough edges, and
+> to the first public build; `v0.1.0-beta.3` is the newest. It is used every day by its author, but expect rough edges, and
 > please [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
 
 ## Why termist
