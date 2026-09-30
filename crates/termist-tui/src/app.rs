@@ -1035,7 +1035,7 @@ impl App {
         }
         self.overlays.push(Overlay::FollowUp {
             session,
-            input: TextInput::new(false),
+            input: TextInput::new(true),
         });
     }
 
@@ -2949,6 +2949,26 @@ mod tests {
                     data: b"\r".to_vec()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_follow_up_can_be_typed_over_several_lines() {
+        let (mut app, s) = app();
+        let mut screen = Snapshot::blank(10, 2);
+        screen.modes.bracketed_paste = true;
+        app.screens.insert(s[0].id, screen);
+        app.on_key(k(K::Char(' ')));
+        type_text(&mut app, "first");
+        app.on_key(KeyEvent::new(K::Enter, M::ALT));
+        type_text(&mut app, "second");
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions)[0],
+            &ClientRequest::Input {
+                session: s[0].id,
+                data: b"\x1b[200~first\nsecond\x1b[201~".to_vec()
+            }
         );
     }
 

@@ -91,6 +91,79 @@ fn input_view(input: &TextInput, width: u16, height: usize) -> (Vec<Line<'static
     (lines, ((col - skip) as u16, (line - first) as u16))
 }
 
+/// The text of `input` wrapped at `width` columns, after a space where a line has one:
+/// its rows and the cursor's row and column. The last row of a line always has room
+/// for the cursor after its last char.
+fn wrapped_rows(input: &TextInput, width: u16) -> (Vec<String>, (usize, usize)) {
+    let width = width.max(1) as usize;
+    let (line, col) = input.cursor_line_col();
+    let mut rows = Vec::new();
+    let mut cursor = (0, 0);
+    for (i, l) in input.text().split('\n').enumerate() {
+        let chars: Vec<char> = l.chars().collect();
+        let mut start = 0;
+        loop {
+            let end = if chars.len() - start < width {
+                chars.len()
+            } else {
+                (start + 1..=start + width)
+                    .rev()
+                    .find(|&b| chars[b - 1] == ' ')
+                    .unwrap_or(start + width)
+            };
+            let last = end == chars.len() && chars.len() - start < width;
+            if i == line && col >= start && (col < end || last) {
+                cursor = (rows.len(), col - start);
+            }
+            rows.push(chars[start..end].iter().collect());
+            if last {
+                break;
+            }
+            start = end;
+        }
+    }
+    (rows, cursor)
+}
+
+/// A text box for a prompt: it wraps long lines and grows with the text from
+/// `MIN_PROMPT_ROWS` to `MAX_PROMPT_ROWS` rows, then scrolls to keep the cursor in
+/// view. `footer` is a dim line under the text.
+fn prompt_box(
+    f: &mut Frame,
+    theme: &Theme,
+    body: Rect,
+    title: &str,
+    input: &TextInput,
+    footer: Option<String>,
+    top: bool,
+) {
+    let width = PROMPT_WIDTH.min(body.width);
+    let (all, (cy, cx)) = wrapped_rows(input, width.saturating_sub(2));
+    let fixed = 2 + footer.is_some() as u16;
+    let height = all.len().clamp(MIN_PROMPT_ROWS, MAX_PROMPT_ROWS) as u16 + fixed;
+    let area = centered(body, width, height);
+    let room = area.height.saturating_sub(fixed) as usize;
+    let first = (cy + 1).saturating_sub(room);
+    let mut lines: Vec<Line<'static>> = all
+        .into_iter()
+        .skip(first)
+        .take(room)
+        .map(Line::from)
+        .collect();
+    lines.resize(room, Line::default());
+    if let Some(footer) = footer {
+        lines.push(Line::from(Span::styled(footer, theme.dim)));
+    }
+    boxed(f, theme, area, title, lines);
+    if top && room > 0 {
+        f.set_cursor_position((area.x + 1 + cx as u16, area.y + 1 + (cy - first) as u16));
+    }
+}
+
+const PROMPT_WIDTH: u16 = 72;
+const MIN_PROMPT_ROWS: usize = 4;
+const MAX_PROMPT_ROWS: usize = 10;
+
 /// A one-line text box; the cursor shows when it is the top overlay.
 fn text_box(
     f: &mut Frame,
@@ -172,19 +245,15 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
-        Overlay::QuickPrompt(q) => {
-            let height = q.input.text().split('\n').count().clamp(3, 8);
-            let area = centered(body, 72, height as u16 + 3);
-            let inner_w = area.width.saturating_sub(2);
-            let rows = area.height.saturating_sub(3) as usize;
-            let (mut lines, (cx, cy)) = input_view(&q.input, inner_w, rows);
-            lines.resize(rows, Line::default());
-            lines.push(Line::from(Span::styled(launch_line(app, q), dim())));
-            boxed(f, t, area, "new task", lines);
-            if top && area.height > 3 {
-                f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
-            }
-        }
+        Overlay::QuickPrompt(q) => prompt_box(
+            f,
+            t,
+            body,
+            "new task",
+            &q.input,
+            Some(launch_line(app, q)),
+            top,
+        ),
         Overlay::Model(m) => {
             let rows = m
                 .models
@@ -230,7 +299,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .iter()
                 .find(|s| s.id == *session)
                 .map_or("?", |s| s.display_name());
-            text_box(f, t, body, &format!("follow-up · {name}"), 64, input, top);
+            prompt_box(f, t, body, &format!("follow-up · {name}"), input, None, top);
         }
         Overlay::Rename { input, .. } => text_box(f, t, body, "rename", 48, input, top),
         Overlay::Palette(picker) => {
@@ -563,7 +632,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Model(_) => "j/k model · h/l effort · Enter choose · Esc back",
         Overlay::ModelName(_) => "Enter use this model · Esc back",
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
-        Overlay::FollowUp { .. } => "Enter send to the agent · Esc cancel",
+        Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
         Overlay::OpenProject(_) => {
@@ -677,4 +746,47 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         t.dim,
     )));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_lines_wrap_and_the_cursor_follows() {
+        let input = TextInput::with_text("abcdefg\nxy", true);
+        let (rows, cursor) = wrapped_rows(&input, 3);
+        assert_eq!(rows, vec!["abc", "def", "g", "xy"]);
+        assert_eq!(cursor, (3, 2));
+    }
+
+    #[test]
+    fn lines_break_after_a_space_when_they_have_one() {
+        let input = TextInput::with_text("fix the login", true);
+        let (rows, cursor) = wrapped_rows(&input, 6);
+        assert_eq!(rows, vec!["fix ", "the ", "login"]);
+        assert_eq!(cursor, (2, 5));
+        let mut input = TextInput::with_text("fix the login", true);
+        for _ in 0..9 {
+            input.key(ratatui::crossterm::event::KeyEvent::from(
+                ratatui::crossterm::event::KeyCode::Left,
+            ));
+        }
+        assert_eq!(
+            wrapped_rows(&input, 6).1,
+            (1, 0),
+            "after the space: next row"
+        );
+    }
+
+    #[test]
+    fn a_line_as_wide_as_the_box_leaves_room_for_the_cursor() {
+        let input = TextInput::with_text("abc", true);
+        assert_eq!(
+            wrapped_rows(&input, 3),
+            (vec!["abc".to_string(), String::new()], (1, 0))
+        );
+        let empty = TextInput::new(true);
+        assert_eq!(wrapped_rows(&empty, 3), (vec![String::new()], (0, 0)));
+    }
 }
