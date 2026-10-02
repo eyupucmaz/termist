@@ -1,0 +1,32 @@
+# Gruvbox Dark: dark, warm retro colours.
+# Colours from gruvbox (github.com/morhetz/gruvbox), MIT licence, (c) Pavel Pertsev.
+name = "Gruvbox Dark"
+
+[ui]
+bg = "#282828"
+fg = "#ebdbb2"
+dim = "#a89984"
+border = "#504945"
+accent = "#8ec07c"
+focus = "#fe8019"
+warn = "#fabd2f"
+error = "#fb4934"
+archive = "#d3869b"
+selection = { fg = "#ebdbb2", bg = "#504945" }
+tab_active = { fg = "#ebdbb2", bg = "#3c3836", bold = true }
+
+[status]
+fresh = "#928374"
+running = "#fabd2f"
+done = "#83a598"
+ready = "#b8bb26"
+waiting = "#fb4934"
+closed = "#928374"
+exited = "#d3869b"
+disconnected = "#a89984"
+
+[ansi]
+colors = [
+  "#282828", "#e8463a", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#a89984",
+  "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+]

@@ -1,0 +1,31 @@
+# Balat: dark, the painted wooden houses: mustard, dusty rose, teal and lilac.
+name = "Balat"
+
+[ui]
+bg = "#1f1d24"
+fg = "#efe6dc"
+dim = "#ada39c"
+border = "#45404a"
+accent = "#5fbfb0"
+focus = "#e3b448"
+warn = "#e3b448"
+error = "#ec7c82"
+archive = "#c7aae3"
+selection = { fg = "#ffffff", bg = "#1f5a52" }
+tab_active = { fg = "#efe6dc", bg = "#3a3442", bold = true }
+
+[status]
+fresh = "#8a8186"
+running = "#e3b448"
+done = "#8fb3e0"
+ready = "#8fcf9a"
+waiting = "#ec7c82"
+closed = "#8a8186"
+exited = "#c7aae3"
+disconnected = "#ada39c"
+
+[ansi]
+colors = [
+  "#2b2830", "#ec7c82", "#8fcf9a", "#e3b448", "#8fb3e0", "#d79dbd", "#5fbfb0", "#ddd3c8",
+  "#4a4350", "#f0959a", "#ade0b5", "#efcb73", "#aecaee", "#e4b6cf", "#85d3c7", "#f7f0e8",
+]

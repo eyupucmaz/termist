@@ -1,0 +1,32 @@
+# Dracula: dark, purple and neon.
+# Colours from Dracula (github.com/dracula/dracula-theme), MIT licence, (c) Dracula Team.
+name = "Dracula"
+
+[ui]
+bg = "#282a36"
+fg = "#f8f8f2"
+dim = "#8d99c7"
+border = "#44475a"
+accent = "#bd93f9"
+focus = "#ffb86c"
+warn = "#f1fa8c"
+error = "#ff5555"
+archive = "#ff79c6"
+selection = { fg = "#f8f8f2", bg = "#44475a" }
+tab_active = { fg = "#f8f8f2", bg = "#383a4a", bold = true }
+
+[status]
+fresh = "#7d88b5"
+running = "#f1fa8c"
+done = "#8be9fd"
+ready = "#50fa7b"
+waiting = "#ff5555"
+closed = "#7d88b5"
+exited = "#bd93f9"
+disconnected = "#8d99c7"
+
+[ansi]
+colors = [
+  "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+  "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+]

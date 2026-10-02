@@ -15,9 +15,49 @@ const USKUDAR: &str = include_str!("../../../assets/themes/uskudar.toml");
 const TERMINAL: &str = include_str!("../../../assets/themes/terminal.toml");
 
 /// The built-in themes, in the order the settings go through them.
-const BUILTIN: [(&str, &str); 3] = [
+const BUILTIN: [(&str, &str); 16] = [
     ("uskudar", USKUDAR),
     ("moda", include_str!("../../../assets/themes/moda.toml")),
+    (
+        "aksaray",
+        include_str!("../../../assets/themes/aksaray.toml"),
+    ),
+    (
+        "kadikoy",
+        include_str!("../../../assets/themes/kadikoy.toml"),
+    ),
+    (
+        "besiktas",
+        include_str!("../../../assets/themes/besiktas.toml"),
+    ),
+    ("balat", include_str!("../../../assets/themes/balat.toml")),
+    (
+        "kapalicarsi",
+        include_str!("../../../assets/themes/kapalicarsi.toml"),
+    ),
+    ("adalar", include_str!("../../../assets/themes/adalar.toml")),
+    ("bebek", include_str!("../../../assets/themes/bebek.toml")),
+    (
+        "catppuccin-mocha",
+        include_str!("../../../assets/themes/catppuccin-mocha.toml"),
+    ),
+    (
+        "catppuccin-latte",
+        include_str!("../../../assets/themes/catppuccin-latte.toml"),
+    ),
+    (
+        "tokyo-night",
+        include_str!("../../../assets/themes/tokyo-night.toml"),
+    ),
+    (
+        "gruvbox-dark",
+        include_str!("../../../assets/themes/gruvbox-dark.toml"),
+    ),
+    ("nord", include_str!("../../../assets/themes/nord.toml")),
+    (
+        "dracula",
+        include_str!("../../../assets/themes/dracula.toml"),
+    ),
     ("terminal", TERMINAL),
 ];
 
@@ -565,12 +605,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_builtin_themes_come_in_the_settings_order() {
+        let themes = Themes::builtin();
+        let ids: Vec<&str> = themes.ids().collect();
+        assert_eq!(
+            ids,
+            [
+                "uskudar",
+                "moda",
+                "aksaray",
+                "kadikoy",
+                "besiktas",
+                "balat",
+                "kapalicarsi",
+                "adalar",
+                "bebek",
+                "catppuccin-mocha",
+                "catppuccin-latte",
+                "tokyo-night",
+                "gruvbox-dark",
+                "nord",
+                "dracula",
+                "terminal",
+            ]
+        );
+    }
+
+    /// Waiting, running and done must not look alike; Beşiktaş is black and white, so
+    /// there only waiting has to stand out.
+    #[test]
+    fn the_main_statuses_are_far_apart() {
+        let dist = |a: Rgb, b: Rgb| {
+            let d = |x: u8, y: u8| (x as f64 - y as f64).powi(2);
+            (d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)).sqrt()
+        };
+        let mut close = vec![];
+        for (id, _) in BUILTIN {
+            let s = spec(id);
+            if !s.paints() {
+                continue;
+            }
+            let colour = |key: &str| {
+                let i = STATUS_KEYS.iter().position(|k| *k == key).unwrap();
+                rgb(Some(s.status[i]))
+            };
+            let pairs: &[(&str, &str)] = if id == "besiktas" {
+                &[("waiting", "running"), ("waiting", "done")]
+            } else {
+                &[
+                    ("running", "done"),
+                    ("running", "waiting"),
+                    ("done", "waiting"),
+                ]
+            };
+            for (a, b) in pairs {
+                let d = dist(colour(a), colour(b));
+                if d < 60.0 {
+                    close.push(format!("{id} {a}/{b}: {d:.0}"));
+                }
+            }
+        }
+        assert!(close.is_empty(), "{close:#?}");
+    }
+
     /// Text must be readable on the theme's background, and every status must stand
     /// out from it (WCAG contrast ratios).
     #[test]
     fn painting_themes_are_readable() {
-        for id in ["uskudar", "moda"] {
+        for (id, _) in BUILTIN {
             let s = spec(id);
+            if !s.paints() {
+                continue;
+            }
             let bg = s.bg.unwrap();
             let mut low = vec![];
             let mut check = |what: String, c: Rgb, on: Rgb, min: f64| {

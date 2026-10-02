@@ -1,0 +1,31 @@
+# Kapalıçarşı: dark, under the bazaar's domes: lapis navy, gold and copper.
+name = "Kapalıçarşı"
+
+[ui]
+bg = "#101a33"
+fg = "#f1e8d2"
+dim = "#a8a493"
+border = "#2f4068"
+accent = "#d9b44a"
+focus = "#e08c55"
+warn = "#e8c25a"
+error = "#ff7366"
+archive = "#cba0da"
+selection = { fg = "#ffffff", bg = "#5a4512" }
+tab_active = { fg = "#f1e8d2", bg = "#24345a", bold = true }
+
+[status]
+fresh = "#76819c"
+running = "#e8c25a"
+done = "#7fa7ff"
+ready = "#7cc98a"
+waiting = "#ff7366"
+closed = "#76819c"
+exited = "#cba0da"
+disconnected = "#a8a493"
+
+[ansi]
+colors = [
+  "#1b2645", "#ff7366", "#7cc98a", "#e8c25a", "#7fa7ff", "#cba0da", "#5fc4c4", "#ddd5c0",
+  "#3a4a70", "#ff958b", "#a0dbaa", "#f2d684", "#a6c2ff", "#dbb8e6", "#88d8d8", "#fbf6ea",
+]

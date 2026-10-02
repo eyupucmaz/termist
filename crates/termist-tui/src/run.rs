@@ -707,7 +707,7 @@ mod tests {
         assert_eq!(
             app.message.as_deref(),
             Some(
-                "config: theme: unknown theme \"nope\"; themes: uskudar, moda, terminal · termist config check"
+                "config: theme: unknown theme \"nope\"; themes: uskudar, moda, aksaray, kadikoy, besiktas, balat, kapalicarsi, adalar, bebek, catppuccin-mocha, catppuccin-latte, tokyo-night, gruvbox-dark, nord, dracula, terminal · termist config check"
             )
         );
     }

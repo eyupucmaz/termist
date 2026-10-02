@@ -1,0 +1,31 @@
+# Bebek: dark, the Bosphorus at night: deep navy, turquoise and the lights on the water.
+name = "Bebek"
+
+[ui]
+bg = "#0b1424"
+fg = "#e3eef7"
+dim = "#92a8c0"
+border = "#283c5a"
+accent = "#2ec4b6"
+focus = "#f4d35e"
+warn = "#f4d35e"
+error = "#ff6b6b"
+archive = "#c69fd6"
+selection = { fg = "#ffffff", bg = "#14514c" }
+tab_active = { fg = "#e3eef7", bg = "#1c2e4a", bold = true }
+
+[status]
+fresh = "#64788f"
+running = "#f4d35e"
+done = "#6ea8fe"
+ready = "#4fd18b"
+waiting = "#ff6b6b"
+closed = "#64788f"
+exited = "#c69fd6"
+disconnected = "#92a8c0"
+
+[ansi]
+colors = [
+  "#16233a", "#ff6b6b", "#4fd18b", "#f4d35e", "#6ea8fe", "#c69fd6", "#2ec4b6", "#cad8e6",
+  "#34486a", "#ff8f8f", "#79e0a8", "#f8e08a", "#98c2ff", "#d7b8e3", "#5fd9cd", "#f5faff",
+]

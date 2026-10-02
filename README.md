@@ -69,8 +69,12 @@
   <tr>
     <td width="50%" valign="top">
       <a href="docs/moda.png"><img src="docs/moda.png" alt="The grid in the light Moda theme."></a>
-      <p><b>Themes.</b> Üsküdar (dark, the default), Moda (light), or your terminal's own colours.
-      Agents are told the colours termist draws them with, so they pick a light look on Moda.</p>
+      <p><b>Themes.</b> Üsküdar (dark, the default), Moda (light), seven Istanbul neighbourhoods (Aksaray,
+      Kadıköy, Beşiktaş, Balat, Kapalıçarşı, Adalar, Bebek), Catppuccin Mocha and Latte, Tokyo Night,
+      Gruvbox Dark, Nord, Dracula, or your terminal's own colours. Your own themes go in the
+      <code>themes/</code> folder next to <code>termist config path</code>, as <code>&lt;name&gt;.toml</code>;
+      any colour you leave out comes from Üsküdar. Agents are told the colours termist draws them with,
+      so they pick a light look on a light theme.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/help.png"><img src="docs/help.png" alt="The help, listing the keys of the grid."></a>
@@ -187,6 +191,13 @@ Issues and pull requests are welcome. Please read the [code of conduct](CODE_OF_
 The demos are recorded with stand-in agents: `vhs assets/demo/demo.tape` after
 `cargo build --release -p termist`, and `vhs assets/demo/look.tape` for the themes, settings and help.
 The banner is drawn from the Galata scene by `python3 tools/build-banner.py`.
+
+## Credits
+
+Five themes adapt the palettes of other projects, all under the MIT licence: [Catppuccin](https://github.com/catppuccin/catppuccin)
+(Mocha and Latte), [Tokyo Night](https://github.com/folke/tokyonight.nvim), [gruvbox](https://github.com/morhetz/gruvbox),
+[Nord](https://github.com/nordtheme/nord) and [Dracula](https://github.com/dracula/dracula-theme). A few colours are
+deepened so text stays readable; each theme file says where its colours come from.
 
 ## License
 
