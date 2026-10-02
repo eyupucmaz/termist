@@ -36,7 +36,12 @@ pub struct Toasts {
 }
 
 impl Toasts {
+    /// A toast about a session replaces the one already about it.
     pub fn push(&mut self, toast: Toast) {
+        if let ToastKind::Agent { session, .. } = toast.kind {
+            self.items
+                .retain(|t| !matches!(t.kind, ToastKind::Agent { session: s, .. } if s == session));
+        }
         self.items.push_front(toast);
         self.items.truncate(MAX_SHOWN);
     }
@@ -164,6 +169,24 @@ mod tests {
         t.push(copied("copied 13 characters", now));
         assert!(t.rects(Rect::new(0, 0, 20, 40)).is_empty(), "too narrow");
         assert!(t.rects(Rect::new(0, 0, 100, 3)).is_empty(), "too short");
+    }
+
+    // A card that waits and then is done shows one toast: the latest.
+    #[test]
+    fn a_new_agent_toast_replaces_the_one_for_the_same_session() {
+        let now = Instant::now();
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let agent = |session, text: &str, status| Toast {
+            text: text.into(),
+            kind: ToastKind::Agent { session, status },
+            until: now + AGENT_FOR,
+        };
+        let mut t = Toasts::default();
+        t.push(agent(a, "a waits", AgentStatus::NeedsFeedback));
+        t.push(agent(b, "b waits", AgentStatus::NeedsFeedback));
+        t.push(agent(a, "a is done", AgentStatus::Unseen));
+        let texts: Vec<&str> = t.items().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, ["a is done", "b waits"]);
     }
 
     #[test]

@@ -860,8 +860,9 @@ impl App {
             return vec![];
         }
         let n = text.chars().count();
+        let what = if n == 1 { "character" } else { "characters" };
         self.toasts.push(Toast {
-            text: format!("✓ copied {n} characters"),
+            text: format!("✓ copied {n} {what}"),
             kind: ToastKind::Copied,
             until: Instant::now() + toast::COPIED_FOR,
         });
@@ -3635,6 +3636,15 @@ mod tests {
         writing(&mut app, "hello world");
         drag(&mut app, (0, 12), (4, 12));
         assert_eq!(toast_texts(&app), ["✓ copied 5 characters"]);
+    }
+
+    #[test]
+    fn a_copy_of_one_character_says_character() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        // `o` and the blank after it, which is dropped.
+        drag(&mut app, (4, 12), (5, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 1 character"]);
     }
 
     #[test]
