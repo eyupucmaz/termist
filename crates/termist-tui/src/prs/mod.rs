@@ -1,8 +1,10 @@
 //! The pull request view: a project's open pull requests (the inbox) and one of them
 //! whole (the detail). This module keeps its state and keys; `inbox_view` and
 //! `detail_view` draw it.
+pub mod detail_view;
 pub mod inbox_view;
 pub mod markdown;
+pub mod timeline;
 
 use crate::app::App;
 use crate::list_picker::matches;
@@ -416,7 +418,13 @@ impl PrView {
 
 /// The PR view in `area`: the inbox, or the open pull request.
 pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
-    inbox_view::draw(f, app, view, area);
+    // Reset first, so a screen that returns early never leaves a stale list rect or
+    // thread anchors for the keys and the mouse.
+    *app.pr_layout.borrow_mut() = PrLayout::default();
+    match &view.detail {
+        Some(detail) => detail_view::draw(f, app, detail, area),
+        None => inbox_view::draw(f, app, view, area),
+    }
 }
 
 /// The footer while the PR view is up.
@@ -513,6 +521,101 @@ pub mod fixtures {
             prs,
             fetched_at: Some("2026-10-02T11:59:20Z".into()),
             failed_at: None,
+        }
+    }
+
+    /// Two threads (one resolved), a comment, an approval and an empty "commented"
+    /// review, three checks, two files.
+    pub fn detail(summary: PrSummary) -> PrDetail {
+        let c = |author: &str, body: &str, at: &str| Comment {
+            author: author.into(),
+            body: body.into(),
+            created_at: at.into(),
+        };
+        PrDetail {
+            summary,
+            body: "Adds a dealer dropdown to the search page.\n\nCloses #198.".into(),
+            comments: vec![c("bob", "Screenshots attached ![before](https://x.io/b.png)", "2026-10-02T09:00:00Z")],
+            reviews: vec![
+                Review {
+                    author: "carol".into(),
+                    state: ReviewState::Approved,
+                    body: "Looks good, one nit below.".into(),
+                    submitted_at: "2026-10-02T11:00:00Z".into(),
+                },
+                Review {
+                    author: "carol".into(),
+                    state: ReviewState::Commented,
+                    body: String::new(),
+                    submitted_at: "2026-10-02T10:59:00Z".into(),
+                },
+            ],
+            threads: vec![
+                Thread {
+                    id: "T1".into(),
+                    path: "src/search/DealerFilter.tsx".into(),
+                    line: Some(42),
+                    resolved: false,
+                    outdated: false,
+                    hunk: "@@ -38,3 +40,5 @@\n  const dealers = useDealers();\n  const [sel, setSel] = useState<string>();\n+ useEffect(() => fetchAll(), []);".into(),
+                    comments: vec![
+                        c("carol", "This refetches on every mount, can we memoize?", "2026-10-02T10:58:00Z"),
+                        c("bob", "Good catch, will fix.", "2026-10-02T11:20:00Z"),
+                    ],
+                    more: 0,
+                },
+                Thread {
+                    id: "T2".into(),
+                    path: "src/api/client.ts".into(),
+                    line: Some(10),
+                    resolved: true,
+                    outdated: false,
+                    hunk: "@@ -10 +10 @@\n-a\n+b".into(),
+                    comments: vec![c("carol", "nit", "2026-10-02T08:00:00Z")],
+                    more: 0,
+                },
+            ],
+            checks: vec![
+                Check {
+                    name: "build".into(),
+                    workflow: Some("PR Checks".into()),
+                    state: CheckState::Passed,
+                    started_at: Some("2026-10-02T09:00:00Z".into()),
+                    completed_at: Some("2026-10-02T09:01:12Z".into()),
+                    url: Some("https://github.com/acme/site/actions/runs/1".into()),
+                },
+                Check {
+                    name: "e2e".into(),
+                    workflow: Some("PR Checks".into()),
+                    state: CheckState::Running,
+                    started_at: Some("2026-10-02T09:00:00Z".into()),
+                    completed_at: None,
+                    url: None,
+                },
+                Check {
+                    name: "lint".into(),
+                    workflow: None,
+                    state: CheckState::Failed,
+                    started_at: None,
+                    completed_at: None,
+                    url: Some("https://github.com/acme/site/actions/runs/2".into()),
+                },
+            ],
+            files: vec![
+                FileChange {
+                    path: "src/search/DealerFilter.tsx".into(),
+                    additions: 120,
+                    deletions: 2,
+                    change: 'A',
+                },
+                FileChange {
+                    path: "src/api/client.ts".into(),
+                    additions: 4,
+                    deletions: 0,
+                    change: 'M',
+                },
+            ],
+            more: More::default(),
         }
     }
 

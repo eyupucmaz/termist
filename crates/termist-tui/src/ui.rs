@@ -1708,6 +1708,58 @@ mod tests {
         app
     }
 
+    fn open_detail(app: &mut App) {
+        let project = app.state.projects[0].id;
+        let pr = app.prs[&project].repos[0].prs[0].clone();
+        let pr_ref = termist_core::github::PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: pr.number,
+        };
+        app.on_event(ServerEvent::PrDetail {
+            pr: pr_ref,
+            state: GhState::Ok,
+            detail: Some(Box::new(crate::prs::fixtures::detail(pr))),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn a_pull_request_whole() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        insta::assert_snapshot!("pr_overview", render(&mut app, 90, 16).backend());
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        insta::assert_snapshot!("pr_conversation", render(&mut app, 90, 28).backend());
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 90, 16));
+        assert!(text.contains("✗ lint"), "failing first: {text}");
+        assert!(text.contains("1m 12s"));
+    }
+
+    #[test]
+    fn n_jumps_to_the_open_thread_after_a_frame() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 12);
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let layout = app.pr_layout.borrow().clone();
+        let t1 = layout.threads.iter().find(|a| a.id == "T1").unwrap().line;
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.detail.as_ref().unwrap().scroll, t1.min(layout.end));
+    }
+
+    #[test]
+    fn a_screen_without_the_list_leaves_no_stale_layout() {
+        let mut app = pr_fixture();
+        render(&mut app, 110, 16);
+        assert_ne!(app.pr_layout.borrow().list, Rect::default());
+        let project = app.state.projects[0].id;
+        app.prs.get_mut(&project).unwrap().state = GhState::NoGh;
+        render(&mut app, 110, 16);
+        assert_eq!(app.pr_layout.borrow().list, Rect::default());
+    }
+
     #[test]
     fn the_inbox_beside_the_selected_pr() {
         let mut app = pr_fixture();
