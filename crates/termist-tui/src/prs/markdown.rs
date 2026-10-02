@@ -1,11 +1,26 @@
 //! Markdown from GitHub (PR descriptions, comments) as lines that fit a width. A
 //! subset: headings, paragraphs, lists, quotes, code, links, images as
 //! `[image: alt]`. HTML is dropped: PR templates are full of comments.
+//!
+//! The text is anyone's who can comment on a pull request, and it is drawn every
+//! frame: nesting shows at most a few levels deep, a prefix never takes more than
+//! half the line, and what was rendered is kept for the next frame.
 use crate::theme::Theme;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Quote bars shown at most; deeper quotes keep this many.
+const MAX_QUOTES: usize = 4;
+/// List indent levels shown at most.
+const MAX_INDENT: usize = 4;
+/// Rendered texts kept, and the lines they may hold together.
+const CACHE_ENTRIES: usize = 4096;
+const CACHE_LINES: usize = 100_000;
 
 pub fn width_of(s: &str) -> usize {
     UnicodeWidthStr::width(s)
@@ -45,7 +60,77 @@ pub fn strip_comments(text: &str) -> String {
     out
 }
 
+/// What a text was rendered as, for a width and the theme's two styles.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Key {
+    text: u64,
+    len: usize,
+    width: u16,
+    dim: Style,
+    accent: Style,
+}
+
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<Key, (Vec<Line<'static>>, u64)>,
+    lines: usize,
+    clock: u64,
+}
+
+impl Cache {
+    fn get(&mut self, key: &Key) -> Option<Vec<Line<'static>>> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.get_mut(key).map(|(lines, used)| {
+            *used = clock;
+            lines.clone()
+        })
+    }
+
+    fn put(&mut self, key: Key, lines: Vec<Line<'static>>) {
+        if self.entries.len() >= CACHE_ENTRIES || self.lines + lines.len() > CACHE_LINES {
+            // The least recently used half goes.
+            let mut by_use: Vec<(u64, Key)> = self
+                .entries
+                .iter()
+                .map(|(k, (_, used))| (*used, *k))
+                .collect();
+            by_use.sort_unstable_by_key(|(used, _)| *used);
+            for (_, k) in by_use.iter().take(by_use.len().div_ceil(2)) {
+                if let Some((gone, _)) = self.entries.remove(k) {
+                    self.lines -= gone.len();
+                }
+            }
+        }
+        self.lines += lines.len();
+        self.entries.insert(key, (lines, self.clock));
+    }
+}
+
+thread_local! {
+    static CACHE: RefCell<Cache> = RefCell::default();
+}
+
+/// `text` as lines `width` wide; the same text at the same width is rendered once.
 pub fn render(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let key = Key {
+        text: hasher.finish(),
+        len: text.len(),
+        width,
+        dim: theme.dim,
+        accent: theme.accent,
+    };
+    if let Some(lines) = CACHE.with(|c| c.borrow_mut().get(&key)) {
+        return lines;
+    }
+    let lines = render_now(text, width, theme);
+    CACHE.with(|c| c.borrow_mut().put(key, lines.clone()));
+    lines
+}
+
+fn render_now(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let text = strip_comments(text);
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -104,12 +189,27 @@ impl Renderer<'_> {
         }
     }
 
+    /// The quote bars before a line, a few at most.
+    fn bars(&self) -> String {
+        "┃ ".repeat(self.quote.min(MAX_QUOTES))
+    }
+
+    /// A prefix wider than half the line leaves too little room for the text: a
+    /// two-column one stands in for it.
+    fn fit(&self, first: String, rest: String) -> (String, String) {
+        if width_of(&first).max(width_of(&rest)) <= self.width / 2 {
+            return (first, rest);
+        }
+        let short = if self.quote > 0 { "┃ " } else { "  " };
+        (short.to_string(), short.to_string())
+    }
+
     /// The quote bars and list indent before a line: the first line's and the rest's.
     fn prefixes(&mut self) -> (String, String) {
-        let quote = "┃ ".repeat(self.quote);
-        let depth = self.lists.len().saturating_sub(1);
+        let quote = self.bars();
+        let depth = self.lists.len().saturating_sub(1).min(MAX_INDENT);
         let indent = "  ".repeat(depth);
-        match self.item.take() {
+        let (first, rest) = match self.item.take() {
             Some(marker) => {
                 let pad = " ".repeat(width_of(&marker));
                 (
@@ -122,7 +222,8 @@ impl Renderer<'_> {
                 (pad.clone(), pad)
             }
             None => (quote.clone(), quote),
-        }
+        };
+        self.fit(first, rest)
     }
 
     /// Wraps the block written so far into lines.
@@ -145,7 +246,7 @@ impl Renderer<'_> {
     }
 
     fn code_text(&mut self, text: &str) {
-        let quote = "┃ ".repeat(self.quote);
+        let (quote, _) = self.fit(self.bars(), String::new());
         let room = self.width.saturating_sub(width_of(&quote) + 2);
         for line in text.lines() {
             self.lines.push(Line::from(vec![
@@ -482,6 +583,69 @@ mod tests {
         );
         assert_eq!(cut("日本語", 5), "日本…");
         assert_eq!(cut("short", 10), "short");
+    }
+
+    /// Lines and bytes of what `src` renders to.
+    fn size(src: &str, width: u16) -> (usize, usize) {
+        let lines = md(src, width);
+        (lines.len(), lines.iter().map(String::len).sum())
+    }
+
+    #[test]
+    fn deep_nesting_shows_a_few_levels_and_never_eats_the_line() {
+        let word = "x".repeat(2000);
+        let (lines, bytes) = size(&format!("{}{word}", ">".repeat(10_000)), 80);
+        assert!(lines <= 2000 / 40 + 3, "{lines} lines");
+        assert!(bytes < 2000 * 2, "{bytes} bytes");
+        assert_eq!(md(&format!("{}deep", ">".repeat(10)), 40), ["┃ ┃ ┃ ┃ deep"]);
+        // Lists nest as deep as they like; the indent stops at four levels.
+        let list: String = (0..3000)
+            .map(|i| format!("{}- {i}\n", "  ".repeat(i)))
+            .collect();
+        let (lines, bytes) = size(&format!("{list}{}", "  ".repeat(3000) + &word), 80);
+        assert!(lines <= 3000 + 2000 / 40 + 3, "{lines} lines");
+        assert!(bytes < 3000 * 40 + 2000 * 2, "{bytes} bytes");
+        assert_eq!(
+            md(
+                "- a\n  - b\n    - c\n      - d\n        - e\n          - f",
+                40
+            )[5],
+            "        • f"
+        );
+    }
+
+    #[test]
+    fn a_prefix_takes_at_most_half_the_line() {
+        // Four bars are eight columns: too many for a ten-column line.
+        assert_eq!(
+            md(&format!("{}abcdefghij", ">".repeat(6)), 10),
+            ["┃ abcdefgh", "┃ ij"]
+        );
+        assert_eq!(
+            md("> > > >\n> > > > ```\n> > > > code\n> > > > ```", 10),
+            ["┃   code"]
+        );
+    }
+
+    #[test]
+    fn the_same_text_renders_the_same_from_the_cache() {
+        let src = "> quoted **bold** text that wraps around";
+        let first = render(src, 12, &Theme::terminal());
+        assert_eq!(render(src, 12, &Theme::terminal()), first);
+        assert_ne!(render(src, 20, &Theme::terminal()), first, "by width");
+        let mut cache = Cache::default();
+        for i in 0..CACHE_ENTRIES + 1 {
+            let key = Key {
+                text: i as u64,
+                len: 1,
+                width: 10,
+                dim: Style::default(),
+                accent: Style::default(),
+            };
+            cache.put(key, vec![Line::raw("x")]);
+        }
+        assert!(cache.entries.len() <= CACHE_ENTRIES);
+        assert_eq!(cache.lines, cache.entries.len());
     }
 
     #[test]
