@@ -2,7 +2,7 @@
 source: crates/termist-tui/src/ui.rs
 expression: "render(&mut app, 80, 16).backend()"
 ---
-" termist   orbit-api ◆1✓1                                                       "
+" termist   orbit-api ◆1✓1                                                 12:00 "
 "┏━━━━━━━┌ settings ────────────────────────────────────────────────────┐        "
 "┃◆ claud│ theme         ‹ Üsküdar ›                                    │        "
 "┃claude │ colours       ‹ auto (24-bit here) ›                         │        "

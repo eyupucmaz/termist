@@ -336,7 +336,27 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             spans.extend(marker);
         }
     }
+    let used: usize = spans.iter().map(Span::width).sum();
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let room = (area.width as usize).saturating_sub(used + 1);
+    let status = crate::status_line::spans(
+        &app.sysstat,
+        &app.config.status,
+        (app.hour, app.minute),
+        &app.theme,
+        room,
+    );
+    let width: u16 = status.iter().map(|s| s.width() as u16).sum();
+    if width > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(status)),
+            Rect {
+                x: area.right() - width,
+                width,
+                ..area
+            },
+        );
+    }
 }
 
 fn draw_card(
@@ -1063,7 +1083,11 @@ mod tests {
         state.projects[0].open = false;
         app.on_event(ServerEvent::State(state));
         let t = render(&mut app, 60, 10);
-        assert_eq!(row(&t, 0), " termist   closed ◆1", "its agent still waits");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   closed ◆1",
+            "its agent still waits"
+        );
         assert!(screen_text(&t).contains("No project open · o opens one"));
     }
 
@@ -1126,7 +1150,7 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(info));
         let t = render(&mut app, 60, 16);
         assert_eq!(
-            row(&t, 0),
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
             " termist   orbit-api ◆1",
             "archived cards are not counted"
         );
@@ -1167,7 +1191,10 @@ mod tests {
     fn waiting_agents_of_closed_projects_are_counted_at_the_end_of_the_tab_bar() {
         let mut app = with_a_closed_project();
         let t = render(&mut app, 60, 16);
-        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1  closed ◆2");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   orbit-api ◆1✓1  closed ◆2"
+        );
         let buf = t.backend().buffer();
         assert_eq!(buf[(27, 0)].fg, Color::DarkGray, "the word is dimmed");
         assert_eq!(buf[(34, 0)].fg, Color::Red, "the diamond is red");
@@ -1181,7 +1208,11 @@ mod tests {
         assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1");
         let mut app = fixture();
         let t = render(&mut app, 60, 16);
-        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1", "none waiting");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   orbit-api ◆1✓1",
+            "none waiting"
+        );
     }
 
     #[test]
@@ -1574,5 +1605,23 @@ mod tests {
         });
         let t = render(&mut app, 80, 20);
         assert!(!screen_text(&t).contains("copied"));
+    }
+
+    #[test]
+    fn the_header_ends_with_the_status_line() {
+        let mut app = fixture();
+        app.sysstat = termist_platform::sysstat::SysStat {
+            cpu: Some(5.0),
+            ram: None,
+            battery: None,
+        };
+        app.hour = 14;
+        app.minute = 32;
+        let t = render(&mut app, 100, 20);
+        assert!(
+            row(&t, 0).trim_end().ends_with("cpu 5%  14:32"),
+            "{:?}",
+            row(&t, 0)
+        );
     }
 }

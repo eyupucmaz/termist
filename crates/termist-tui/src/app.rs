@@ -152,6 +152,10 @@ pub struct App {
     pub started: Instant,
     /// The hour on the local clock, for the scenes' palettes.
     pub hour: u32,
+    /// The minute on the local clock, for the status line.
+    pub minute: u32,
+    /// The last reading for the status line.
+    pub sysstat: termist_platform::sysstat::SysStat,
     /// The whole screen at the last frame: a scene moves only where it fits.
     pub screen: ratatui::layout::Rect,
     /// The terminal window is in front (focus reports; assumed without them).
@@ -237,6 +241,8 @@ impl App {
             last_input: Instant::now(),
             started: Instant::now(),
             hour: 12,
+            minute: 0,
+            sysstat: Default::default(),
             window_focused: true,
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()

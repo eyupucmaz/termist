@@ -2,7 +2,7 @@
 source: crates/termist-tui/src/ui.rs
 expression: "render(&mut app, 60, 10).backend()"
 ---
-" termist   web                                              "
+" termist   web                                        12:00 "
 "                                                            "
 "                                                            "
 "                termist · terminal istanbul                 "
