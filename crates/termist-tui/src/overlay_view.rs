@@ -843,6 +843,23 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         }
     }
     lines.push(Line::default());
+    lines.push(heading("Pull requests (v)".into()));
+    for (key, what) in [
+        (
+            "Enter",
+            "open the pull request; in a conversation, fold a thread",
+        ),
+        ("/", "search titles, numbers and authors"),
+        ("f", "all · asked of you · yours"),
+        ("m", "repos: show or hide, the account each is read with"),
+        ("b", "open in the browser (a check's log on the checks tab)"),
+        ("Tab", "next section: overview, conversation, checks, files"),
+        ("n / N", "next / previous open thread"),
+        ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
     lines.push(heading("Anywhere".into()));
     lines.push(row("C-q".into(), "out of anything, back to the grid"));
     lines.push(row("C-c".into(), "quit"));
