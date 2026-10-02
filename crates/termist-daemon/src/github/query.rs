@@ -3,7 +3,8 @@
 use super::accounts::Permission;
 use serde_json::Value;
 use termist_core::github::{
-    Checks, GhState, Mergeable, PrState, PrSummary, ReviewDecision, ReviewState,
+    Check, CheckState, Checks, Comment, FileChange, GhState, Mergeable, More, PrDetail, PrState,
+    PrSummary, Review, ReviewDecision, ReviewState, Thread,
 };
 
 /// Open PRs read per repo; a repo with more shows `+N more`.
@@ -127,9 +128,68 @@ pub fn parse_counts(v: &Value, count: usize) -> Vec<Option<u32>> {
         .collect()
 }
 
+fn text(v: &Value) -> String {
+    v.as_str().unwrap_or_default().to_string()
+}
+
+fn opt_text(v: &Value) -> Option<String> {
+    v.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn nodes(v: &Value) -> impl Iterator<Item = &Value> {
+    v["nodes"].as_array().into_iter().flatten()
+}
+
+/// How many of a connection did not come.
+fn left(v: &Value) -> u32 {
+    let total = v["totalCount"].as_u64().unwrap_or(0) as usize;
+    total.saturating_sub(nodes(v).count()) as u32
+}
+
+fn comment(c: &Value) -> Comment {
+    Comment {
+        author: c["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+        body: text(&c["body"]),
+        created_at: text(&c["createdAt"]),
+    }
+}
+
+fn check(c: &Value) -> Option<Check> {
+    Some(match c["__typename"].as_str()? {
+        "CheckRun" => Check {
+            name: text(&c["name"]),
+            workflow: opt_text(&c["checkSuite"]["workflowRun"]["workflow"]["name"]),
+            state: match (c["status"].as_str(), c["conclusion"].as_str()) {
+                (Some("COMPLETED"), Some("SUCCESS")) => CheckState::Passed,
+                (Some("COMPLETED"), Some("SKIPPED")) => CheckState::Skipped,
+                (Some("COMPLETED"), Some("CANCELLED")) => CheckState::Cancelled,
+                (Some("COMPLETED"), Some("NEUTRAL" | "STALE")) => CheckState::Neutral,
+                (Some("COMPLETED"), _) => CheckState::Failed,
+                (Some("IN_PROGRESS"), _) => CheckState::Running,
+                _ => CheckState::Queued,
+            },
+            started_at: opt_text(&c["startedAt"]),
+            completed_at: opt_text(&c["completedAt"]),
+            url: opt_text(&c["detailsUrl"]),
+        },
+        "StatusContext" => Check {
+            name: text(&c["context"]),
+            workflow: None,
+            state: match c["state"].as_str() {
+                Some("SUCCESS") => CheckState::Passed,
+                Some("FAILURE" | "ERROR") => CheckState::Failed,
+                _ => CheckState::Queued,
+            },
+            started_at: opt_text(&c["createdAt"]),
+            completed_at: None,
+            url: opt_text(&c["targetUrl"]),
+        },
+        _ => return None,
+    })
+}
+
 /// A `PrFields` object; `viewer` is your login, for `requested_you`.
 pub fn summary(p: &Value, viewer: &str) -> Option<PrSummary> {
-    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
     let count = |v: &Value| v.as_u64().unwrap_or(0) as u32;
     let requested: Vec<String> = p["reviewRequests"]["nodes"]
         .as_array()
@@ -204,6 +264,102 @@ pub fn review_state(s: &str) -> Option<ReviewState> {
         "DISMISSED" => ReviewState::Dismissed,
         "PENDING" => ReviewState::Pending,
         _ => return None,
+    })
+}
+
+/// One pull request with its conversation, checks and files.
+pub fn detail(owner: &str, name: &str, number: u32) -> String {
+    format!(
+        "{PR_FIELDS}query {{
+  viewer {{ login }}
+  rateLimit {{ remaining resetAt }}
+  repository(owner: {owner}, name: {name}) {{
+    pullRequest(number: {number}) {{
+      ...PrFields
+      body
+      comments(first: 100) {{ totalCount nodes {{ author {{ login }} body createdAt }} }}
+      reviews(first: 50) {{ totalCount nodes {{ author {{ login }} state body submittedAt }} }}
+      reviewThreads(first: 100) {{ totalCount nodes {{
+        id isResolved isOutdated path line originalLine
+        comments(first: 50) {{ totalCount nodes {{ author {{ login }} body createdAt diffHunk }} }}
+      }} }}
+      files(first: 100) {{ totalCount nodes {{ path additions deletions changeType }} }}
+      checks: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ totalCount nodes {{
+        __typename
+        ... on CheckRun {{ name status conclusion detailsUrl startedAt completedAt
+                          checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }}
+        ... on StatusContext {{ context state targetUrl createdAt }}
+      }} }} }} }} }} }}
+    }}
+  }}
+}}
+",
+        owner = quoted(owner),
+        name = quoted(name),
+    )
+}
+
+pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
+    let data = &v["data"];
+    let viewer = data["viewer"]["login"].as_str().unwrap_or_default();
+    let p = &data["repository"]["pullRequest"];
+    if p.is_null() {
+        return Err(GhState::NoAccess);
+    }
+    let summary = summary(p, viewer)
+        .ok_or_else(|| GhState::Failed("GitHub sent a pull request without a number".into()))?;
+    let contexts = &p["checks"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
+    Ok(PrDetail {
+        summary,
+        body: text(&p["body"]),
+        comments: nodes(&p["comments"]).map(comment).collect(),
+        reviews: nodes(&p["reviews"])
+            .filter_map(|r| {
+                Some(Review {
+                    author: r["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+                    state: review_state(r["state"].as_str()?)?,
+                    body: text(&r["body"]),
+                    submitted_at: text(&r["submittedAt"]),
+                })
+            })
+            .collect(),
+        threads: nodes(&p["reviewThreads"])
+            .map(|t| Thread {
+                id: text(&t["id"]),
+                path: text(&t["path"]),
+                line: t["line"]
+                    .as_u64()
+                    .or_else(|| t["originalLine"].as_u64())
+                    .map(|n| n as u32),
+                resolved: t["isResolved"].as_bool().unwrap_or(false),
+                outdated: t["isOutdated"].as_bool().unwrap_or(false),
+                hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
+                comments: nodes(&t["comments"]).map(comment).collect(),
+                more: left(&t["comments"]),
+            })
+            .collect(),
+        checks: nodes(contexts).filter_map(check).collect(),
+        files: nodes(&p["files"])
+            .map(|f| FileChange {
+                path: text(&f["path"]),
+                additions: f["additions"].as_u64().unwrap_or(0) as u32,
+                deletions: f["deletions"].as_u64().unwrap_or(0) as u32,
+                change: match f["changeType"].as_str() {
+                    Some("ADDED") => 'A',
+                    Some("DELETED") => 'D',
+                    Some("RENAMED") => 'R',
+                    Some("COPIED") => 'C',
+                    _ => 'M',
+                },
+            })
+            .collect(),
+        more: More {
+            comments: left(&p["comments"]),
+            reviews: left(&p["reviews"]),
+            threads: left(&p["reviewThreads"]),
+            checks: left(contexts),
+            files: left(&p["files"]),
+        },
     })
 }
 
@@ -302,5 +458,124 @@ pub mod tests {
         assert!(c.contains("pullRequests(states: OPEN) { totalCount }"));
         let v = json(r#"{"data":{"r0":{"pullRequests":{"totalCount":4}},"r1":null}}"#);
         assert_eq!(parse_counts(&v, 2), [Some(4), None]);
+    }
+
+    pub const DETAIL: &str = r#"{"data":{"viewer":{"login":"alice"},
+      "rateLimit":{"remaining":4980,"resetAt":"2026-10-02T11:00:00Z"},
+      "repository":{"pullRequest":{
+        "number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212",
+        "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z",
+        "headRefName":"feat/dealer","baseRefName":"main","additions":184,"deletions":32,"changedFiles":9,
+        "mergeable":"MERGEABLE","reviewDecision":"APPROVED","author":{"login":"bob"},
+        "reviewRequests":{"nodes":[]},
+        "latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","author":{"login":"carol"}}]},
+        "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]},
+        "body":"Adds a dealer dropdown.\n\nCloses #198.",
+        "comments":{"totalCount":1,"nodes":[
+          {"author":{"login":"bob"},"body":"Screenshots attached","createdAt":"2026-10-01T10:05:00Z"}]},
+        "reviews":{"totalCount":2,"nodes":[
+          {"author":{"login":"carol"},"state":"APPROVED","body":"Looks good, one nit below.","submittedAt":"2026-10-02T09:00:00Z"},
+          {"author":{"login":"carol"},"state":"COMMENTED","body":"","submittedAt":"2026-10-02T08:59:00Z"}]},
+        "reviewThreads":{"totalCount":2,"nodes":[
+          {"id":"T1","isResolved":false,"isOutdated":false,"path":"src/search/DealerFilter.tsx","line":42,"originalLine":40,
+           "comments":{"totalCount":2,"nodes":[
+             {"author":{"login":"carol"},"body":"This refetches on every mount.","createdAt":"2026-10-02T08:58:00Z",
+              "diffHunk":"@@ -38,3 +38,5 @@\n   const dealers = useDealers();\n   const [sel, setSel] = useState<string>();\n+  useEffect(() => fetchAll(), []);"},
+             {"author":{"login":"bob"},"body":"Good catch, will fix.","createdAt":"2026-10-02T09:30:00Z","diffHunk":"x"}]}},
+          {"id":"T2","isResolved":true,"isOutdated":true,"path":"src/api/client.ts","line":null,"originalLine":10,
+           "comments":{"totalCount":3,"nodes":[
+             {"author":null,"body":"old","createdAt":"2026-10-01T12:00:00Z","diffHunk":"@@ -10 +10 @@\n-a\n+b"}]}}]},
+        "files":{"totalCount":101,"nodes":[
+          {"path":"src/search/DealerFilter.tsx","additions":120,"deletions":2,"changeType":"ADDED"},
+          {"path":"src/old.ts","additions":0,"deletions":30,"changeType":"DELETED"},
+          {"path":"src/api/client.ts","additions":4,"deletions":0,"changeType":"MODIFIED"},
+          {"path":"src/b.ts","additions":0,"deletions":0,"changeType":"RENAMED"}]},
+        "checks":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"totalCount":4,"nodes":[
+          {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS",
+           "detailsUrl":"https://github.com/acme/site/actions/runs/1/job/2","startedAt":"2026-10-02T09:00:00Z",
+           "completedAt":"2026-10-02T09:01:12Z","checkSuite":{"workflowRun":{"workflow":{"name":"PR Checks"}}}},
+          {"__typename":"CheckRun","name":"e2e","status":"IN_PROGRESS","conclusion":null,"detailsUrl":null,
+           "startedAt":"2026-10-02T09:00:00Z","completedAt":null,"checkSuite":{"workflowRun":null}},
+          {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"TIMED_OUT","detailsUrl":null,
+           "startedAt":null,"completedAt":null,"checkSuite":null},
+          {"__typename":"StatusContext","context":"vercel","state":"PENDING",
+           "targetUrl":"https://vercel.com/acme/site/x","createdAt":"2026-10-02T09:00:00Z"}]}}}}]}
+      }}}}"#;
+
+    #[test]
+    fn the_detail_query_reads_one_pull_request() {
+        let q = detail("acme", "site", 212);
+        assert!(q.starts_with("fragment PrFields on PullRequest"));
+        assert!(q.contains(r#"repository(owner: "acme", name: "site")"#));
+        assert!(q.contains("pullRequest(number: 212)"));
+        for part in [
+            "reviewThreads(first: 100)",
+            "diffHunk",
+            "files(first: 100)",
+            "checks: commits(last: 1)",
+            "... on CheckRun",
+            "... on StatusContext",
+        ] {
+            assert!(q.contains(part), "{part}");
+        }
+    }
+
+    #[test]
+    fn the_detail_answer_becomes_a_pull_request() {
+        let d = parse_detail(&json(DETAIL)).unwrap();
+        assert_eq!(d.summary.number, 212);
+        assert_eq!(d.summary.checks, Checks::Pending);
+        assert_eq!(d.body, "Adds a dealer dropdown.\n\nCloses #198.");
+        assert_eq!(d.comments.len(), 1);
+        assert_eq!(d.reviews.len(), 2);
+        assert_eq!(d.reviews[0].state, ReviewState::Approved);
+
+        let t1 = &d.threads[0];
+        assert_eq!(
+            (t1.path.as_str(), t1.line, t1.resolved, t1.more),
+            ("src/search/DealerFilter.tsx", Some(42), false, 0)
+        );
+        assert!(t1.hunk.ends_with("+  useEffect(() => fetchAll(), []);"));
+        assert_eq!(t1.comments.len(), 2);
+        let t2 = &d.threads[1];
+        assert_eq!(
+            (t2.line, t2.resolved, t2.outdated, t2.more),
+            (Some(10), true, true, 2)
+        );
+        assert_eq!(t2.comments[0].author, "ghost");
+
+        let changes: String = d.files.iter().map(|f| f.change).collect();
+        assert_eq!(changes, "ADMR");
+        assert_eq!(d.more.files, 97);
+
+        let checks: Vec<_> = d
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.state))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("build", CheckState::Passed),
+                ("e2e", CheckState::Running),
+                ("lint", CheckState::Failed),
+                ("vercel", CheckState::Queued),
+            ]
+        );
+        assert_eq!(d.checks[0].workflow.as_deref(), Some("PR Checks"));
+        assert_eq!(d.checks[1].workflow, None);
+        assert_eq!(
+            d.checks[3].url.as_deref(),
+            Some("https://vercel.com/acme/site/x")
+        );
+        assert_eq!(d.more.checks, 0);
+    }
+
+    #[test]
+    fn a_pull_request_that_is_not_there_is_no_access() {
+        let v = json(r#"{"data":{"viewer":{"login":"a"},"repository":{"pullRequest":null}}}"#);
+        assert_eq!(parse_detail(&v), Err(GhState::NoAccess));
+        let v = json(r#"{"data":{"viewer":{"login":"a"},"repository":null}}"#);
+        assert_eq!(parse_detail(&v), Err(GhState::NoAccess));
     }
 }
