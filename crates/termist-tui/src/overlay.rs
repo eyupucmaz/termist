@@ -326,6 +326,8 @@ const EFFORT_ORDER: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "m
 pub struct ModelPicker {
     pub harness: Harness,
     pub models: ListPicker<ModelChoice>,
+    /// The model in use when the picker opened; listed even when no list has it.
+    pub current: Option<String>,
     /// The effort asked for; `None` is the CLI's default. A model that does not take it
     /// gets the nearest level below.
     wanted_effort: Option<String>,
@@ -337,6 +339,7 @@ impl ModelPicker {
             harness: launch.harness,
             models: ListPicker::new(vec![], ModelChoice::label, true)
                 .pinned(ModelChoice::is_pinned),
+            current: launch.model.clone(),
             wanted_effort: launch.effort.clone(),
         };
         picker.set_lists(recent, catalog, launch.model.as_deref());

@@ -610,7 +610,8 @@ impl App {
                     if let Overlay::Model(m) = o
                         && m.harness == harness
                     {
-                        m.set_lists(recent.clone(), &catalog, None);
+                        let current = m.current.clone();
+                        m.set_lists(recent.clone(), &catalog, current.as_deref());
                     }
                 }
                 self.recent_models.insert(harness, recent);
@@ -2983,6 +2984,43 @@ mod tests {
         app.on_key(k(K::Down));
         app.on_key(k(K::Enter));
         assert_eq!(quick_prompt(&app).launch.model.as_deref(), Some("sonnet"));
+    }
+
+    // The daemon's answer must not drop the model in use, nor move the highlight off it.
+    #[test]
+    fn the_current_model_stays_listed_and_highlighted_when_the_list_comes() {
+        let (mut app, _) = app();
+        app.state.last_launch = Some(launch(Harness::Codex, Some("my-model"), None));
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Codex,
+            recent: vec![],
+            catalog: ["gpt-a", "gpt-b"]
+                .map(|id| ModelInfo {
+                    id: id.into(),
+                    label: id.into(),
+                    efforts: vec![],
+                })
+                .to_vec(),
+        });
+        let Some(Overlay::Model(m)) = app.overlays.last() else {
+            panic!("{:?}", app.overlays.last())
+        };
+        assert!(
+            m.models
+                .items()
+                .iter()
+                .any(|c| c.model().as_deref() == Some("my-model")),
+            "still listed"
+        );
+        assert_eq!(
+            m.models.selected().and_then(|c| c.model()).as_deref(),
+            Some("my-model"),
+            "still highlighted"
+        );
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).launch.model.as_deref(), Some("my-model"));
     }
 
     // The daemon keeps the launch line but does not send the state again; the next
