@@ -762,10 +762,21 @@ impl App {
                     && let Some(i) = self.toasts.hit(self.screen, ev.column, ev.row)
                 {
                     self.toast_down = true;
-                    return match self.toasts.remove(i).map(|t| t.kind) {
-                        Some(ToastKind::Agent { session, .. }) => self.reveal(session),
-                        _ => vec![],
+                    // Under an overlay a click only dismisses the toast.
+                    let Some(ToastKind::Agent { session, .. }) =
+                        self.toasts.remove(i).map(|t| t.kind)
+                    else {
+                        return vec![];
                     };
+                    if !self.overlays.is_empty() {
+                        return vec![];
+                    }
+                    // It lands in the grid: the next key goes to no other card.
+                    let mut actions = self.stop_scrolling();
+                    self.mode = Mode::Grid;
+                    actions.extend(self.reveal(session));
+                    actions.extend(self.sync_attachment());
+                    return actions;
                 }
                 self.toast_down = false;
                 if self.takes_mouse(ev) {
@@ -1558,12 +1569,14 @@ impl App {
         vec![]
     }
 
-    /// Shows card `id`: opens its project first if it is closed.
+    /// Shows card `id`: opens its project first if it is closed, and leaves the archive
+    /// view (which would not keep it selected).
     fn reveal(&mut self, id: SessionId) -> Vec<Action> {
         let Some(s) = self.state.sessions.iter().find(|s| s.id == id) else {
             return vec![];
         };
         let project = s.project;
+        self.archive_view = false;
         if self.open_projects().any(|p| p.id == project) {
             self.select(id);
             return vec![];
@@ -3686,6 +3699,80 @@ mod tests {
         assert_eq!(app.selected, Some(s[2].id), "the card it was about");
         assert!(app.toasts.is_empty(), "the toast goes");
         assert_eq!(app.selection, None, "no selection starts under a toast");
+    }
+
+    /// `s[2]` waits for the user; returns a point on its toast.
+    fn waiting_toast(app: &mut App, s: &[SessionInfo]) -> (u16, u16) {
+        app.screen = Rect::new(0, 0, 100, 40);
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let r = app.toasts.rects(app.screen)[0];
+        (r.x + 1, r.y + 1)
+    }
+
+    fn click(app: &mut App, (column, row): (u16, u16)) -> Vec<Action> {
+        use ratatui::crossterm::event::MouseButton::Left;
+        let mut actions = mouse(app, MouseEventKind::Down(Left), column, row);
+        actions.extend(mouse(app, MouseEventKind::Up(Left), column, row));
+        actions
+    }
+
+    // An idle waiting agent sends nothing more: the click itself attaches its card.
+    #[test]
+    fn a_click_on_an_agent_toast_attaches_its_card_in_the_grid() {
+        let (mut app, s) = app();
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert!(
+            sent(&actions).contains(&&ClientRequest::Attach {
+                session: s[2].id,
+                cols: 80,
+                rows: 20
+            }),
+            "{actions:?}"
+        );
+        assert_eq!(app.attached, Some(s[2].id));
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    // The next key must not go to a card other than the one typed into before.
+    #[test]
+    fn a_click_on_an_agent_toast_from_the_focus_lands_in_the_grid() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert_eq!((app.selected, app.mode), (Some(s[2].id), Mode::Grid));
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::Attach { session, .. } if *session == s[2].id
+        )));
+    }
+
+    #[test]
+    fn a_click_on_an_agent_toast_leaves_the_archive_view() {
+        let (mut app, s) = app();
+        let at = waiting_toast(&mut app, &s);
+        app.set_archive_view(true);
+        click(&mut app, at);
+        assert!(!app.archive_view);
+        assert_eq!(app.selected, Some(s[2].id));
+    }
+
+    // Under an overlay the selection never moves: the click only dismisses the toast.
+    #[test]
+    fn under_an_overlay_a_click_only_dismisses_the_toast() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('p')));
+        let before = app.selected;
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert!(app.toasts.is_empty(), "the toast goes");
+        assert_eq!(app.selected, before);
+        assert!(sent(&actions).is_empty(), "{actions:?}");
+        assert_eq!(app.overlays.len(), 1);
     }
 
     #[test]
