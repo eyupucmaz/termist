@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use termist_core::config::{ColorDepth, PanePosition, Sound};
+use termist_core::github::GhState;
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -677,6 +678,72 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::Repos { project, picker } => {
+            let name = app
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == *project)
+                .map_or("", |p| p.name.as_str());
+            let rows = picker
+                .visible()
+                .map(|(_, r, on)| {
+                    let mark = if r.visible { "[x]" } else { "[ ]" };
+                    let count = r
+                        .open_count
+                        .map_or("—".to_string(), |n| format!("{n} open"));
+                    let account = match (&r.state, &r.account) {
+                        (GhState::NoAccess, _) | (_, None) => "no access".to_string(),
+                        (GhState::LoggedOut, Some(a)) => format!("{a} logged out"),
+                        (_, Some(a)) if r.pinned => format!("{a}*"),
+                        (_, Some(a)) => a.clone(),
+                    };
+                    let text = format!(
+                        " {mark} {:<24} {count:>8}   {account}",
+                        crate::prs::markdown::cut(&r.name, 24)
+                    );
+                    Line::from(Span::styled(text, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: format!("repos in {name}"),
+                    width: 64,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
+        Overlay::RepoAccount { picker, .. } => {
+            let rows = picker
+                .visible()
+                .map(|(_, a, on)| {
+                    let text = match a {
+                        None => " auto: the account with the most access".to_string(),
+                        Some(login) => format!(" {login}"),
+                    };
+                    Line::from(Span::styled(text, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "read this repo as".into(),
+                    width: 48,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
     }
 }
 
@@ -704,6 +771,8 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Keys(_) => "j/k choose · Enter new key · Backspace no key · R default · Esc back",
         Overlay::KeyCapture(c) if c.conflict.is_some() => "Enter swap · Esc cancel",
         Overlay::KeyCapture(_) => "press a key · Esc cancel",
+        Overlay::Repos { .. } => "j/k choose · Space show/hide · a account · Esc close",
+        Overlay::RepoAccount { .. } => "j/k choose · Enter use · Esc back",
     }
 }
 

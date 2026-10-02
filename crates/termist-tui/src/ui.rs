@@ -1814,4 +1814,39 @@ mod tests {
         assert!(header.contains("⇄1"), "{header}");
         assert!(!header.contains("pull requests"), "back on the grid");
     }
+
+    #[test]
+    fn the_repos_window() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let project = app.state.projects[0].id;
+        use termist_core::github::{RepoId, RepoInfo};
+        app.on_event(ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into()],
+            repos: vec![
+                RepoInfo {
+                    id: RepoId(2),
+                    name: "admin-api".into(),
+                    slug: "acme/admin-api".into(),
+                    visible: true,
+                    account: Some("work".into()),
+                    pinned: true,
+                    open_count: Some(1),
+                    state: GhState::Ok,
+                },
+                RepoInfo {
+                    id: RepoId(3),
+                    name: "discord".into(),
+                    slug: "acme/discord".into(),
+                    visible: false,
+                    account: None,
+                    pinned: false,
+                    open_count: None,
+                    state: GhState::NoAccess,
+                },
+            ],
+        });
+        insta::assert_snapshot!(render(&mut app, 80, 14).backend());
+    }
 }

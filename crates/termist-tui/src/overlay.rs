@@ -6,6 +6,7 @@ use crate::keys::{self, Action as KeyAction, Context, KeySpec};
 use crate::list_picker::ListPicker;
 use crate::text_input::TextInput;
 use std::path::PathBuf;
+use termist_core::github::{RepoId, RepoInfo};
 use termist_core::{
     Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId, ProjectInfo, SessionId,
 };
@@ -44,6 +45,21 @@ pub enum Overlay {
     Keys(SettingsView),
     /// Waiting for the key to bind.
     KeyCapture(Capture),
+    /// `m` in the pull requests: the project's repos, shown or hidden, and their accounts.
+    Repos {
+        project: ProjectId,
+        picker: ListPicker<RepoInfo>,
+    },
+    /// `a` in the repos: the account to read a repo with; `None` is the one with the
+    /// most access.
+    RepoAccount {
+        repo: RepoId,
+        picker: ListPicker<Option<String>>,
+    },
+}
+
+pub fn repo_label(r: &RepoInfo) -> String {
+    r.name.clone()
 }
 
 /// A list of settings: the highlighted row, and a word about the last change.

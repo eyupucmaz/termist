@@ -670,6 +670,13 @@ impl App {
                 accounts,
                 repos,
             } => {
+                for o in &mut self.overlays {
+                    if let Overlay::Repos { project: p, picker } = o
+                        && *p == project
+                    {
+                        picker.set_items(repos.clone(), overlay::repo_label);
+                    }
+                }
                 self.repo_lists.insert(project, (accounts, repos));
             }
             ServerEvent::PrDetail { pr, state, detail } => {
@@ -1068,6 +1075,8 @@ impl App {
             Some(Overlay::Settings(_)) => self.settings_key(key),
             Some(Overlay::Keys(_)) => self.keys_key(key),
             Some(Overlay::KeyCapture(_)) => self.capture_key(key),
+            Some(Overlay::Repos { .. }) => self.repos_key(key),
+            Some(Overlay::RepoAccount { .. }) => self.repo_account_key(key),
             None => vec![],
         }
     }
@@ -1328,6 +1337,93 @@ impl App {
         if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
             q.launch.model = model;
             q.launch.effort = effort;
+        }
+    }
+
+    fn open_repos(&mut self) -> Vec<Action> {
+        let Some(project) = self.project else {
+            return vec![];
+        };
+        let repos = self
+            .repo_lists
+            .get(&project)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_default();
+        self.overlays.push(Overlay::Repos {
+            project,
+            picker: ListPicker::new(repos, overlay::repo_label, false),
+        });
+        vec![Action::Send(ClientRequest::ListRepos { project })]
+    }
+
+    fn repos_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Repos { project, picker }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let project = *project;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Char(' ') => {
+                let Some(i) = picker.selected_index() else {
+                    return vec![];
+                };
+                let mut items = picker.items().to_vec();
+                items[i].visible = !items[i].visible;
+                let (repo, visible) = (items[i].id, items[i].visible);
+                picker.set_items(items, overlay::repo_label);
+                return vec![Action::Send(ClientRequest::SetRepoVisible {
+                    repo,
+                    visible,
+                })];
+            }
+            KeyCode::Char('a') => {
+                let Some(repo) = picker.selected().map(|r| r.id) else {
+                    return vec![];
+                };
+                let accounts = self
+                    .repo_lists
+                    .get(&project)
+                    .map(|(a, _)| a.clone())
+                    .unwrap_or_default();
+                let mut items = vec![None];
+                items.extend(accounts.into_iter().map(Some));
+                self.overlays.push(Overlay::RepoAccount {
+                    repo,
+                    picker: ListPicker::new(
+                        items,
+                        |a: &Option<String>| a.clone().unwrap_or_default(),
+                        false,
+                    ),
+                });
+            }
+            _ => {
+                picker.key(key);
+            }
+        }
+        vec![]
+    }
+
+    fn repo_account_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::RepoAccount { repo, picker }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let repo = *repo;
+        match picker.key(key) {
+            Pick::Chosen => {
+                let account = picker.selected().cloned().flatten();
+                self.overlays.pop();
+                vec![Action::Send(ClientRequest::SetRepoAccount {
+                    repo,
+                    account,
+                })]
+            }
+            Pick::Ignored if key.code == KeyCode::Esc => {
+                self.overlays.pop();
+                vec![]
+            }
+            _ => vec![],
         }
     }
 
@@ -1751,8 +1847,9 @@ impl App {
             Some(PrAction::Opened(pr, updated_at)) => {
                 vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
             }
-            // Opening the browser and the repos window come with their own actions.
-            Some(PrAction::Browser(_)) | Some(PrAction::Repos) => vec![],
+            Some(PrAction::Repos) => self.open_repos(),
+            // Opening the browser comes with its own action.
+            Some(PrAction::Browser(_)) => vec![],
         }
     }
 
@@ -5727,5 +5824,79 @@ mod tests {
         assert_eq!(app.project, Some(s[0].project));
         assert_eq!(app.mode, Mode::Grid);
         assert!(sent(&actions).is_empty(), "{actions:?}");
+    }
+
+    fn repos_event(project: ProjectId) -> ServerEvent {
+        use termist_core::github::{RepoId, RepoInfo};
+        let info = |id: i64, name: &str, visible: bool, count: Option<u32>| RepoInfo {
+            id: RepoId(id),
+            name: name.into(),
+            slug: format!("acme/{name}"),
+            visible,
+            account: Some("work".into()),
+            pinned: false,
+            open_count: count,
+            state: GhState::Ok,
+        };
+        ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into(), "me".into()],
+            repos: vec![
+                info(1, "admin", true, Some(2)),
+                info(2, "site", false, Some(4)),
+            ],
+        }
+    }
+
+    #[test]
+    fn m_opens_the_repos_and_space_shows_or_hides_one() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('m')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+        assert!(sent(&actions).contains(&&ClientRequest::ListRepos { project: api }));
+        app.on_event(repos_event(api));
+        let actions = app.on_key(k(K::Char(' ')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetRepoVisible {
+                repo: termist_core::github::RepoId(1),
+                visible: false
+            }]
+        );
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert!(!picker.items()[0].visible, "shown at once");
+    }
+
+    #[test]
+    fn a_chooses_the_account_a_repo_is_read_with() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(api));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('a')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::RepoAccount { .. })
+        ));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('j')));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetRepoAccount {
+                repo: termist_core::github::RepoId(2),
+                account: Some("me".into())
+            }]
+        );
+        assert!(
+            matches!(app.overlays.last(), Some(Overlay::Repos { .. })),
+            "back to the repos"
+        );
     }
 }
