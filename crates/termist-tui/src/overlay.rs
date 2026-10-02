@@ -319,9 +319,6 @@ impl ModelChoice {
     }
 }
 
-/// Effort levels from least to most, to step down to the nearest one a model takes.
-const EFFORT_ORDER: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelPicker {
     pub harness: Harness,
@@ -409,7 +406,7 @@ impl ModelPicker {
         if levels.iter().any(|l| l == wanted) {
             return Some(wanted.to_string());
         }
-        let rank = |l: &str| EFFORT_ORDER.iter().position(|x| *x == l);
+        let rank = |l: &str| termist_core::EFFORT_LEVELS.iter().position(|x| *x == l);
         let top = rank(wanted)?;
         levels
             .into_iter()

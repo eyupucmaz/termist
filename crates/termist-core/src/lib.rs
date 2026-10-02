@@ -10,8 +10,8 @@ pub mod status;
 
 pub use ids::{ProjectId, SessionId};
 pub use model::{
-    Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectInfo, SessionInfo, SessionKind,
-    StateSnapshot, TermColors,
+    EFFORT_LEVELS, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectInfo, SessionInfo,
+    SessionKind, StateSnapshot, TermColors,
 };
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 pub use screen::{

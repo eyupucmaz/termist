@@ -40,6 +40,9 @@ impl Harness {
     }
 }
 
+/// Effort levels any agent CLI is known to take, from least to most.
+pub const EFFORT_LEVELS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
 /// What a new agent session starts with. `None` leaves the choice to the CLI: no
 /// flag is passed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

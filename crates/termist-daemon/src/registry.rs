@@ -997,6 +997,7 @@ impl Registry {
                 if let Some(e) = &effort
                     && !harness.efforts().contains(&e.as_str())
                     && !self.model_has_effort(*harness, model.as_deref(), e)
+                    && !self.effort_before_catalog(*harness, e)
                 {
                     bail!("{} has no effort level {e:?}", harness.id());
                 }
@@ -1048,6 +1049,16 @@ impl Registry {
             list.iter()
                 .any(|m| m.id == model && m.efforts.iter().any(|e| e == effort))
         })
+    }
+
+    /// The remembered launch after a daemon restart: the CLI's model list has not been
+    /// read yet (it is read when Ctrl+O opens), so the model's own efforts are unknown.
+    /// Any effort an agent CLI is known to take goes through until then.
+    fn effort_before_catalog(&self, harness: Harness, effort: &str) -> bool {
+        harness != Harness::Claude
+            && !harness.efforts().is_empty()
+            && !self.catalogs.contains_key(&harness)
+            && termist_core::EFFORT_LEVELS.contains(&effort)
     }
 
     /// A started session's prompt goes into the history, its model into the recent models.
@@ -1331,7 +1342,11 @@ mod tests {
         let p = project();
         let mut reg = registry_with(&p, &[]);
         let agent = |harness| SessionKind::Agent { harness };
-        for (harness, effort) in [(Harness::Claude, "turbo"), (Harness::OpenCode, "high")] {
+        for (harness, effort) in [
+            (Harness::Claude, "turbo"),
+            (Harness::Claude, "ultra"),
+            (Harness::OpenCode, "high"),
+        ] {
             let err = reg
                 .create_session(
                     p.id,
@@ -1382,6 +1397,53 @@ mod tests {
         }
     }
 
+    // After a daemon restart the catalogs are empty until Ctrl+O; the remembered launch
+    // (model and effort) must still start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_known_effort_is_taken_before_the_catalog_is_read() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.launcher.programs.codex = "true".into();
+        assert!(reg.catalogs.is_empty());
+        reg.create_session(
+            p.id,
+            SessionKind::Agent {
+                harness: Harness::Codex,
+            },
+            None,
+            Some("gpt-x".into()),
+            Some("xhigh".into()),
+            (80, 24),
+        )
+        .unwrap();
+        assert_eq!(reg.sessions.len(), 1);
+        assert_eq!(reg.sessions[0].info.effort.as_deref(), Some("xhigh"));
+        if let Some(cmd) = &reg.sessions[0].cmd {
+            let _ = cmd.send(SessionCmd::Kill);
+        }
+    }
+
+    #[test]
+    fn an_unknown_effort_is_refused_before_the_catalog_is_read() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let err = reg
+            .create_session(
+                p.id,
+                SessionKind::Agent {
+                    harness: Harness::Codex,
+                },
+                None,
+                Some("gpt-x".into()),
+                Some("turbo".into()),
+                (80, 24),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("no effort level"), "{err}");
+        assert!(reg.sessions.is_empty());
+    }
+
     #[test]
     fn a_model_effort_is_refused_for_a_model_not_in_the_catalog() {
         let p = project();
@@ -1402,7 +1464,6 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("no effort level"), "{err}");
         };
-        refused(&mut reg, "gpt-x");
         reg.catalogs
             .insert(Harness::Codex, (gpt_x(), std::time::Instant::now()));
         refused(&mut reg, "gpt-y");
