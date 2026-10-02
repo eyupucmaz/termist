@@ -1796,6 +1796,8 @@ impl App {
         if !self.open_projects().any(|p| p.id == project) {
             return vec![];
         }
+        // Out of scroll-back first: the pane it scrolled may be left behind.
+        let mut actions = self.stop_scrolling();
         self.go_to_project(project);
         self.mode = Mode::Grid;
         let mut view = PrView::for_project(Some(project));
@@ -1806,7 +1808,6 @@ impl App {
             .and_then(|d| d.repos.iter().find(|r| r.repo == pr.repo))
             .and_then(|r| r.prs.iter().find(|p| p.number == pr.number))
             .cloned();
-        let mut actions = vec![];
         if let Some(s) = summary {
             actions.push(Action::Send(ClientRequest::MarkPrSeen {
                 pr,
@@ -1815,6 +1816,7 @@ impl App {
             view.detail = Some(prs::Detail::new(pr, s));
         }
         self.view = View::Prs(view);
+        actions.extend(self.sync_attachment());
         actions.extend(self.sync_prs());
         actions
     }
@@ -6071,6 +6073,33 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, ClientRequest::MarkPrSeen { .. }))
         );
+    }
+
+    #[test]
+    fn the_review_toast_ends_scroll_back_first() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.screen = Rect::new(0, 0, 100, 40);
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        assert!(app.scrolling);
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 209,
+        };
+        app.on_event(ServerEvent::ReviewRequested {
+            project: api,
+            pr,
+            repo: "site".into(),
+            title: "Fix lazy images".into(),
+        });
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        assert!(!app.scrolling);
+        assert_eq!(scrolls(&actions), vec![Scroll::Bottom]);
+        assert!(matches!(&app.view, View::Prs(v) if v.selected == Some(pr)));
     }
 
     #[test]
