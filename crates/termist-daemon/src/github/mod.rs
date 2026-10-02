@@ -246,10 +246,6 @@ impl GitHub {
         }
     }
 
-    pub fn connected(&mut self, client: ClientId) {
-        self.clients.insert(client, Focus::default());
-    }
-
     pub fn gone(&mut self, client: ClientId) {
         self.clients.remove(&client);
     }
@@ -392,6 +388,9 @@ impl GitHub {
     ) -> Effects {
         let mut fx = Effects::default();
         if let ClientRequest::SetGitHub { enabled } = req {
+            // A client counts once it says how it wants GitHub: the TUI does at once,
+            // the short-lived hook connections never do.
+            self.clients.entry(client).or_default();
             let was = self.enabled;
             self.enabled = enabled;
             if enabled && !was {
@@ -929,13 +928,23 @@ mod tests {
             self.gh.tick(self.now, &self.projects)
         }
 
+        /// Another client connects and turns GitHub on, as the TUI does.
+        fn join(&mut self, client: ClientId) {
+            self.gh.request(
+                client,
+                ClientRequest::SetGitHub { enabled: true },
+                &self.store,
+                &self.projects,
+                self.now,
+            );
+        }
+
         fn done(&mut self, done: Done) -> Effects {
             self.gh.done(done, self.now, &self.store, &self.projects)
         }
 
         /// A client connected, GitHub on, these accounts loaded.
         fn ready(&mut self, accounts: Vec<Account>) {
-            self.gh.connected(self.client);
             self.request(ClientRequest::SetGitHub { enabled: true });
             let fx = self.tick();
             assert!(matches!(fx.jobs.first(), Some(Job::Accounts)));
@@ -1032,7 +1041,7 @@ mod tests {
     fn nothing_runs_until_a_client_turns_github_on() {
         let mut w = world(&["work"]);
         assert!(w.tick().jobs.is_empty(), "no client");
-        w.gh.connected(w.client);
+        w.request(ClientRequest::SetGitHub { enabled: false });
         assert!(w.tick().jobs.is_empty(), "GitHub off");
         w.request(ClientRequest::SetGitHub { enabled: true });
         let fx = w.tick();
@@ -1047,7 +1056,6 @@ mod tests {
     #[test]
     fn failed_accounts_tell_every_client_why_and_wait() {
         let mut w = world(&["work"]);
-        w.gh.connected(w.client);
         w.request(ClientRequest::SetGitHub { enabled: true });
         w.tick();
         let fx = w.done(Done::Accounts(Err(GhState::NoGh)));
@@ -1487,7 +1495,7 @@ mod tests {
     fn the_open_pr_is_read_and_sent_to_who_looks() {
         let mut w = two_projects();
         let other = ClientId(2);
-        w.gh.connected(other);
+        w.join(other);
         let pr = PrRef {
             repo: w.id("site"),
             number: 212,
@@ -1549,7 +1557,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: Some(pr),
         });
-        w.gh.connected(ClientId(2));
+        w.join(ClientId(2));
         w.gh.gone(w.client);
         let fx = w.tick();
         assert!(!fx.jobs.iter().any(|j| matches!(j, Job::Detail { .. })));
@@ -1564,6 +1572,27 @@ mod tests {
             pr: None,
         });
         assert!(w.tick().jobs.is_empty());
+    }
+
+    #[test]
+    fn a_client_that_never_turned_github_on_reads_nothing() {
+        let mut w = two_projects();
+        w.gh.gone(w.client);
+        // A hook connection: it asks nothing of GitHub, or only for a focus.
+        let hook = ClientId(2);
+        w.gh.request(
+            hook,
+            ClientRequest::SetPrFocus {
+                project: Some(w.projects[0].id),
+                pr: None,
+            },
+            &w.store,
+            &w.projects,
+            w.now,
+        );
+        assert!(w.tick().jobs.is_empty());
+        w.join(hook);
+        assert!(!w.tick().jobs.is_empty(), "once it turns GitHub on");
     }
 
     #[test]
@@ -1620,7 +1649,6 @@ mod tests {
         assert_eq!(ticked(&mut w).len(), 1);
 
         let mut w = world(&["work"]);
-        w.gh.connected(w.client);
         w.request(ClientRequest::SetGitHub { enabled: true });
         w.tick();
         w.done(Done::Accounts(Err(GhState::LoggedOut)));
@@ -1632,7 +1660,6 @@ mod tests {
     #[test]
     fn loaded_accounts_clear_a_failure_every_client_still_shows() {
         let mut w = world(&["work"]);
-        w.gh.connected(w.client);
         w.request(ClientRequest::SetGitHub { enabled: true });
         w.tick();
         w.found(0, &[]);

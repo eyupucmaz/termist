@@ -280,7 +280,6 @@ impl Registry {
         match msg {
             Msg::Connected { client, out } => {
                 self.clients.insert(client, out);
-                self.github.connected(client);
             }
             Msg::Disconnected(client) => {
                 self.clients.remove(&client);
