@@ -4,7 +4,8 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,9 +38,10 @@ impl std::error::Error for RunError {}
 
 /// Runs `program args…` with `env` added and `stdin` on its input, and waits at most
 /// `limit`. A program that runs over is killed, including its entire process group (on unix).
-/// If the child exits but its group is still running (grandchildren holding stdout/stderr),
-/// the reads are bounded by the same deadline. If reads timeout while the group is running,
-/// the group is killed and returns what was read (not TimedOut, since the child already exited).
+/// If the program exits before the limit: waits for pipes to close (EOF) until the deadline.
+/// If a pipe stays open (grandchildren inherited it): kills the group at the deadline and
+/// returns Ok with what was read so far (the program itself finished, its output complete).
+/// If the program doesn't finish before the deadline: kills the group and returns Err(TimedOut).
 pub fn run(
     program: &Path,
     args: &[&str],
@@ -72,10 +74,21 @@ pub fn run(
             let _ = pipe.write_all(text.as_bytes());
         });
     }
-    let (out_tx, out_rx) = mpsc::channel();
-    let (err_tx, err_rx) = mpsc::channel();
-    drain_to_channel(child.stdout.take(), out_tx);
-    drain_to_channel(child.stderr.take(), err_tx);
+    let out_data = Arc::new(Mutex::new(Vec::new()));
+    let err_data = Arc::new(Mutex::new(Vec::new()));
+    let out_eof = Arc::new(AtomicBool::new(false));
+    let err_eof = Arc::new(AtomicBool::new(false));
+
+    drain_to_channel(
+        child.stdout.take(),
+        Arc::clone(&out_data),
+        Arc::clone(&out_eof),
+    );
+    drain_to_channel(
+        child.stderr.take(),
+        Arc::clone(&err_data),
+        Arc::clone(&err_eof),
+    );
 
     let deadline = Instant::now() + limit;
     let status = loop {
@@ -92,25 +105,33 @@ pub fn run(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    // Bound reads by the same deadline (child has exited at this point).
-    // Use a short timeout (500ms) to wait for the drain threads: if they don't
-    // send data by then, they're likely blocked on a grandchild holding the pipe.
-    let read_timeout = Duration::from_millis(500);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let effective_timeout = if remaining < read_timeout {
-        remaining
-    } else {
-        read_timeout
-    };
-    let stdout = out_rx.recv_timeout(effective_timeout).unwrap_or_default();
-    let stderr = err_rx.recv_timeout(effective_timeout).unwrap_or_default();
+    // Child has exited. Wait for pipes to close (reach EOF) until the deadline.
+    while (!out_eof.load(Ordering::Acquire) || !err_eof.load(Ordering::Acquire))
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
-    // If reads timed out (drain threads blocked on grandchildren), kill them.
-    // Otherwise wait for any remaining time up to the deadline.
-    let now = Instant::now();
-    if now >= deadline {
+    // If deadline passed while pipes still open (grandchildren holding them),
+    // kill the rest of the group.
+    if Instant::now() >= deadline {
         kill_quiet_child(&mut child);
     }
+
+    let stdout = {
+        if let Ok(data) = out_data.lock() {
+            String::from_utf8_lossy(&data).into_owned()
+        } else {
+            String::new()
+        }
+    };
+    let stderr = {
+        if let Ok(data) = err_data.lock() {
+            String::from_utf8_lossy(&data).into_owned()
+        } else {
+            String::new()
+        }
+    };
 
     Ok(Output {
         success: status.success(),
@@ -119,15 +140,40 @@ pub fn run(
     })
 }
 
-/// Reads a pipe to its end on a thread, sending the result over a channel,
-/// so a full pipe or a grandchild holding it never stalls the program.
-fn drain_to_channel(pipe: Option<impl Read + Send + 'static>, tx: mpsc::Sender<String>) {
+/// Reads a pipe to its end on a thread, sending chunks to a shared buffer.
+/// Signals EOF when the pipe closes (read returns 0).
+fn drain_to_channel(
+    pipe: Option<impl Read + Send + 'static>,
+    data: Arc<Mutex<Vec<u8>>>,
+    eof: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
         if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
+            let mut buf = [0u8; 4096];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF reached
+                        eof.store(true, Ordering::Release);
+                        break;
+                    }
+                    Ok(n) => {
+                        // Append chunk
+                        if let Ok(mut d) = data.lock() {
+                            d.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                    Err(_) => {
+                        // Error treated as EOF
+                        eof.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No pipe, signal EOF immediately
+            eof.store(true, Ordering::Release);
         }
-        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
     });
 }
 
@@ -229,26 +275,78 @@ mod tests {
 
     #[test]
     fn a_grandchild_is_killed_with_the_whole_group() {
+        let tempdir = std::env::temp_dir();
+        let pidfile = tempdir.join("termist_test_grandchild.pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        let script = format!("sleep 30 & echo $! > {} && wait", pidfile.display());
         let start = Instant::now();
-        let err = sh("sleep 30 & wait", None, Duration::from_millis(300)).unwrap_err();
-        assert!(matches!(err, RunError::TimedOut), "{err}");
+        let err = sh(&script, None, Duration::from_millis(300)).unwrap_err();
+        assert!(
+            matches!(err, RunError::TimedOut),
+            "timeout expected but got: {err}"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(2),
-            "group kill ended the grandchild promptly"
+            "group kill returned promptly"
         );
+
+        // Verify the grandchild was actually killed
+        if let Ok(contents) = std::fs::read_to_string(&pidfile) {
+            if let Ok(pid) = contents.trim().parse::<libc::pid_t>() {
+                let mut found_alive = false;
+                for _ in 0..10 {
+                    // SAFETY: kill with signal 0 just tests if the process exists
+                    let alive = unsafe { libc::kill(pid, 0) } == 0;
+                    if alive {
+                        found_alive = true;
+                        std::thread::sleep(Duration::from_millis(100));
+                    } else {
+                        break;
+                    }
+                }
+                assert!(
+                    !found_alive,
+                    "grandchild (pid {}) still alive after group kill",
+                    pid
+                );
+            }
+            let _ = std::fs::remove_file(&pidfile);
+        }
     }
 
     #[test]
-    fn a_child_that_exits_with_a_grandchild_holding_stdout_does_not_hang() {
+    fn a_child_that_exits_with_a_grandchild_holding_stdout_reads_the_output() {
+        let tempdir = std::env::temp_dir();
+        let pidfile = tempdir.join("termist_test_leftover.pid");
+        let _ = std::fs::remove_file(&pidfile);
+
+        let script = format!("sleep 30 & echo $! > {} && echo out", pidfile.display());
         let start = Instant::now();
-        let _out = sh("sleep 30 & echo out", None, Duration::from_secs(2)).unwrap();
+        let out = sh(&script, None, Duration::from_secs(1)).unwrap();
         let elapsed = start.elapsed();
-        // The limit is 2 seconds; with read_timeout of 500ms we return within ~2.5 seconds
+
+        // Verify output was captured despite grandchild holding pipe
+        assert_eq!(out.stdout.trim(), "out", "output captured");
+        assert!(out.success, "child exited successfully");
+
+        // Verify we returned within reasonable time (wait for EOF + grandchild to be killed)
         assert!(
-            elapsed < Duration::from_millis(2600),
-            "run returns within deadline even when grandchild holds pipe: {}ms",
+            elapsed < Duration::from_secs(3),
+            "returned within deadline: {}ms",
             elapsed.as_millis()
         );
+
+        // Verify grandchild was killed
+        if let Ok(contents) = std::fs::read_to_string(&pidfile) {
+            if let Ok(pid) = contents.trim().parse::<libc::pid_t>() {
+                std::thread::sleep(Duration::from_millis(100));
+                // SAFETY: kill with signal 0 just tests if the process exists
+                let alive = unsafe { libc::kill(pid, 0) } == 0;
+                assert!(!alive, "grandchild (pid {}) was killed", pid);
+            }
+            let _ = std::fs::remove_file(&pidfile);
+        }
     }
 
     #[test]
