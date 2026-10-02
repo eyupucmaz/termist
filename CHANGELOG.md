@@ -25,6 +25,8 @@
 
 - `notify.sounds` still works and sets both sounds, unless one has its own setting. Its old value
   `istanbul` means `marti`.
+- In the model list (`Ctrl+O`), `j`, `k`, `h`, `l` and `q` now type into the filter. Move with the
+  arrows and close it with `Esc`.
 
 ### Updating
 
