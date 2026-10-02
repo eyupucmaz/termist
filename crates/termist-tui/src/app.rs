@@ -704,6 +704,7 @@ impl App {
         if !self.overlays.is_empty() {
             actions.extend(self.overlay_key(key));
             actions.extend(self.sync_attachment());
+            actions.extend(self.sync_prs());
             return actions;
         }
         if self.scrolling && matches!(self.mode, Mode::Grid | Mode::Focus) {
@@ -840,6 +841,7 @@ impl App {
                     self.mode = Mode::Grid;
                     actions.extend(self.reveal(session));
                     actions.extend(self.sync_attachment());
+                    actions.extend(self.sync_prs());
                     return actions;
                 }
                 self.toast_down = false;
@@ -1023,6 +1025,7 @@ impl App {
             }));
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -1748,7 +1751,7 @@ impl App {
             Some(PrAction::Opened(pr, updated_at)) => {
                 vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
             }
-            // Görev 20 `Action::OpenUrl` ve Görev 19 repo penceresiyle doldurur.
+            // Opening the browser and the repos window come with their own actions.
             Some(PrAction::Browser(_)) | Some(PrAction::Repos) => vec![],
         }
     }
@@ -5681,5 +5684,48 @@ mod tests {
             detail: None,
         });
         assert_eq!(app.pr_details[&pr].0, GhState::Failed("HTTP 502".into()));
+    }
+
+    #[test]
+    fn turning_github_on_in_the_settings_tells_the_daemon_what_is_looked_at() {
+        let (mut app, s) = app();
+        app.config.github.enabled = false;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::PullRequests)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(app.config.github.enabled);
+        assert_eq!(focus(&actions), [(Some(s[0].project), None)]);
+    }
+
+    #[test]
+    fn a_toast_click_out_of_the_pull_requests_tells_the_daemon() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(focus(&actions), [(None, None)]);
+    }
+
+    #[test]
+    fn the_search_takes_every_key_in_the_pull_requests() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('/')));
+        let mut actions = vec![];
+        for c in ['v', '1', 'q', ']'] {
+            actions.extend(app.on_key(k(K::Char(c))));
+        }
+        assert!(matches!(&app.view, View::Prs(v) if v.query == "v1q]" && v.typing));
+        assert_eq!(app.project, Some(s[0].project));
+        assert_eq!(app.mode, Mode::Grid);
+        assert!(sent(&actions).is_empty(), "{actions:?}");
     }
 }
