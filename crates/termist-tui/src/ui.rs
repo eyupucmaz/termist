@@ -599,7 +599,7 @@ fn draw_toasts(f: &mut Frame, app: &App) {
                     Span::raw(chars.collect::<String>()),
                 ])
             }
-            crate::toast::ToastKind::Copied => {
+            crate::toast::ToastKind::Copied | crate::toast::ToastKind::Review { .. } => {
                 let mut chars = text.chars();
                 let mark: String = chars.next().into_iter().collect();
                 Line::from(vec![
@@ -1848,5 +1848,35 @@ mod tests {
             ],
         });
         insta::assert_snapshot!(render(&mut app, 80, 14).backend());
+    }
+
+    #[test]
+    fn the_wheel_moves_through_the_inbox_and_a_click_opens() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = pr_fixture();
+        render(&mut app, 110, 16);
+        let at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(at(MouseEventKind::ScrollDown, 5, 5));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.selected.map(|p| p.number), Some(209));
+        let list = app.pr_layout.borrow().list;
+        // rows: site, #212, #209, #201 → #201 is the fourth
+        let y = list.y + 3 - app.pr_layout.borrow().first as u16;
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Left), list.x + 4, y));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.selected.map(|p| p.number), Some(201));
+        assert!(v.detail.is_none(), "the first click selects");
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Left), list.x + 4, y));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.pr.number),
+            Some(201),
+            "a click on the selected one opens it"
+        );
     }
 }

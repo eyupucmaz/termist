@@ -20,6 +20,11 @@ pub enum ToastKind {
         session: SessionId,
         status: AgentStatus,
     },
+    /// Clicking it opens the pull request.
+    Review {
+        project: termist_core::ProjectId,
+        pr: termist_core::github::PrRef,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

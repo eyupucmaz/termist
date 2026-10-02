@@ -83,6 +83,10 @@ pub enum Action {
     Preview(Sound),
     /// Text dragged out of the pane, for the clipboard.
     Copy(String),
+    /// A web page for the browser (a pull request, a check's log).
+    OpenUrl(String),
+    /// A desktop notification without a sound, when the terminal is not in front.
+    Notify(String),
     Quit,
 }
 
@@ -682,7 +686,27 @@ impl App {
             ServerEvent::PrDetail { pr, state, detail } => {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
-            ServerEvent::Hello { .. } | ServerEvent::Ack | ServerEvent::ReviewRequested { .. } => {}
+            ServerEvent::ReviewRequested {
+                project,
+                pr,
+                repo,
+                title,
+            } => {
+                if self.config.github.enabled {
+                    if self.config.notify.toasts {
+                        self.toasts.push(Toast {
+                            text: format!("⇄ #{} · {repo} wants your review", pr.number),
+                            kind: ToastKind::Review { project, pr },
+                            until: Instant::now() + toast::AGENT_FOR,
+                        });
+                    }
+                    actions.push(Action::Notify(format!(
+                        "{repo} #{} wants your review: {title}",
+                        pr.number
+                    )));
+                }
+            }
+            ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
         actions.extend(self.sync_prs());
@@ -825,6 +849,15 @@ impl App {
     /// full-screen one that did not gets arrow keys (it keeps no history); otherwise the
     /// view moves through the session's history.
     pub fn on_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        if matches!(self.view, View::Prs(_)) && self.overlays.is_empty() && self.showing.is_none() {
+            let on_toast = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.toasts.hit(self.screen, ev.column, ev.row).is_some();
+            if !on_toast {
+                let mut actions = self.prs_mouse(ev);
+                actions.extend(self.sync_prs());
+                return actions;
+            }
+        }
         let up = match ev.kind {
             MouseEventKind::ScrollUp => true,
             MouseEventKind::ScrollDown => false,
@@ -835,21 +868,23 @@ impl App {
                 {
                     self.toast_down = true;
                     // Under an overlay a click only dismisses the toast.
-                    let Some(ToastKind::Agent { session, .. }) =
-                        self.toasts.remove(i).map(|t| t.kind)
-                    else {
-                        return vec![];
-                    };
+                    let kind = self.toasts.remove(i).map(|t| t.kind);
                     if !self.overlays.is_empty() {
                         return vec![];
                     }
-                    // It lands in the grid: the next key goes to no other card.
-                    let mut actions = self.stop_scrolling();
-                    self.mode = Mode::Grid;
-                    actions.extend(self.reveal(session));
-                    actions.extend(self.sync_attachment());
-                    actions.extend(self.sync_prs());
-                    return actions;
+                    return match kind {
+                        Some(ToastKind::Agent { session, .. }) => {
+                            // It lands in the grid: the next key goes to no other card.
+                            let mut actions = self.stop_scrolling();
+                            self.mode = Mode::Grid;
+                            actions.extend(self.reveal(session));
+                            actions.extend(self.sync_attachment());
+                            actions.extend(self.sync_prs());
+                            actions
+                        }
+                        Some(ToastKind::Review { project, pr }) => self.reveal_pr(project, pr),
+                        _ => vec![],
+                    };
                 }
                 self.toast_down = false;
                 if self.takes_mouse(ev) {
@@ -1344,6 +1379,10 @@ impl App {
         let Some(project) = self.project else {
             return vec![];
         };
+        if !self.config.github.enabled {
+            self.message = Some("pull requests are off".into());
+            return vec![];
+        }
         let repos = self
             .repo_lists
             .get(&project)
@@ -1752,6 +1791,74 @@ impl App {
         vec![Action::Send(ClientRequest::OpenProject { project })]
     }
 
+    /// Opens pull request `pr` of `project` in the PR view.
+    fn reveal_pr(&mut self, project: ProjectId, pr: PrRef) -> Vec<Action> {
+        if !self.open_projects().any(|p| p.id == project) {
+            return vec![];
+        }
+        self.go_to_project(project);
+        self.mode = Mode::Grid;
+        let mut view = PrView::for_project(Some(project));
+        view.selected = Some(pr);
+        let summary = self
+            .prs
+            .get(&project)
+            .and_then(|d| d.repos.iter().find(|r| r.repo == pr.repo))
+            .and_then(|r| r.prs.iter().find(|p| p.number == pr.number))
+            .cloned();
+        let mut actions = vec![];
+        if let Some(s) = summary {
+            actions.push(Action::Send(ClientRequest::MarkPrSeen {
+                pr,
+                updated_at: s.updated_at.clone(),
+            }));
+            view.detail = Some(prs::Detail::new(pr, s));
+        }
+        self.view = View::Prs(view);
+        actions.extend(self.sync_prs());
+        actions
+    }
+
+    /// The wheel moves through the inbox or scrolls the detail; a click selects a row,
+    /// a click on the selected row opens it.
+    fn prs_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        match ev.kind {
+            MouseEventKind::ScrollDown => self.prs_key(press(KeyCode::Down)),
+            MouseEventKind::ScrollUp => self.prs_key(press(KeyCode::Up)),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let layout = self.pr_layout.borrow().clone();
+                let View::Prs(view) = &mut self.view else {
+                    return vec![];
+                };
+                let inside = ev.column >= layout.list.x
+                    && ev.column < layout.list.right()
+                    && ev.row >= layout.list.y
+                    && ev.row < layout.list.bottom();
+                if view.detail.is_some() || !inside {
+                    return vec![];
+                }
+                let index = layout.first + (ev.row - layout.list.y) as usize;
+                let empty = ProjectPrs::default();
+                let data = self
+                    .project
+                    .and_then(|p| self.prs.get(&p))
+                    .unwrap_or(&empty);
+                let Some(pr) = prs::rows(data, view).get(index).and_then(|r| r.pr_ref()) else {
+                    return vec![];
+                };
+                if view.selected == Some(pr) {
+                    return self.prs_key(press(KeyCode::Enter));
+                }
+                view.selected = Some(pr);
+                let list = prs::rows(data, view);
+                view.repair(&list);
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
     fn move_by(&mut self, delta: isize) {
         let ids: Vec<SessionId> = self.project_sessions().iter().map(|s| s.id).collect();
         if ids.is_empty() {
@@ -1848,8 +1955,7 @@ impl App {
                 vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
             }
             Some(PrAction::Repos) => self.open_repos(),
-            // Opening the browser comes with its own action.
-            Some(PrAction::Browser(_)) => vec![],
+            Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
         }
     }
 
@@ -5898,5 +6004,151 @@ mod tests {
             matches!(app.overlays.last(), Some(Overlay::Repos { .. })),
             "back to the repos"
         );
+    }
+
+    #[test]
+    fn b_opens_the_selected_pull_request_in_the_browser() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('b')));
+        assert!(actions.contains(&Action::OpenUrl(
+            "https://github.com/acme/site/pull/212".into()
+        )));
+    }
+
+    #[test]
+    fn a_review_request_shows_a_toast_and_a_quiet_notification() {
+        let (mut app, s) = app();
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 215,
+        };
+        let actions = app.on_event(ServerEvent::ReviewRequested {
+            project: s[0].project,
+            pr,
+            repo: "site".into(),
+            title: "Bulk edit".into(),
+        });
+        assert_eq!(
+            app.toasts
+                .items()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
+            ["⇄ #215 · site wants your review"]
+        );
+        assert!(actions.contains(&Action::Notify(
+            "site #215 wants your review: Bulk edit".into()
+        )));
+        assert!(alerts(&actions).is_empty(), "no sound");
+    }
+
+    #[test]
+    fn clicking_the_review_toast_opens_the_pull_request() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.screen = Rect::new(0, 0, 100, 40);
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 209,
+        };
+        app.on_event(ServerEvent::ReviewRequested {
+            project: api,
+            pr,
+            repo: "site".into(),
+            title: "Fix lazy images".into(),
+        });
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        let View::Prs(v) = &app.view else {
+            panic!("the PR view opens")
+        };
+        assert_eq!(v.detail.as_ref().map(|d| d.pr), Some(pr));
+        assert!(
+            sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkPrSeen { .. }))
+        );
+    }
+
+    #[test]
+    fn the_repos_window_says_so_when_pull_requests_are_off() {
+        let (mut app, _) = app();
+        app.config.github.enabled = false;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('m')));
+        assert!(actions.is_empty());
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.message.as_deref(), Some("pull requests are off"));
+    }
+
+    #[test]
+    fn repos_of_another_project_leave_the_open_window_alone() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(api));
+        app.on_event(repos_event(ProjectId::new()));
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert_eq!(picker.items().len(), 2);
+        app.on_event(ServerEvent::Repos {
+            project: ProjectId::new(),
+            accounts: vec![],
+            repos: vec![],
+        });
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert_eq!(
+            picker.items().len(),
+            2,
+            "the other project's list is not shown"
+        );
+    }
+
+    #[test]
+    fn space_and_a_on_an_empty_repos_list_do_nothing() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        for c in [' ', 'a'] {
+            let actions = app.on_key(k(K::Char(c)));
+            assert!(sent(&actions).is_empty(), "{actions:?}");
+            assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+        }
+        assert_eq!(app.overlays.len(), 1);
+    }
+
+    #[test]
+    fn esc_in_the_account_list_returns_to_the_repos() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(s[0].project));
+        app.on_key(k(K::Char('a')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::RepoAccount { .. })
+        ));
+        let actions = app.on_key(k(K::Esc));
+        assert!(sent(&actions).is_empty());
+        assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+    }
+
+    #[test]
+    fn ctrl_q_closes_the_account_list_and_the_repos_together() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(s[0].project));
+        app.on_key(k(K::Char('a')));
+        assert_eq!(app.overlays.len(), 2);
+        app.on_key(ctrl('q'));
+        assert!(app.overlays.is_empty());
     }
 }
