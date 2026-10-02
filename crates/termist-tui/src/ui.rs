@@ -382,7 +382,6 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     let back = screen.map_or(0, |s| s.scroll.offset);
     let selection = app.selection.filter(|s| s.session == info.id);
     let state = match screen {
-        _ if let Some(n) = selection.and_then(|s| s.copied) => format!(" · copied {n} characters"),
         Some(s) if app.scrolling || back > 0 => {
             format!(" · ↑ {}/{}", s.scroll.offset, s.scroll.history)
         }
@@ -1249,7 +1248,6 @@ mod tests {
             session: id,
             anchor: (0, 0),
             head: (2, 0),
-            copied: Some(3),
         });
         let t = render(&mut app, 60, 16);
         let buf = t.backend().buffer();
@@ -1259,7 +1257,6 @@ mod tests {
         assert!(!buf[(x + 1, y)].modifier.contains(Modifier::REVERSED));
         assert!(buf[(x + 2, y)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(x + 3, y)].modifier.contains(Modifier::REVERSED));
-        assert!(row(&t, areas.pane.y).contains("copied 3 characters"));
     }
 
     #[test]

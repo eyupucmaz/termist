@@ -11,6 +11,7 @@ use crate::selection::Selection;
 use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
+use crate::toast::{self, Toast, ToastKind, Toasts};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -90,8 +91,12 @@ pub struct App {
     /// The pane shows the attached session's history: the scroll keys have the
     /// keyboard, on top of the grid or focus mode.
     pub scrolling: bool,
-    /// Pane text being dragged over with the mouse, or copied and still highlighted.
+    /// Pane text being dragged over with the mouse, highlighted until the next press.
     pub selection: Option<Selection>,
+    /// Notes in the top right corner.
+    pub toasts: Toasts,
+    /// The last press landed on a toast: its drag and release are not a selection.
+    toast_down: bool,
     pub cards_per_row: usize,
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
@@ -193,6 +198,8 @@ impl App {
             pane: (0, 0),
             pane_area: Rect::default(),
             selection: None,
+            toasts: Toasts::default(),
+            toast_down: false,
             scrolling: false,
             cards_per_row: 1,
             card_rows: 1,
@@ -240,7 +247,7 @@ impl App {
         app
     }
 
-    fn alert(&self, id: SessionId, waiting: bool) -> Option<Action> {
+    fn alert(&mut self, id: SessionId, waiting: bool) -> Option<Action> {
         let s = self.state.sessions.iter().find(|s| s.id == id)?;
         if s.archived {
             return None;
@@ -252,10 +259,20 @@ impl App {
             .find(|p| p.id == s.project)
             .map_or("", |p| p.name.as_str());
         let what = if waiting { "waits for you" } else { "is done" };
-        Some(Action::Alert(Alert {
-            text: format!("{} · {project} {what}", s.display_name()),
-            waiting,
-        }))
+        let text = format!("{} · {project} {what}", s.display_name());
+        if self.config.notify.toasts {
+            let status = s.status;
+            let (glyph, _, _) = crate::ui::status_style(&self.theme, status);
+            self.toasts.push(Toast {
+                text: format!("{glyph} {text}"),
+                kind: ToastKind::Agent {
+                    session: id,
+                    status,
+                },
+                until: Instant::now() + toast::AGENT_FOR,
+            });
+        }
+        Some(Action::Alert(Alert { text, waiting }))
     }
 
     /// A scene from the configured pool, never the one shown last, loaded.
@@ -309,6 +326,7 @@ impl App {
 
     /// Ends the splash after its second and brings up the idle screen when it is due.
     pub fn tick(&mut self, now: Instant) {
+        self.toasts.expire(now);
         match self.showing {
             Some(Showing {
                 kind: ShowKind::Splash,
@@ -336,9 +354,16 @@ impl App {
                 >= Duration::from_secs(minutes as u64 * 60)
     }
 
-    /// When the screen must be drawn again with nothing else happening: the next frame
-    /// of a moving scene, the end of the splash, or the idle screen.
+    /// When the screen must be drawn again with no input: a scene's next frame, the end
+    /// of the splash, the idle scene, a toast going away.
     pub fn next_wake(&self, now: Instant) -> Option<Instant> {
+        [self.scene_wake(now), self.toasts.next_expiry()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    fn scene_wake(&self, now: Instant) -> Option<Instant> {
         let frame = now + Duration::from_millis(1000 / scene_view::FPS);
         // A scene that does not fit is the wordmark, which does not move.
         let fits = |name: &str, spare_rows: u16, spare_cols: u16| {
@@ -715,19 +740,37 @@ impl App {
             MouseEventKind::ScrollDown => false,
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
+                if self.showing.is_none()
+                    && let Some(i) = self.toasts.hit(self.screen, ev.column, ev.row)
+                {
+                    self.toast_down = true;
+                    return match self.toasts.remove(i).map(|t| t.kind) {
+                        Some(ToastKind::Agent { session, .. }) => self.reveal(session),
+                        _ => vec![],
+                    };
+                }
+                self.toast_down = false;
                 if self.takes_mouse(ev) {
                     self.selection = self.attached.map(|id| Selection::new(id, self.in_pane(ev)));
                 }
                 return vec![];
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.toast_down {
+                    return vec![];
+                }
                 let at = self.in_pane(ev);
                 if let Some(selection) = &mut self.selection {
                     selection.head = at;
                 }
                 return vec![];
             }
-            MouseEventKind::Up(MouseButton::Left) => return self.copy_selection(),
+            MouseEventKind::Up(MouseButton::Left) => {
+                if std::mem::take(&mut self.toast_down) {
+                    return vec![];
+                }
+                return self.copy_selection();
+            }
             _ => return vec![],
         };
         if !self.takes_mouse(ev) {
@@ -776,7 +819,7 @@ impl App {
     /// The button came up: a drag puts its text on the clipboard and stays
     /// highlighted; a click without one leaves nothing selected.
     fn copy_selection(&mut self) -> Vec<Action> {
-        let Some(selection) = &mut self.selection else {
+        let Some(selection) = &self.selection else {
             return vec![];
         };
         let text = match self.screens.get(&selection.session) {
@@ -787,7 +830,12 @@ impl App {
             self.selection = None;
             return vec![];
         }
-        selection.copied = Some(text.chars().count());
+        let n = text.chars().count();
+        self.toasts.push(Toast {
+            text: format!("✓ copied {n} characters"),
+            kind: ToastKind::Copied,
+            until: Instant::now() + toast::COPIED_FOR,
+        });
         vec![Action::Copy(text)]
     }
 
@@ -1476,17 +1524,7 @@ impl App {
                 let Some(id) = next_in_attention(&reachable, from, c == '.') else {
                     return vec![];
                 };
-                let closed = waiting.iter().find(|s| s.id == id).map(|s| s.project);
-                match closed {
-                    Some(project) => {
-                        self.project_pending = Some(ProjectPending::Known {
-                            project,
-                            select: Some(id),
-                        });
-                        return vec![Action::Send(ClientRequest::OpenProject { project })];
-                    }
-                    None => self.select(id),
-                }
+                return self.reveal(id);
             }
             'h' => self.move_by(-1),
             'l' => self.move_by(1),
@@ -1495,6 +1533,23 @@ impl App {
             _ => {}
         }
         vec![]
+    }
+
+    /// Shows card `id`: opens its project first if it is closed.
+    fn reveal(&mut self, id: SessionId) -> Vec<Action> {
+        let Some(s) = self.state.sessions.iter().find(|s| s.id == id) else {
+            return vec![];
+        };
+        let project = s.project;
+        if self.open_projects().any(|p| p.id == project) {
+            self.select(id);
+            return vec![];
+        }
+        self.project_pending = Some(ProjectPending::Known {
+            project,
+            select: Some(id),
+        });
+        vec![Action::Send(ClientRequest::OpenProject { project })]
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -3470,7 +3525,93 @@ mod tests {
         let selection = app.selection.unwrap();
         assert_eq!(selection.session, id);
         assert_eq!((selection.anchor, selection.head), ((0, 2), (4, 2)));
-        assert_eq!(selection.copied, Some(5), "the highlight stays");
+    }
+
+    fn toast_texts(app: &App) -> Vec<String> {
+        app.toasts.items().map(|t| t.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_copy_shows_a_toast() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 5 characters"]);
+    }
+
+    #[test]
+    fn an_agent_that_waits_elsewhere_shows_a_toast() {
+        let (mut app, s) = app();
+        let other = s[2].id;
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let toasts: Vec<_> = app.toasts.items().cloned().collect();
+        assert_eq!(toasts.len(), 1);
+        assert!(
+            toasts[0].text.ends_with("waits for you"),
+            "{}",
+            toasts[0].text
+        );
+        assert_eq!(
+            toasts[0].kind,
+            ToastKind::Agent {
+                session: other,
+                status: AgentStatus::NeedsFeedback
+            }
+        );
+    }
+
+    #[test]
+    fn the_card_you_type_into_shows_no_toast() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let mut waiting = s[0].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn turning_toasts_off_keeps_the_copy_toast() {
+        let (mut app, s) = app();
+        app.config.notify.toasts = false;
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        assert!(app.toasts.is_empty(), "no agent toast");
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 5 characters"]);
+    }
+
+    #[test]
+    fn a_click_goes_to_the_toast_under_it() {
+        let (mut app, s) = app();
+        app.screen = Rect::new(0, 0, 100, 40);
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        mouse(&mut app, MouseEventKind::Up(Left), r.x + 1, r.y + 1);
+        assert!(copies(&actions).is_empty());
+        assert_eq!(app.selected, Some(s[2].id), "the card it was about");
+        assert!(app.toasts.is_empty(), "the toast goes");
+        assert_eq!(app.selection, None, "no selection starts under a toast");
+    }
+
+    #[test]
+    fn toasts_go_by_themselves() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        let until = app.toasts.next_expiry().unwrap();
+        assert!(app.next_wake(Instant::now()).is_some_and(|w| w <= until));
+        app.tick(until);
+        assert!(app.toasts.is_empty());
     }
 
     #[test]
