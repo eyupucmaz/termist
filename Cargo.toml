@@ -25,6 +25,7 @@ insta = "1"
 interprocess = { version = "2.4", features = ["tokio"] }
 libc = "0.2"
 portable-pty = "0.9"
+pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +41,7 @@ toml_edit = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 

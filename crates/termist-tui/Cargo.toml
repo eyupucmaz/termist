@@ -11,10 +11,12 @@ termist-core.workspace = true
 termist-platform.workspace = true
 termist-scenes.workspace = true
 anyhow.workspace = true
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
