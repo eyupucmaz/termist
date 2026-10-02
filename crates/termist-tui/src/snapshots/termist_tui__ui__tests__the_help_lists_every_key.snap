@@ -4,7 +4,7 @@ expression: text
 ---
 " termist   orbit-api ◆1✓1                                                       "
 "┏┌ help ──────────────────────────────────────────────────────────────────────┐ "
-"┃│termist <version> · default settings                                     │ "
+"┃│termist <version> · default settings │ "
 "┃│                                                                            │ "
 "┗│Grid                                                                        │ "
 "┌│  p            new task: prompt, CLI, model                                 │┐"

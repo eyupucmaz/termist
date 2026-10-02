@@ -1334,11 +1334,21 @@ mod tests {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
         app.on_key(key(K::Char('?')));
-        // The version is left out: it changes with every release.
+        // The version is left out: it changes with every release, and so does its
+        // length, so the padding after it goes too.
         let text = render(&mut app, 80, 40)
             .backend()
             .to_string()
-            .replace(env!("CARGO_PKG_VERSION"), "<version>");
+            .replace(env!("CARGO_PKG_VERSION"), "<version>")
+            .lines()
+            .map(|line| match line.rfind('│') {
+                Some(edge) if line.contains("<version>") => {
+                    format!("{} {}", line[..edge].trim_end(), &line[edge..])
+                }
+                _ => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         insta::assert_snapshot!(text);
     }
 

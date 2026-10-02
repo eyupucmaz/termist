@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-10-02
+
+termist leaves beta. Everything the betas brought, themes, Istanbul scenes, sounds, notifications,
+settings and scrolling back, is now the first full release, and text in the pane can be copied with the
+mouse.
 
 ### Added
 
@@ -9,6 +13,11 @@
   title says how many characters were copied. termist writes the system clipboard itself, so this works
   inside tmux too, and sends OSC 52 for terminals reached over ssh. `Shift`+drag still gives you your
   terminal's own selection.
+
+### Updating
+
+`termist update`, then quit termist (`q`) and start it again. The daemon did not change, so your
+sessions keep running; no `termist kill` is needed.
 
 ## 0.1.0-beta.4 - 2026-09-30
 

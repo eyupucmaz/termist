@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.0--beta.4-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.0-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,9 +28,9 @@
 </div>
 
 > [!NOTE]
-> **termist is in beta.** The beta adds themes, Istanbul scenes, sounds, notifications and settings
-> to the first public build; `v0.1.0-beta.4` is the newest. It is used every day by its author, but expect rough edges, and
-> please [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
+> **termist 0.1.0 is out**, the first full release: themes, Istanbul scenes, sounds, notifications,
+> settings, scrolling back and copying from the pane. It is used every day by its author; please
+> [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
 
 ## Why termist
 
@@ -47,7 +47,7 @@
 - **Your repositories stay yours.** termist runs the agent CLIs you already have and never writes into
   your projects or your agents' own config.
 
-## New in the beta
+## Its look and its voice
 
 <img src="docs/look.gif" alt="The settings screen open over three agent cards. The theme changes from Üsküdar, dark, to Moda, light, to the terminal's own colours and back to Moda, and the whole screen follows at once. Then the help opens with the Galata Tower at dusk above the list of keys.">
 
