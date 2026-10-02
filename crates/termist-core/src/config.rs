@@ -6,10 +6,6 @@ use crate::model::Harness;
 use std::collections::BTreeMap;
 use toml::{Table, Value};
 
-/// The built-in themes of this version, in the order the settings screen offers them.
-pub const THEMES: [&str; 3] = ["uskudar", "moda", "terminal"];
-/// Themes planned for a later version: named in the docs, not drawn yet.
-const LATER_THEMES: [&str; 4] = ["aksaray", "kadikoy", "besiktas", "balat"];
 pub const SCENES: [&str; 6] = [
     "galata",
     "kiz-kulesi",
@@ -200,6 +196,7 @@ pub struct KeysConfig {
 pub struct Config {
     pub prefix: String,
     pub pane_position: PanePosition,
+    /// A theme id; the TUI's theme list checks it.
     pub theme: String,
     pub colors: ColorDepth,
     pub animations: bool,
@@ -321,7 +318,10 @@ impl Reader<'_> {
                     PanePosition::id,
                 )
                 .unwrap_or(d.pane_position),
-            theme: self.theme(&mut t).unwrap_or(d.theme),
+            theme: self
+                .string(&mut t, "", "theme")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(d.theme),
             colors: self
                 .choice(&mut t, "", "colors", &ColorDepth::ALL, ColorDepth::id)
                 .unwrap_or(d.colors),
@@ -485,23 +485,6 @@ impl Reader<'_> {
             }
         }
         out
-    }
-
-    fn theme(&mut self, t: &mut Table) -> Option<String> {
-        let theme = self.string(t, "", "theme")?;
-        if THEMES.contains(&theme.as_str()) {
-            return Some(theme);
-        }
-        let message = if LATER_THEMES.contains(&theme.as_str()) {
-            format!(
-                "\"{theme}\" is not in this version yet; themes: {}",
-                THEMES.join(", ")
-            )
-        } else {
-            format!("unknown theme \"{theme}\"; themes: {}", THEMES.join(", "))
-        };
-        self.problem("theme", message);
-        None
     }
 
     fn table(&mut self, t: &mut Table, parent: &str, key: &str) -> Option<Table> {
@@ -756,19 +739,14 @@ pool = ["galata", "eminonu"]
 default = "aider"
 "#,
         );
-        assert_eq!(c.theme, "uskudar");
+        assert_eq!(c.theme, "kadikoy", "the TUI checks themes");
         assert!(c.animations);
         assert_eq!(c.pane_position, PanePosition::Auto);
         assert_eq!(c.colors, ColorDepth::Auto);
         assert_eq!(c.scenes.idle_minutes, 10);
         assert_eq!(c.scenes.pool, ["galata"], "the known scene stays");
         assert_eq!(c.agents.default, Harness::Claude);
-        assert_eq!(problems.len(), 7, "{problems:#?}");
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.starts_with("theme: \"kadikoy\" is not in this version yet"))
-        );
+        assert_eq!(problems.len(), 6, "{problems:#?}");
         assert!(
             problems
                 .iter()

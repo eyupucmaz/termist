@@ -94,6 +94,11 @@ impl Paths {
         self.config_dir.join("config.local.toml")
     }
 
+    /// Themes of the user's own, one `<id>.toml` each.
+    pub fn themes_dir(&self) -> PathBuf {
+        self.config_dir.join("themes")
+    }
+
     /// Marker files for one-time notices the TUI has already shown.
     pub fn notices_dir(&self) -> PathBuf {
         self.data_dir.join("notices")

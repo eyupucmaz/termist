@@ -93,9 +93,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(&tmp);
         write(&p, "theme = \"moda\"\n").unwrap();
-        let refused = import(&p, "theme = \"nope\"\n", |_| vec![])
-            .unwrap()
-            .unwrap_err();
+        let refused = import(&p, "theme = 3\n", |_| vec![]).unwrap().unwrap_err();
         assert_eq!(refused[0].path, "theme");
         let more = |_: &Config| {
             vec![Problem {

@@ -3,7 +3,7 @@ use crate::browse::{self, Listing};
 use crate::keys::Keymap;
 use crate::settings;
 use crate::sound::Recording;
-use crate::theme::Theme;
+use crate::theme::{Theme, Themes};
 use crate::ui;
 use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
@@ -113,10 +113,14 @@ fn app_from_config(paths: &Paths, inside_tmux: bool) -> App {
         ColorDepth::Auto => detected,
         depth => depth,
     };
-    let theme = Theme::named(&config.theme, depth);
+    let (themes, theme_problems) = Themes::load(&paths.themes_dir());
+    problems.extend(theme_problems);
+    problems.extend(themes.check(&config.theme));
+    let theme = themes.get(&config.theme, depth);
     let (keymap, key_problems) = Keymap::from_config(&config.keys, &config.prefix);
     problems.extend(key_problems);
     let mut app = App::with_config(config, theme, keymap);
+    app.themes = themes;
     app.config_path = Some(paths.config_path());
     app.detected_depth = detected;
     app.local_settings = std::fs::read_to_string(paths.config_local_path())
@@ -165,7 +169,7 @@ const TMUX_NOTICE: &str =
 
 fn startup_message(problems: &[Problem], theme: &Theme) -> Option<String> {
     match problems {
-        [] => theme.stands_in_for.map(|wanted| {
+        [] => theme.stands_in_for.as_ref().map(|wanted| {
             format!("{wanted} needs 256 colours; showing the terminal's own (colors = \"256\" if it has them)")
         }),
         [one] => Some(format!("config: {one} · termist config check")),

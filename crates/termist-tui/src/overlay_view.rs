@@ -436,7 +436,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             "theme",
                             format!(
                                 "‹ {} ›{}",
-                                Theme::name_of(&app.config.theme),
+                                app.themes.name_of(&app.config.theme),
                                 local("theme")
                             ),
                         ),

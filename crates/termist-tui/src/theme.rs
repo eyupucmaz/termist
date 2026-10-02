@@ -4,27 +4,26 @@
 //! `dim` text, the `accent` of the selected card, one colour per agent status, and the
 //! 16 ANSI colours agents print with. Status colours keep their meaning in every theme.
 use ratatui::style::{Color, Modifier, Style};
-use termist_core::config::ColorDepth;
+use std::path::{Path, PathBuf};
+use termist_core::config::{ColorDepth, Problem};
 use termist_core::{AgentStatus, TermColors};
 use toml::{Table, Value};
 
 pub type Rgb = (u8, u8, u8);
 
-const SOURCES: [(&str, &str); 3] = [
-    (
-        "uskudar",
-        include_str!("../../../assets/themes/uskudar.toml"),
-    ),
+const USKUDAR: &str = include_str!("../../../assets/themes/uskudar.toml");
+const TERMINAL: &str = include_str!("../../../assets/themes/terminal.toml");
+
+/// The built-in themes, in the order the settings go through them.
+const BUILTIN: [(&str, &str); 3] = [
+    ("uskudar", USKUDAR),
     ("moda", include_str!("../../../assets/themes/moda.toml")),
-    (
-        "terminal",
-        include_str!("../../../assets/themes/terminal.toml"),
-    ),
+    ("terminal", TERMINAL),
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
-    pub id: &'static str,
+    pub id: String,
     pub name: String,
     /// The whole screen: `Style::default()` when the theme paints nothing.
     pub base: Style,
@@ -49,37 +48,15 @@ pub struct Theme {
     pub agent_colors: Option<TermColors>,
     /// The theme asked for could not be drawn with this terminal's colours, and this
     /// one stands in for it.
-    pub stands_in_for: Option<&'static str>,
+    pub stands_in_for: Option<String>,
     /// The colours this terminal draws.
     pub depth: ColorDepth,
 }
 
 impl Theme {
-    /// The built-in theme `id` drawn at `depth` (`Auto` means 24-bit). A painting
-    /// theme needs at least 256 colours; with 16 the terminal theme stands in.
-    /// An unknown id is the terminal theme.
+    /// The built-in theme `id` drawn at `depth`; an unknown one is Üsküdar.
     pub fn named(id: &str, depth: ColorDepth) -> Theme {
-        let (id, source) = SOURCES
-            .iter()
-            .copied()
-            .find(|(i, _)| *i == id)
-            .unwrap_or(SOURCES[2]);
-        let spec = Spec::parse(source).unwrap_or_else(|e| panic!("theme {id}: {e}"));
-        if depth == ColorDepth::Ansi16 && spec.paints() {
-            let mut theme = Theme::named("terminal", depth);
-            theme.stands_in_for = Some(id);
-            return theme;
-        }
-        spec.resolve(id, depth)
-    }
-
-    /// The name a built-in theme shows, `id` itself for an unknown one.
-    pub fn name_of(id: &str) -> String {
-        SOURCES
-            .iter()
-            .find(|(i, _)| *i == id)
-            .and_then(|(_, source)| Spec::parse(source).ok())
-            .map_or_else(|| id.to_string(), |spec| spec.name)
+        Themes::builtin().get(id, depth)
     }
 
     /// The host terminal's own colours, as today: the theme tests and a bare `App` use.
@@ -177,6 +154,10 @@ struct Spec {
 impl Spec {
     fn parse(source: &str) -> Result<Spec, String> {
         let t: Table = source.parse().map_err(|e: toml::de::Error| e.to_string())?;
+        Spec::from_table(&t)
+    }
+
+    fn from_table(t: &Table) -> Result<Spec, String> {
         let name = t
             .get("name")
             .and_then(Value::as_str)
@@ -246,11 +227,23 @@ impl Spec {
         Ok(spec)
     }
 
+    /// A user's theme file: what it leaves out comes from Üsküdar, and without a name
+    /// it is called by its id.
+    fn user(id: &str, text: &str) -> Result<Spec, String> {
+        let mine: Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| e.message().to_string())?;
+        let mut table: Table = USKUDAR.parse().expect("Üsküdar is valid");
+        table.insert("name".into(), Value::String(id.into()));
+        merge(&mut table, mine);
+        Spec::from_table(&table)
+    }
+
     fn paints(&self) -> bool {
         self.bg.is_some()
     }
 
-    fn resolve(&self, id: &'static str, depth: ColorDepth) -> Theme {
+    fn resolve(&self, id: &str, depth: ColorDepth) -> Theme {
         let color = |p: Paint| match p {
             Paint::Named(c) => c,
             Paint::Rgb(rgb) => fit(rgb, depth),
@@ -286,7 +279,7 @@ impl Spec {
             _ => None,
         };
         Theme {
-            id,
+            id: id.to_string(),
             name: self.name.clone(),
             base,
             dim: style(self.dim),
@@ -400,12 +393,138 @@ pub fn nearest_256((r, g, b): Rgb) -> u8 {
     }
 }
 
+/// `over`'s values win; tables merge key by key.
+fn merge(base: &mut Table, over: Table) {
+    for (key, value) in over {
+        match (base.get_mut(&key), value) {
+            (Some(Value::Table(b)), Value::Table(o)) => merge(b, o),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+/// A theme as written: built in, or a file in the themes folder.
+#[derive(Clone, Debug, PartialEq)]
+struct Source {
+    id: String,
+    spec: Spec,
+}
+
+/// Every theme there is to draw, in the order the settings go through them: the
+/// built-in ones, then the user's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Themes {
+    sources: Vec<Source>,
+}
+
+impl Default for Themes {
+    fn default() -> Self {
+        Themes::builtin()
+    }
+}
+
+impl Themes {
+    pub fn builtin() -> Themes {
+        let sources = BUILTIN
+            .iter()
+            .map(|(id, text)| Source {
+                id: id.to_string(),
+                spec: Spec::parse(text).unwrap_or_else(|e| panic!("theme {id}: {e}")),
+            })
+            .collect();
+        Themes { sources }
+    }
+
+    /// The built-in themes and the `*.toml` files in `dir`. A file's id is its name; it
+    /// takes the place of a built-in theme of that id. A file that cannot be used is
+    /// left out and reported.
+    pub fn load(dir: &Path) -> (Themes, Vec<Problem>) {
+        let mut themes = Themes::builtin();
+        let mut problems = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return (themes, problems);
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        files.sort();
+        for path in files {
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+                continue;
+            };
+            let spec = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| Spec::user(&id, &text));
+            match spec {
+                Ok(spec) => themes.put(Source { id, spec }),
+                Err(e) => problems.push(Problem {
+                    path: path.display().to_string(),
+                    message: format!("theme not used: {e}"),
+                }),
+            }
+        }
+        (themes, problems)
+    }
+
+    fn put(&mut self, source: Source) {
+        match self.sources.iter_mut().find(|s| s.id == source.id) {
+            Some(s) => *s = source,
+            None => self.sources.push(source),
+        }
+    }
+
+    fn find(&self, id: &str) -> Option<&Source> {
+        self.sources.iter().find(|s| s.id == id)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.sources.iter().map(|s| s.id.as_str())
+    }
+
+    /// The name theme `id` shows; `id` itself for an unknown one.
+    pub fn name_of(&self, id: &str) -> String {
+        self.find(id)
+            .map_or_else(|| id.to_string(), |s| s.spec.name.clone())
+    }
+
+    /// `theme = "<id>"` naming a theme that is not there.
+    pub fn check(&self, id: &str) -> Option<Problem> {
+        self.find(id).is_none().then(|| Problem {
+            path: "theme".into(),
+            message: format!(
+                "unknown theme \"{id}\"; themes: {}",
+                self.ids().collect::<Vec<_>>().join(", ")
+            ),
+        })
+    }
+
+    /// Theme `id` drawn at `depth` (`Auto` means 24-bit); an unknown one is Üsküdar. A
+    /// painting theme needs 256 colours at least; with 16 the terminal theme stands in.
+    pub fn get(&self, id: &str, depth: ColorDepth) -> Theme {
+        let source = self
+            .find(id)
+            .or_else(|| self.find("uskudar"))
+            .expect("Üsküdar is built in");
+        if depth == ColorDepth::Ansi16 && source.spec.paints() {
+            // The built-in one: a user's terminal.toml might paint.
+            let terminal = Spec::parse(TERMINAL).expect("the terminal theme is valid");
+            let mut theme = terminal.resolve("terminal", depth);
+            theme.stands_in_for = Some(source.id.clone());
+            return theme;
+        }
+        source.spec.resolve(&source.id, depth)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn spec(id: &str) -> Spec {
-        let source = SOURCES.iter().find(|(i, _)| *i == id).unwrap().1;
+        let source = BUILTIN.iter().find(|(i, _)| *i == id).unwrap().1;
         Spec::parse(source).unwrap()
     }
 
@@ -435,7 +554,7 @@ mod tests {
 
     #[test]
     fn every_built_in_theme_reads() {
-        for (id, _) in SOURCES {
+        for (id, _) in BUILTIN {
             let theme = Theme::named(id, ColorDepth::TrueColor);
             assert_eq!(theme.id, id);
             assert!(!theme.name.is_empty());
@@ -562,28 +681,106 @@ mod tests {
     fn with_16_colours_the_terminal_theme_stands_in() {
         let t = Theme::named("moda", ColorDepth::Ansi16);
         assert_eq!(t.id, "terminal");
-        assert_eq!(t.stands_in_for, Some("moda"));
+        assert_eq!(t.stands_in_for.as_deref(), Some("moda"));
         assert_eq!(
             Theme::named("terminal", ColorDepth::Ansi16).stands_in_for,
             None
         );
     }
 
+    fn user_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        dir
+    }
+
     #[test]
-    fn an_unknown_id_is_the_terminal_theme() {
-        assert_eq!(Theme::named("nope", ColorDepth::TrueColor).id, "terminal");
+    fn a_user_theme_is_loaded_and_fills_in_from_uskudar() {
+        let dir = user_dir(&[(
+            "deniz.toml",
+            "name = \"Deniz\"\n[ui]\naccent = \"#ff0000\"\n",
+        )]);
+        let (themes, problems) = Themes::load(dir.path());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(themes.ids().last(), Some("deniz"));
+        let t = themes.get("deniz", ColorDepth::TrueColor);
+        assert_eq!(t.id, "deniz");
+        assert_eq!(t.name, "Deniz");
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0xff, 0, 0)));
+        assert_eq!(
+            t.base.bg,
+            Some(Color::Rgb(0x0f, 0x1d, 0x2e)),
+            "Üsküdar's ground"
+        );
+    }
+
+    #[test]
+    fn a_user_theme_without_a_name_is_named_after_its_file() {
+        let dir = user_dir(&[("gece.toml", "[ui]\nfg = \"#ffffff\"\n")]);
+        let (themes, _) = Themes::load(dir.path());
+        assert_eq!(themes.name_of("gece"), "gece");
+    }
+
+    #[test]
+    fn a_user_file_takes_the_place_of_a_builtin() {
+        let dir = user_dir(&[("moda.toml", "name = \"My Moda\"\n")]);
+        let (themes, _) = Themes::load(dir.path());
+        assert_eq!(themes.name_of("moda"), "My Moda");
+        let builtin: Vec<String> = Themes::builtin().ids().map(String::from).collect();
+        let loaded: Vec<String> = themes.ids().map(String::from).collect();
+        assert_eq!(loaded, builtin, "same place, no new entry");
+    }
+
+    #[test]
+    fn a_broken_user_theme_is_skipped_and_reported() {
+        let dir = user_dir(&[
+            ("bad.toml", "not = [valid"),
+            ("red.toml", "[ui]\nfg = \"red-ish\"\n"),
+            ("notes.txt", "not a theme"),
+        ]);
+        let (themes, problems) = Themes::load(dir.path());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems
+                .iter()
+                .all(|p| p.message.starts_with("theme not used"))
+        );
+        assert!(problems.iter().any(|p| p.path.ends_with("bad.toml")));
+        assert!(
+            !themes
+                .ids()
+                .any(|id| id == "bad" || id == "red" || id == "notes")
+        );
+    }
+
+    #[test]
+    fn no_themes_folder_is_fine() {
+        let (themes, problems) = Themes::load(Path::new("/no/such/folder"));
+        assert!(problems.is_empty());
+        assert_eq!(themes, Themes::builtin());
+    }
+
+    #[test]
+    fn an_unknown_theme_falls_back_and_is_reported() {
+        let themes = Themes::builtin();
+        assert_eq!(themes.get("silinmis", ColorDepth::TrueColor).id, "uskudar");
+        let problem = themes.check("silinmis").unwrap();
+        assert_eq!(problem.path, "theme");
+        assert!(problem.message.starts_with("unknown theme \"silinmis\""));
+        assert_eq!(themes.check("moda"), None);
     }
 
     #[test]
     fn a_broken_theme_file_says_what_is_wrong() {
-        let src = SOURCES[0].1.replace("dim = \"#93a4b8\"", "dim = \"#12\"");
+        let src = USKUDAR.replace("dim = \"#93a4b8\"", "dim = \"#12\"");
         let err = Spec::parse(&src).unwrap_err();
         assert!(err.contains("ui.dim"), "{err}");
         let err = Spec::parse("name = \"x\"\n").unwrap_err();
         assert!(err.contains("status.fresh"), "{err}");
         // A Windows checkout may have CRLF line ends.
-        let src = SOURCES[0]
-            .1
+        let src = USKUDAR
             .replace("\r\n", "\n")
             .replace("\"#ffffff\",\n]", "]");
         let err = Spec::parse(&src).unwrap_err();

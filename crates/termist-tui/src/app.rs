@@ -10,7 +10,7 @@ use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
-use crate::theme::Theme;
+use crate::theme::{Theme, Themes};
 use crate::toast::{self, Toast, ToastKind, Toasts};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -19,7 +19,7 @@ use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use termist_core::config::{ColorDepth, Config, PanePosition, Sound, THEMES};
+use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -127,6 +127,8 @@ pub struct App {
     /// Where config.toml is, for the help screen; `None` in tests.
     pub config_path: Option<PathBuf>,
     pub theme: Theme,
+    /// Every theme there is: the built-in ones and the user's own.
+    pub themes: Themes,
     pub keymap: Keymap,
     /// What `colors = "auto"` means in this terminal.
     pub detected_depth: ColorDepth,
@@ -231,6 +233,7 @@ impl App {
             config,
             config_path: None,
             theme,
+            themes: Themes::builtin(),
             keymap,
             detected_depth: ColorDepth::TrueColor,
             host_colors: None,
@@ -1712,7 +1715,7 @@ impl App {
             ColorDepth::Auto => self.detected_depth,
             depth => depth,
         };
-        self.theme = Theme::named(&self.config.theme, depth);
+        self.theme = self.themes.get(&self.config.theme, depth);
         vec![Action::Send(ClientRequest::SetColors(self.agent_colors()))]
     }
 
@@ -1849,11 +1852,12 @@ impl App {
         }
         let value = match row {
             SettingRow::Theme => {
-                let at = THEMES
+                let ids: Vec<String> = self.themes.ids().map(String::from).collect();
+                let at = ids
                     .iter()
                     .position(|t| *t == self.config.theme)
                     .unwrap_or(0);
-                self.config.theme = THEMES[next(THEMES.len(), at)].to_string();
+                self.config.theme = ids[next(ids.len(), at)].clone();
                 self.config.theme.clone()
             }
             SettingRow::Pane => {
@@ -1884,7 +1888,7 @@ impl App {
         let running_agents = self.state.sessions.iter().any(|s| {
             matches!(s.kind, SessionKind::Agent { .. }) && s.status.is_live() && !s.archived
         });
-        if let Some(wanted) = self.theme.stands_in_for {
+        if let Some(wanted) = self.theme.stands_in_for.clone() {
             self.settings_note(format!("{wanted} needs 256 colours; this terminal has 16"));
         } else if running_agents {
             self.settings_note("running agents keep the colours they started with");
@@ -4603,6 +4607,21 @@ mod tests {
             Some(Overlay::KeyCapture(c)) => c.note.clone(),
             _ => None,
         }
+    }
+
+    #[test]
+    fn the_theme_row_goes_through_every_theme() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let ids: Vec<String> = app.themes.ids().map(String::from).collect();
+        let mut seen = vec![app.config.theme.clone()];
+        for _ in 1..ids.len() {
+            app.on_key(k(K::Right));
+            seen.push(app.config.theme.clone());
+        }
+        assert_eq!(seen, ids);
+        app.on_key(k(K::Right));
+        assert_eq!(app.config.theme, ids[0], "round again");
     }
 
     #[test]
