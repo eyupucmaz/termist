@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-10-03
+
+A project's pull requests in termist: `v` lists them repo by repo, with the reviews asked of you,
+checks and conflicts, and opens one whole with its conversation and line threads.
 
 ### Added
 

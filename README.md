@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.1-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.2-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,9 +28,9 @@
 </div>
 
 > [!NOTE]
-> **termist 0.1.1 is out**: toasts in the top right, a status line, each CLI's own model list, thirteen
-> new themes and a second sound, on top of 0.1.0's themes, Istanbul scenes, notifications, settings,
-> scrolling back and copying from the pane. It is used every day by its author; please
+> **termist 0.1.2 is out**: a project's pull requests with `v`, read through the GitHub CLI, repo by
+> repo for a folder of repos, with the reviews asked of you, checks and line threads. On top of 0.1.1's
+> toasts, status line, model lists and themes, and 0.1.0's scenes, sounds, settings and scrolling back. It is used every day by its author; please
 > [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
 
 ## Why termist
