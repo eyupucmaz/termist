@@ -2,13 +2,15 @@
 //! choice, in SQLite. Status is not stored: a stored session has no process in a new
 //! daemon, so it loads as Disconnected.
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use termist_core::github::RepoId;
 use termist_core::{
     AgentStatus, Harness, LaunchOptions, ProjectId, ProjectInfo, SessionId, SessionInfo,
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -56,6 +58,41 @@ CREATE TABLE ui_state (
 );
 PRAGMA user_version = 2;
 ";
+
+/// v2 brought to v3: the GitHub repos found in projects and the pull requests seen.
+const MIGRATE_V3: &str = "
+CREATE TABLE gh_repo (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    visible INTEGER NOT NULL DEFAULT 1,
+    account_override TEXT,
+    UNIQUE (project_id, path)
+);
+CREATE TABLE pr_seen (
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    seen_updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner, name, number)
+);
+PRAGMA user_version = 3;
+";
+
+/// A GitHub repo found in a project, with the user's choices for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredRepo {
+    pub id: RepoId,
+    pub project: ProjectId,
+    pub path: PathBuf,
+    pub owner: String,
+    pub name: String,
+    pub visible: bool,
+    /// Set by the user; `None` picks the account with the most access.
+    pub account: Option<String>,
+}
 
 pub struct Store {
     conn: Connection,
@@ -184,9 +221,14 @@ impl Store {
         match version {
             0 => {
                 conn.execute_batch(SCHEMA_V1)?;
-                Self::upgrade_to_v2(&mut conn)?;
+                Self::upgrade(&mut conn, MIGRATE_V2)?;
+                Self::upgrade(&mut conn, MIGRATE_V3)?;
             }
-            1 => Self::upgrade_to_v2(&mut conn)?,
+            1 => {
+                Self::upgrade(&mut conn, MIGRATE_V2)?;
+                Self::upgrade(&mut conn, MIGRATE_V3)?;
+            }
+            2 => Self::upgrade(&mut conn, MIGRATE_V3)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
@@ -199,6 +241,10 @@ impl Store {
         conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
         conn.prepare("SELECT id, prompt, created_ms FROM prompt_history LIMIT 0")?;
         conn.prepare("SELECT key, value FROM ui_state LIMIT 0")?;
+        conn.prepare(
+            "SELECT id, project_id, path, owner, name, visible, account_override FROM gh_repo LIMIT 0",
+        )?;
+        conn.prepare("SELECT owner, name, number, seen_updated_at FROM pr_seen LIMIT 0")?;
         Ok(Store {
             conn,
             not_saved: None,
@@ -210,9 +256,10 @@ impl Store {
         self.not_saved.as_deref()
     }
 
-    fn upgrade_to_v2(conn: &mut Connection) -> anyhow::Result<()> {
+    /// Runs one migration in a transaction: a failure leaves the file as it was.
+    fn upgrade(conn: &mut Connection, sql: &str) -> anyhow::Result<()> {
         let tx = conn.transaction()?;
-        tx.execute_batch(MIGRATE_V2)?;
+        tx.execute_batch(sql)?;
         tx.commit()?;
         Ok(())
     }
@@ -432,6 +479,108 @@ impl Store {
             &serde_json::to_string(&models)?,
         )
     }
+
+    /// Records a repo found in `project`; one found before keeps its id and choices.
+    pub fn upsert_repo(
+        &self,
+        project: ProjectId,
+        path: &Path,
+        owner: &str,
+        name: &str,
+    ) -> anyhow::Result<StoredRepo> {
+        self.conn.execute(
+            "INSERT INTO gh_repo (project_id, path, owner, name) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, path) DO UPDATE SET owner = excluded.owner, name = excluded.name",
+            params![project.to_string(), path.to_string_lossy(), owner, name],
+        )?;
+        let repo = self.conn.query_row(
+            "SELECT id, project_id, path, owner, name, visible, account_override FROM gh_repo
+             WHERE project_id = ?1 AND path = ?2",
+            params![project.to_string(), path.to_string_lossy()],
+            stored_repo,
+        )?;
+        repo.ok_or_else(|| anyhow::anyhow!("a stored repo has a bad project id"))
+    }
+
+    pub fn repos(&self) -> anyhow::Result<Vec<StoredRepo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, path, owner, name, visible, account_override FROM gh_repo ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], stored_repo)?;
+        let mut repos = Vec::new();
+        for row in rows {
+            if let Some(repo) = row? {
+                repos.push(repo);
+            }
+        }
+        Ok(repos)
+    }
+
+    pub fn set_repo_visible(&self, id: RepoId, visible: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE gh_repo SET visible = ?2 WHERE id = ?1",
+            params![id.0, visible],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_repo_account(&self, id: RepoId, account: Option<&str>) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE gh_repo SET account_override = ?2 WHERE id = ?1",
+            params![id.0, account],
+        )?;
+        Ok(())
+    }
+
+    /// When each pull request was last opened, as `updatedAt` stood then.
+    pub fn seen(&self) -> anyhow::Result<HashMap<(String, String, u32), String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT owner, name, number, seen_updated_at FROM pr_seen")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                (
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u32>(2)?,
+                ),
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn mark_seen(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u32,
+        updated_at: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO pr_seen (owner, name, number, seen_updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner, name, number) DO UPDATE SET seen_updated_at = excluded.seen_updated_at",
+            params![owner, name, number, updated_at],
+        )?;
+        Ok(())
+    }
+}
+
+/// A `gh_repo` row; `None` when its project id is not a uuid.
+fn stored_repo(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<StoredRepo>> {
+    let project: String = r.get(1)?;
+    let Ok(project) = project.parse::<ProjectId>() else {
+        return Ok(None);
+    };
+    Ok(Some(StoredRepo {
+        id: RepoId(r.get(0)?),
+        project,
+        path: PathBuf::from(r.get::<_, String>(2)?),
+        owner: r.get(3)?,
+        name: r.get(4)?,
+        visible: r.get(5)?,
+        account: r.get(6)?,
+    }))
 }
 
 fn recent_models_key(harness: Harness) -> String {
@@ -744,7 +893,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert!(
             moved_aside(tmp.path()).is_empty(),
             "nothing was moved aside"
@@ -881,5 +1030,81 @@ mod tests {
         let recent = store.recent_models(Harness::Codex);
         assert_eq!(recent.len(), RECENT_MODELS_MAX);
         assert_eq!(recent[0], format!("m{}", RECENT_MODELS_MAX + 2));
+    }
+
+    #[test]
+    fn repos_keep_their_choices_when_found_again() {
+        let store = Store::open_in_memory();
+        let p = project("/work");
+        store.upsert_project(&p).unwrap();
+        let site = store
+            .upsert_repo(p.id, Path::new("/work/site"), "acme", "site")
+            .unwrap();
+        assert!(site.visible);
+        assert_eq!(site.account, None);
+        store.set_repo_visible(site.id, false).unwrap();
+        store.set_repo_account(site.id, Some("alice-work")).unwrap();
+        let again = store
+            .upsert_repo(p.id, Path::new("/work/site"), "acme", "site-renamed")
+            .unwrap();
+        assert_eq!(again.id, site.id);
+        assert!(!again.visible);
+        assert_eq!(again.account.as_deref(), Some("alice-work"));
+        assert_eq!(again.name, "site-renamed");
+        store.set_repo_account(site.id, None).unwrap();
+        assert_eq!(
+            store.repos().unwrap(),
+            [StoredRepo {
+                account: None,
+                ..again
+            }]
+        );
+    }
+
+    #[test]
+    fn seen_marks_are_kept_per_pull_request() {
+        let store = Store::open_in_memory();
+        store
+            .mark_seen("acme", "site", 212, "2026-10-02T10:00:00Z")
+            .unwrap();
+        store
+            .mark_seen("acme", "site", 212, "2026-10-02T11:00:00Z")
+            .unwrap();
+        store
+            .mark_seen("acme", "admin", 88, "2026-10-01T09:00:00Z")
+            .unwrap();
+        let seen = store.seen().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[&("acme".to_string(), "site".to_string(), 212)],
+            "2026-10-02T11:00:00Z"
+        );
+    }
+
+    #[test]
+    fn a_v2_database_upgrades_to_v3_and_keeps_its_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(MIGRATE_V2).unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_ms, open) VALUES (?1, 'api', '/api', 1, 1)",
+                params![ProjectId::new().to_string()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let (projects, _) = store.load().unwrap();
+        assert_eq!(projects.len(), 1);
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        store
+            .upsert_repo(projects[0].id, Path::new("/api"), "acme", "api")
+            .unwrap();
     }
 }
