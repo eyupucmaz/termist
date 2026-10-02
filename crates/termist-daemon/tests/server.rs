@@ -1673,3 +1673,119 @@ async fn the_codex_catalog_comes_from_the_cli() {
     assert_eq!(catalog[0].label, "GPT-A");
     assert_eq!(catalog[0].efforts, ["low"]);
 }
+
+/// A stand-in gh: one account, alice; acme/site with one pull request asking her for a
+/// review.
+fn stub_gh(dir: &std::path::Path) -> String {
+    const INBOX: &str = r#"{"data":{"viewer":{"login":"alice"},"rateLimit":{"remaining":4990,"resetAt":"2026-10-02T11:00:00Z"},"r0":{"pullRequests":{"totalCount":1,"nodes":[{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","headRefName":"feat/dealer","baseRefName":"main","additions":1,"deletions":1,"changedFiles":1,"mergeable":"MERGEABLE","reviewDecision":"REVIEW_REQUIRED","author":{"login":"bob"},"reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"alice"}}]},"latestOpinionatedReviews":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}]}}}}"#;
+    let script = r#"#!/bin/sh
+case "$1 $2" in
+  "auth status") echo '{"hosts":{"github.com":[{"login":"alice","active":true,"state":"success"}]}}' ;;
+  "auth token") echo tok-alice ;;
+  "api graphql")
+    body=$(cat)
+    case "$body" in
+      *viewerPermission*) echo '{"data":{"r0":{"viewerPermission":"WRITE"}}}' ;;
+      *) echo 'INBOX' ;;
+    esac ;;
+  *) exit 1 ;;
+esac
+"#
+    .replace("INBOX", INBOX);
+    let p = dir.join("gh");
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p.display().to_string()
+}
+
+#[tokio::test]
+async fn pull_requests_come_through_gh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let site = tmp.path().join("site");
+    std::fs::create_dir(&site).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&site)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git(&["init", "-q"]) {
+        return; // no git on this machine
+    }
+    assert!(git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/site.git"
+    ]));
+    let d = start(DaemonConfig {
+        gh_bin: Some(stub_gh(tmp.path())),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, site).await;
+    c.send(&ClientRequest::SetGitHub { enabled: true })
+        .await
+        .unwrap();
+    c.send(&ClientRequest::SetPrFocus {
+        project: Some(project),
+        pr: None,
+    })
+    .await
+    .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::Prs { repos, .. } if repos.first().is_some_and(|r| !r.prs.is_empty()))
+    })
+    .await;
+    let ServerEvent::Prs {
+        repos, discovered, ..
+    } = ev
+    else {
+        unreachable!()
+    };
+    assert_eq!(discovered, 1);
+    assert_eq!(repos[0].slug, "acme/site");
+    assert_eq!(repos[0].viewer.as_deref(), Some("alice"));
+    let pr = &repos[0].prs[0];
+    assert_eq!((pr.number, pr.requested_you, pr.unseen), (212, true, true));
+    c.send(&ClientRequest::SetRepoVisible {
+        repo: repos[0].repo,
+        visible: false,
+    })
+    .await
+    .unwrap();
+    next_event(
+        &mut c,
+        |e| matches!(e, ServerEvent::Prs { repos, discovered: 1, .. } if repos.is_empty()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn without_gh_every_client_is_told() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = start(DaemonConfig {
+        gh_bin: Some("/nonexistent/gh".into()),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    add_project(&mut c, tmp.path().to_path_buf()).await;
+    c.send(&ClientRequest::SetGitHub { enabled: true })
+        .await
+        .unwrap();
+    next_event(&mut c, |e| {
+        matches!(
+            e,
+            ServerEvent::Prs {
+                state: termist_core::github::GhState::NoGh,
+                ..
+            }
+        )
+    })
+    .await;
+}

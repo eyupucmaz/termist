@@ -1,3 +1,6 @@
+use crate::github::gh::{CliGh, GhHandle};
+use crate::github::jobs::Locate;
+use crate::github::{self, Done, Effects, GitHub, To};
 use crate::launch::{LaunchRequest, Launcher};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
 use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession};
@@ -7,6 +10,7 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
@@ -118,6 +122,12 @@ pub struct Registry {
     catalog_rx: Option<UnboundedReceiver<Catalog>>,
     /// Asks a CLI for its models (a stand-in in tests).
     read_catalog: fn(Harness, &str) -> Vec<ModelInfo>,
+    /// Pull requests; its jobs run on blocking threads and report on `github_tx`.
+    github: GitHub,
+    github_tx: UnboundedSender<Done>,
+    github_rx: Option<UnboundedReceiver<Done>>,
+    /// Finds gh for those jobs.
+    locate: Locate,
 }
 
 impl Registry {
@@ -141,6 +151,16 @@ impl Registry {
         let last_launch = store.last_launch();
         let (rescans, rescans_rx) = tokio::sync::mpsc::unbounded_channel();
         let (catalog_tx, catalog_rx) = tokio::sync::mpsc::unbounded_channel();
+        let github = GitHub::new(&store);
+        let (github_tx, github_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gh_bin = launcher.config.gh_bin.clone();
+        let locate: Locate = Arc::new(move || {
+            let program = gh_bin
+                .clone()
+                .map(PathBuf::from)
+                .or_else(|| crate::resolve::find_program("gh"))?;
+            Some(GhHandle(Arc::new(CliGh { program })))
+        });
         Registry {
             launcher,
             harnesses,
@@ -166,6 +186,10 @@ impl Registry {
             catalog_tx,
             catalog_rx: Some(catalog_rx),
             read_catalog: crate::models::catalog,
+            github,
+            github_tx,
+            github_rx: Some(github_rx),
+            locate,
         }
     }
 
@@ -256,9 +280,11 @@ impl Registry {
         match msg {
             Msg::Connected { client, out } => {
                 self.clients.insert(client, out);
+                self.github.connected(client);
             }
             Msg::Disconnected(client) => {
                 self.clients.remove(&client);
+                self.github.gone(client);
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
                         let _ = cmd.send(SessionCmd::Detach { client });
@@ -267,6 +293,36 @@ impl Registry {
             }
             Msg::Request { client, req } => self.request(client, req),
         }
+    }
+
+    /// Runs GitHub's jobs on blocking threads and sends its events.
+    fn github_effects(&mut self, fx: Effects) {
+        for job in fx.jobs {
+            let (tx, locate) = (self.github_tx.clone(), self.locate.clone());
+            tokio::task::spawn_blocking(move || {
+                let _ = tx.send(github::jobs::run(job, &locate));
+            });
+        }
+        for (to, event) in fx.events {
+            match to {
+                To::All => self.broadcast(event),
+                To::One(client) => self.send(client, event),
+            }
+        }
+    }
+
+    pub fn github_tick(&mut self) {
+        let fx = self.github.tick(std::time::Instant::now(), &self.projects);
+        self.github_effects(fx);
+    }
+
+    /// A GitHub job finished; what it found may start the next step at once.
+    pub fn github_done(&mut self, done: Done) {
+        let fx = self
+            .github
+            .done(done, std::time::Instant::now(), &self.store, &self.projects);
+        self.github_effects(fx);
+        self.github_tick();
     }
 
     pub fn note(&mut self, note: SessionNote) {
@@ -348,6 +404,8 @@ impl Registry {
                         },
                     );
                 }
+                let fx = self.github.snapshot(To::One(client), &self.projects);
+                self.github_effects(fx);
             }
             ClientRequest::AddProject { path } => match self.add_project(path) {
                 Ok(()) => self.broadcast(ServerEvent::State(self.state())),
@@ -503,13 +561,23 @@ impl Registry {
                     let _ = cmd.send(SessionCmd::SetColors(colors));
                 }
             }
-            ClientRequest::SetGitHub { .. }
+            req @ (ClientRequest::SetGitHub { .. }
             | ClientRequest::SetPrFocus { .. }
             | ClientRequest::ListRepos { .. }
             | ClientRequest::SetRepoVisible { .. }
             | ClientRequest::SetRepoAccount { .. }
             | ClientRequest::RefreshPrs { .. }
-            | ClientRequest::MarkPrSeen { .. } => {}
+            | ClientRequest::MarkPrSeen { .. }) => {
+                let fx = self.github.request(
+                    client,
+                    req,
+                    &self.store,
+                    &self.projects,
+                    std::time::Instant::now(),
+                );
+                self.github_effects(fx);
+                self.github_tick();
+            }
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -1142,6 +1210,9 @@ pub async fn run(
     transcripts.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut rescans = reg.rescans_rx.take().expect("a registry runs once");
     let mut catalogs = reg.catalog_rx.take().expect("a registry runs once");
+    let mut github = reg.github_rx.take().expect("a registry runs once");
+    let mut github_beat = tokio::time::interval(Duration::from_secs(1));
+    github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             msg = rx.recv() => match msg {
@@ -1151,6 +1222,8 @@ pub async fn run(
             Some(note) = notes.recv() => reg.note(note),
             Some(found) = rescans.recv() => reg.rescanned(found),
             Some(c) = catalogs.recv() => reg.catalog_read(c, std::time::Instant::now()),
+            Some(done) = github.recv() => reg.github_done(done),
+            _ = github_beat.tick() => reg.github_tick(),
             _ = transcripts.tick() => {
                 reg.poll_transcripts();
                 reg.poll_idle_titles(std::time::Instant::now());

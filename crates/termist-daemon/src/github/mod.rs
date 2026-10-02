@@ -6,6 +6,7 @@
 //! client is connected or GitHub is off.
 pub mod accounts;
 pub mod gh;
+pub mod jobs;
 pub mod poller;
 pub mod query;
 pub mod repos;
@@ -399,10 +400,11 @@ impl GitHub {
             return fx;
         }
         if let ClientRequest::SetPrFocus { project, pr } = req {
-            let before = self
-                .clients
-                .insert(client, Focus { project, pr })
-                .unwrap_or_default();
+            // Only a client that is still known: a late request after `gone` is ignored.
+            let Some(focus) = self.clients.get_mut(&client) else {
+                return fx;
+            };
+            let before = std::mem::replace(focus, Focus { project, pr });
             if let Some(p) = project
                 && before.project != Some(p)
             {
@@ -1551,6 +1553,17 @@ mod tests {
         w.gh.gone(w.client);
         let fx = w.tick();
         assert!(!fx.jobs.iter().any(|j| matches!(j, Job::Detail { .. })));
+    }
+
+    #[test]
+    fn a_late_focus_does_not_bring_a_gone_client_back() {
+        let mut w = two_projects();
+        w.gh.gone(w.client);
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(w.projects[0].id),
+            pr: None,
+        });
+        assert!(w.tick().jobs.is_empty());
     }
 
     #[test]

@@ -12,6 +12,8 @@ pub struct DaemonConfig {
     pub codex_bin: Option<String>,
     /// Program for OpenCode sessions; default `opencode` from PATH.
     pub opencode_bin: Option<String>,
+    /// The GitHub CLI; default `gh` from PATH (or the login shell).
+    pub gh_bin: Option<String>,
 }
 
 impl DaemonConfig {
@@ -21,6 +23,7 @@ impl DaemonConfig {
             claude_bin: std::env::var("TERMIST_CLAUDE_BIN").ok(),
             codex_bin: std::env::var("TERMIST_CODEX_BIN").ok(),
             opencode_bin: std::env::var("TERMIST_OPENCODE_BIN").ok(),
+            gh_bin: std::env::var("TERMIST_GH_BIN").ok(),
         }
     }
 }
