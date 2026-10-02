@@ -843,7 +843,7 @@ impl Registry {
     }
 
     /// Answers at once with the recent models and the catalog as it is; a catalog older
-    /// than `CATALOG_FRESH` (or none) is read again, and sent when it comes.
+    /// than `CATALOG_FRESH`, an empty one, or none is read again, and sent when it comes.
     pub fn list_models(&mut self, client: ClientId, harness: Harness, now: std::time::Instant) {
         let recent = self.store.recent_models(harness);
         if harness == Harness::Claude {
@@ -861,7 +861,7 @@ impl Registry {
         let (catalog, fresh) = match self.catalogs.get(&harness) {
             Some((list, at)) => (
                 list.clone(),
-                now.saturating_duration_since(*at) < CATALOG_FRESH,
+                !list.is_empty() && now.saturating_duration_since(*at) < CATALOG_FRESH,
             ),
             None => (vec![], false),
         };
@@ -910,13 +910,15 @@ impl Registry {
         }
     }
 
-    /// A rescan finished: newly found CLIs become available to every client.
+    /// A rescan finished: newly found CLIs become available to every client, and their
+    /// cached catalogs (read while they were missing) are dropped.
     pub fn rescanned(&mut self, Rescanned(found): Rescanned) {
         self.rescanning = false;
         if found.is_empty() {
             return;
         }
         for (harness, program) in found {
+            self.catalogs.remove(&harness);
             self.launcher
                 .programs
                 .set(harness, program.display().to_string());
@@ -984,18 +986,20 @@ impl Registry {
         let Some(proj) = self.projects.iter().find(|p| p.id == project) else {
             bail!("unknown project")
         };
-        // A shell has no model or effort; an agent only takes an effort its CLI knows.
+        // A shell has no model or effort; an agent only takes an effort its CLI knows,
+        // or one the chosen model lists in the CLI's catalog.
         let (model, effort) = match &kind {
             SessionKind::Shell => (None, None),
             SessionKind::Agent { harness } => {
-                if let Some(e) = &effort
-                    && !harness.efforts().contains(&e.as_str())
-                {
-                    bail!("{} has no effort level {e:?}", harness.id());
-                }
                 let model = model
                     .map(|m| m.trim().to_string())
                     .filter(|m| !m.is_empty());
+                if let Some(e) = &effort
+                    && !harness.efforts().contains(&e.as_str())
+                    && !self.model_has_effort(*harness, model.as_deref(), e)
+                {
+                    bail!("{} has no effort level {e:?}", harness.id());
+                }
                 (model, effort)
             }
         };
@@ -1035,6 +1039,15 @@ impl Registry {
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
         Ok(())
+    }
+
+    /// The model is in the cached catalog of its CLI and lists this effort.
+    fn model_has_effort(&self, harness: Harness, model: Option<&str>, effort: &str) -> bool {
+        let Some(model) = model else { return false };
+        self.catalogs.get(&harness).is_some_and(|(list, _)| {
+            list.iter()
+                .any(|m| m.id == model && m.efforts.iter().any(|e| e == effort))
+        })
     }
 
     /// A started session's prompt goes into the history, its model into the recent models.
@@ -1331,6 +1344,68 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("no effort level"), "{err}");
         }
+        assert!(reg.sessions.is_empty());
+    }
+
+    fn gpt_x() -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            id: "gpt-x".into(),
+            label: "GPT-X".into(),
+            efforts: vec!["low".into(), "xhigh".into()],
+        }]
+    }
+
+    // The picker offers each Codex model's own efforts; the daemon takes them too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_effort_of_the_chosen_model_in_the_catalog_is_accepted() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.launcher.programs.codex = "true".into();
+        reg.catalogs
+            .insert(Harness::Codex, (gpt_x(), std::time::Instant::now()));
+        reg.create_session(
+            p.id,
+            SessionKind::Agent {
+                harness: Harness::Codex,
+            },
+            None,
+            Some("gpt-x".into()),
+            Some("xhigh".into()),
+            (80, 24),
+        )
+        .unwrap();
+        assert_eq!(reg.sessions.len(), 1);
+        assert_eq!(reg.sessions[0].info.effort.as_deref(), Some("xhigh"));
+        if let Some(cmd) = &reg.sessions[0].cmd {
+            let _ = cmd.send(SessionCmd::Kill);
+        }
+    }
+
+    #[test]
+    fn a_model_effort_is_refused_for_a_model_not_in_the_catalog() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let codex = || SessionKind::Agent {
+            harness: Harness::Codex,
+        };
+        let refused = |reg: &mut Registry, model: &str| {
+            let err = reg
+                .create_session(
+                    p.id,
+                    codex(),
+                    None,
+                    Some(model.into()),
+                    Some("xhigh".into()),
+                    (80, 24),
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("no effort level"), "{err}");
+        };
+        refused(&mut reg, "gpt-x");
+        reg.catalogs
+            .insert(Harness::Codex, (gpt_x(), std::time::Instant::now()));
+        refused(&mut reg, "gpt-y");
         assert!(reg.sessions.is_empty());
     }
 
@@ -1696,6 +1771,43 @@ mod tests {
             "the old list while the new is read"
         );
         results.recv().await.unwrap();
+    }
+
+    // A CLI that listed nothing (missing, or failing) is asked again next time.
+    #[tokio::test]
+    async fn an_empty_catalog_is_read_again_on_the_next_ask() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.read_catalog = |_, _| vec![];
+        let mut rx = connect(&mut reg);
+        let mut results = reg.catalog_rx.take().unwrap();
+        let t0 = std::time::Instant::now();
+        reg.list_models(ClientId(1), Harness::Codex, t0);
+        reg.catalog_read(results.recv().await.unwrap(), t0);
+        let _ = models(&mut rx);
+        reg.list_models(ClientId(1), Harness::Codex, t0 + Duration::from_secs(60));
+        tokio::time::timeout(Duration::from_secs(5), results.recv())
+            .await
+            .expect("read again within the hour")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_rescan_that_finds_a_cli_drops_its_cached_catalog() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let t0 = std::time::Instant::now();
+        reg.catalogs.insert(Harness::Codex, (gpt(), t0));
+        reg.catalogs.insert(Harness::OpenCode, (gpt(), t0));
+        reg.rescanned(Rescanned(vec![(
+            Harness::Codex,
+            PathBuf::from("/usr/local/bin/codex"),
+        )]));
+        assert!(!reg.catalogs.contains_key(&Harness::Codex));
+        assert!(
+            reg.catalogs.contains_key(&Harness::OpenCode),
+            "only what the rescan found"
+        );
     }
 
     #[tokio::test]
