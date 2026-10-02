@@ -302,11 +302,53 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
+    /// Reads the pid the script wrote, waiting briefly for the file to appear.
+    fn read_pid(pidfile: &Path) -> libc::pid_t {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(pidfile)
+                && let Ok(pid) = contents.trim().parse::<libc::pid_t>()
+            {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pidfile {} was never written",
+                pidfile.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// True when the process is gone or a zombie (killed, not yet reaped).
+    fn gone_or_zombie(pid: libc::pid_t) -> bool {
+        // SAFETY: kill with signal 0 just tests if the process exists
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state follows the last ')' (the command name may contain anything).
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| state == 'Z' || state == 'X'),
+            Err(_) => false,
+        }
+    }
+
+    /// Polls up to 2 s for the process to be gone and asserts it is.
+    fn assert_gone(pid: libc::pid_t, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !gone_or_zombie(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone_or_zombie(pid), "{what} (pid {pid}) still alive");
+    }
+
     #[test]
     fn a_grandchild_is_killed_with_the_whole_group() {
-        let tempdir = std::env::temp_dir();
-        let pidfile = tempdir.join("termist_test_grandchild.pid");
-        let _ = std::fs::remove_file(&pidfile);
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
 
         let script = format!("sleep 30 & echo $! > {} && wait", pidfile.display());
         let start = Instant::now();
@@ -320,35 +362,14 @@ mod tests {
             "group kill returned promptly"
         );
 
-        // Verify the grandchild was actually killed
-        if let Ok(contents) = std::fs::read_to_string(&pidfile) {
-            if let Ok(pid) = contents.trim().parse::<libc::pid_t>() {
-                let mut found_alive = false;
-                for _ in 0..10 {
-                    // SAFETY: kill with signal 0 just tests if the process exists
-                    let alive = unsafe { libc::kill(pid, 0) } == 0;
-                    if alive {
-                        found_alive = true;
-                        std::thread::sleep(Duration::from_millis(100));
-                    } else {
-                        break;
-                    }
-                }
-                assert!(
-                    !found_alive,
-                    "grandchild (pid {}) still alive after group kill",
-                    pid
-                );
-            }
-            let _ = std::fs::remove_file(&pidfile);
-        }
+        let pid = read_pid(&pidfile);
+        assert_gone(pid, "grandchild after group kill");
     }
 
     #[test]
     fn a_child_that_exits_with_a_grandchild_holding_stdout_reads_the_output() {
-        let tempdir = std::env::temp_dir();
-        let pidfile = tempdir.join("termist_test_leftover.pid");
-        let _ = std::fs::remove_file(&pidfile);
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("leftover.pid");
 
         let script = format!("sleep 30 & echo $! > {} && echo out", pidfile.display());
         let start = Instant::now();
@@ -366,16 +387,8 @@ mod tests {
             elapsed.as_millis()
         );
 
-        // Verify grandchild was killed
-        if let Ok(contents) = std::fs::read_to_string(&pidfile) {
-            if let Ok(pid) = contents.trim().parse::<libc::pid_t>() {
-                std::thread::sleep(Duration::from_millis(100));
-                // SAFETY: kill with signal 0 just tests if the process exists
-                let alive = unsafe { libc::kill(pid, 0) } == 0;
-                assert!(!alive, "grandchild (pid {}) was killed", pid);
-            }
-            let _ = std::fs::remove_file(&pidfile);
-        }
+        let pid = read_pid(&pidfile);
+        assert_gone(pid, "leftover grandchild");
     }
 
     #[test]
