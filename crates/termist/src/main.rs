@@ -164,6 +164,9 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
         ConfigCmd::Check => {
             let (config, mut problems) = config_file::load(paths);
             problems.extend(termist_tui::keys::problems(&config));
+            let (themes, theme_problems) = termist_tui::theme::Themes::load(&paths.themes_dir());
+            problems.extend(theme_problems);
+            problems.extend(themes.check(&config.theme));
             if !problems.is_empty() {
                 print_problems(&problems);
                 return ExitCode::FAILURE;
@@ -188,7 +191,13 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match config_file::import(paths, &text, termist_tui::keys::problems) {
+            let (themes, _) = termist_tui::theme::Themes::load(&paths.themes_dir());
+            let check = |c: &termist_core::config::Config| {
+                let mut p = termist_tui::keys::problems(c);
+                p.extend(themes.check(&c.theme));
+                p
+            };
+            match config_file::import(paths, &text, check) {
                 Ok(Ok(())) => println!("termist: imported into {}", paths.config_path().display()),
                 Ok(Err(problems)) => {
                     print_problems(&problems);

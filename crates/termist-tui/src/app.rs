@@ -10,7 +10,8 @@ use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
-use crate::theme::Theme;
+use crate::theme::{Theme, Themes};
+use crate::toast::{self, Toast, ToastKind, Toasts};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -18,11 +19,11 @@ use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use termist_core::config::{ColorDepth, Config, PanePosition, Sound, THEMES};
+use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
-    ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
-    next_in_attention,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
+    ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
+    attention_order, next_in_attention,
 };
 use termist_core::{Scroll, TermColors};
 use termist_scenes::{Scene, TimeOfDay};
@@ -90,8 +91,12 @@ pub struct App {
     /// The pane shows the attached session's history: the scroll keys have the
     /// keyboard, on top of the grid or focus mode.
     pub scrolling: bool,
-    /// Pane text being dragged over with the mouse, or copied and still highlighted.
+    /// Pane text being dragged over with the mouse, highlighted until the next press.
     pub selection: Option<Selection>,
+    /// Notes in the top right corner.
+    pub toasts: Toasts,
+    /// The last press landed on a toast: its drag and release are not a selection.
+    toast_down: bool,
     pub cards_per_row: usize,
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
@@ -112,6 +117,8 @@ pub struct App {
     prompt_draft: Option<String>,
     /// Recently used models per harness, as the daemon last sent them.
     recent_models: HashMap<Harness, Vec<String>>,
+    /// Each CLI's own model list per harness, as the daemon last sent it.
+    pub model_catalogs: HashMap<Harness, Vec<ModelInfo>>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
     /// A project asked to be opened (or a folder added); switched to when it arrives.
@@ -120,6 +127,8 @@ pub struct App {
     /// Where config.toml is, for the help screen; `None` in tests.
     pub config_path: Option<PathBuf>,
     pub theme: Theme,
+    /// Every theme there is: the built-in ones and the user's own.
+    pub themes: Themes,
     pub keymap: Keymap,
     /// What `colors = "auto"` means in this terminal.
     pub detected_depth: ColorDepth,
@@ -147,6 +156,10 @@ pub struct App {
     pub started: Instant,
     /// The hour on the local clock, for the scenes' palettes.
     pub hour: u32,
+    /// The minute on the local clock, for the status line.
+    pub minute: u32,
+    /// The last reading for the status line.
+    pub sysstat: termist_platform::sysstat::SysStat,
     /// The whole screen at the last frame: a scene moves only where it fits.
     pub screen: ratatui::layout::Rect,
     /// The terminal window is in front (focus reports; assumed without them).
@@ -193,6 +206,8 @@ impl App {
             pane: (0, 0),
             pane_area: Rect::default(),
             selection: None,
+            toasts: Toasts::default(),
+            toast_down: false,
             scrolling: false,
             cards_per_row: 1,
             card_rows: 1,
@@ -211,12 +226,14 @@ impl App {
             prompt_history: Vec::new(),
             prompt_draft: None,
             recent_models: HashMap::new(),
+            model_catalogs: HashMap::new(),
             focus_next_created: false,
             resume_pending: None,
             project_pending: None,
             config,
             config_path: None,
             theme,
+            themes: Themes::builtin(),
             keymap,
             detected_depth: ColorDepth::TrueColor,
             host_colors: None,
@@ -230,6 +247,8 @@ impl App {
             last_input: Instant::now(),
             started: Instant::now(),
             hour: 12,
+            minute: 0,
+            sysstat: Default::default(),
             window_focused: true,
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()
@@ -240,7 +259,7 @@ impl App {
         app
     }
 
-    fn alert(&self, id: SessionId, waiting: bool) -> Option<Action> {
+    fn alert(&mut self, id: SessionId, waiting: bool) -> Option<Action> {
         let s = self.state.sessions.iter().find(|s| s.id == id)?;
         if s.archived {
             return None;
@@ -252,10 +271,20 @@ impl App {
             .find(|p| p.id == s.project)
             .map_or("", |p| p.name.as_str());
         let what = if waiting { "waits for you" } else { "is done" };
-        Some(Action::Alert(Alert {
-            text: format!("{} · {project} {what}", s.display_name()),
-            waiting,
-        }))
+        let text = format!("{} · {project} {what}", s.display_name());
+        if self.config.notify.toasts {
+            let status = s.status;
+            let (glyph, _, _) = crate::ui::status_style(&self.theme, status);
+            self.toasts.push(Toast {
+                text: format!("{glyph} {text}"),
+                kind: ToastKind::Agent {
+                    session: id,
+                    status,
+                },
+                until: Instant::now() + toast::AGENT_FOR,
+            });
+        }
+        Some(Action::Alert(Alert { text, waiting }))
     }
 
     /// A scene from the configured pool, never the one shown last, loaded.
@@ -309,6 +338,7 @@ impl App {
 
     /// Ends the splash after its second and brings up the idle screen when it is due.
     pub fn tick(&mut self, now: Instant) {
+        self.toasts.expire(now);
         match self.showing {
             Some(Showing {
                 kind: ShowKind::Splash,
@@ -336,9 +366,16 @@ impl App {
                 >= Duration::from_secs(minutes as u64 * 60)
     }
 
-    /// When the screen must be drawn again with nothing else happening: the next frame
-    /// of a moving scene, the end of the splash, or the idle screen.
+    /// When the screen must be drawn again with no input: a scene's next frame, the end
+    /// of the splash, the idle scene, a toast going away.
     pub fn next_wake(&self, now: Instant) -> Option<Instant> {
+        [self.scene_wake(now), self.toasts.next_expiry()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    fn scene_wake(&self, now: Instant) -> Option<Instant> {
         let frame = now + Duration::from_millis(1000 / scene_view::FPS);
         // A scene that does not fit is the wordmark, which does not move.
         let fits = |name: &str, spare_rows: u16, spare_cols: u16| {
@@ -564,15 +601,21 @@ impl App {
                 }
                 self.prompt_history = history;
             }
-            ServerEvent::Models { harness, recent } => {
+            ServerEvent::Models {
+                harness,
+                recent,
+                catalog,
+            } => {
                 for o in &mut self.overlays {
                     if let Overlay::Model(m) = o
                         && m.harness == harness
                     {
-                        m.set_recent(recent.clone(), None);
+                        let current = m.current.clone();
+                        m.set_lists(recent.clone(), &catalog, current.as_deref());
                     }
                 }
                 self.recent_models.insert(harness, recent);
+                self.model_catalogs.insert(harness, catalog);
             }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
@@ -715,19 +758,48 @@ impl App {
             MouseEventKind::ScrollDown => false,
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
+                if self.showing.is_none()
+                    && let Some(i) = self.toasts.hit(self.screen, ev.column, ev.row)
+                {
+                    self.toast_down = true;
+                    // Under an overlay a click only dismisses the toast.
+                    let Some(ToastKind::Agent { session, .. }) =
+                        self.toasts.remove(i).map(|t| t.kind)
+                    else {
+                        return vec![];
+                    };
+                    if !self.overlays.is_empty() {
+                        return vec![];
+                    }
+                    // It lands in the grid: the next key goes to no other card.
+                    let mut actions = self.stop_scrolling();
+                    self.mode = Mode::Grid;
+                    actions.extend(self.reveal(session));
+                    actions.extend(self.sync_attachment());
+                    return actions;
+                }
+                self.toast_down = false;
                 if self.takes_mouse(ev) {
                     self.selection = self.attached.map(|id| Selection::new(id, self.in_pane(ev)));
                 }
                 return vec![];
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if self.toast_down {
+                    return vec![];
+                }
                 let at = self.in_pane(ev);
                 if let Some(selection) = &mut self.selection {
                     selection.head = at;
                 }
                 return vec![];
             }
-            MouseEventKind::Up(MouseButton::Left) => return self.copy_selection(),
+            MouseEventKind::Up(MouseButton::Left) => {
+                if std::mem::take(&mut self.toast_down) {
+                    return vec![];
+                }
+                return self.copy_selection();
+            }
             _ => return vec![],
         };
         if !self.takes_mouse(ev) {
@@ -776,7 +848,7 @@ impl App {
     /// The button came up: a drag puts its text on the clipboard and stays
     /// highlighted; a click without one leaves nothing selected.
     fn copy_selection(&mut self) -> Vec<Action> {
-        let Some(selection) = &mut self.selection else {
+        let Some(selection) = &self.selection else {
             return vec![];
         };
         let text = match self.screens.get(&selection.session) {
@@ -787,7 +859,13 @@ impl App {
             self.selection = None;
             return vec![];
         }
-        selection.copied = Some(text.chars().count());
+        let n = text.chars().count();
+        let what = if n == 1 { "character" } else { "characters" };
+        self.toasts.push(Toast {
+            text: format!("✓ copied {n} {what}"),
+            kind: ToastKind::Copied,
+            until: Instant::now() + toast::COPIED_FOR,
+        });
         vec![Action::Copy(text)]
     }
 
@@ -1051,8 +1129,13 @@ impl App {
                     .get(&launch.harness)
                     .cloned()
                     .unwrap_or_default();
+                let catalog = self
+                    .model_catalogs
+                    .get(&launch.harness)
+                    .cloned()
+                    .unwrap_or_default();
                 self.overlays
-                    .push(Overlay::Model(ModelPicker::new(&launch, recent)));
+                    .push(Overlay::Model(ModelPicker::new(&launch, recent, &catalog)));
                 return vec![Action::Send(ClientRequest::ListModels {
                     harness: launch.harness,
                 })];
@@ -1123,11 +1206,11 @@ impl App {
             return vec![];
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc => {
                 self.overlays.pop();
             }
-            KeyCode::Left | KeyCode::Char('h') => m.step_effort(-1),
-            KeyCode::Right | KeyCode::Char('l') => m.step_effort(1),
+            KeyCode::Left => m.step_effort(-1),
+            KeyCode::Right => m.step_effort(1),
             _ => {
                 if m.models.key(key) == Pick::Chosen {
                     match m.models.selected().cloned() {
@@ -1476,17 +1559,7 @@ impl App {
                 let Some(id) = next_in_attention(&reachable, from, c == '.') else {
                     return vec![];
                 };
-                let closed = waiting.iter().find(|s| s.id == id).map(|s| s.project);
-                match closed {
-                    Some(project) => {
-                        self.project_pending = Some(ProjectPending::Known {
-                            project,
-                            select: Some(id),
-                        });
-                        return vec![Action::Send(ClientRequest::OpenProject { project })];
-                    }
-                    None => self.select(id),
-                }
+                return self.reveal(id);
             }
             'h' => self.move_by(-1),
             'l' => self.move_by(1),
@@ -1495,6 +1568,25 @@ impl App {
             _ => {}
         }
         vec![]
+    }
+
+    /// Shows card `id`: opens its project first if it is closed, and leaves the archive
+    /// view (which would not keep it selected).
+    fn reveal(&mut self, id: SessionId) -> Vec<Action> {
+        let Some(s) = self.state.sessions.iter().find(|s| s.id == id) else {
+            return vec![];
+        };
+        let project = s.project;
+        self.archive_view = false;
+        if self.open_projects().any(|p| p.id == project) {
+            self.select(id);
+            return vec![];
+        }
+        self.project_pending = Some(ProjectPending::Known {
+            project,
+            select: Some(id),
+        });
+        vec![Action::Send(ClientRequest::OpenProject { project })]
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -1638,7 +1730,7 @@ impl App {
             ColorDepth::Auto => self.detected_depth,
             depth => depth,
         };
-        self.theme = Theme::named(&self.config.theme, depth);
+        self.theme = self.themes.get(&self.config.theme, depth);
         vec![Action::Send(ClientRequest::SetColors(self.agent_colors()))]
     }
 
@@ -1692,10 +1784,15 @@ impl App {
             SettingRow::DoneSound => "notify.done_sound",
             SettingRow::WaitingSound => "notify.waiting_sound",
             SettingRow::Desktop => "notify.desktop",
+            SettingRow::Toasts => "notify.toasts",
             SettingRow::Splash => "scenes.splash",
             SettingRow::Idle => "scenes.idle_minutes",
             SettingRow::Animations => "animations",
             SettingRow::Mouse => "mouse",
+            SettingRow::StatusCpu => "status.cpu",
+            SettingRow::StatusRam => "status.ram",
+            SettingRow::StatusBattery => "status.battery",
+            SettingRow::StatusClock => "status.clock",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -1732,13 +1829,23 @@ impl App {
                 ];
             }
             SettingRow::Desktop
+            | SettingRow::Toasts
             | SettingRow::Splash
             | SettingRow::Animations
-            | SettingRow::Mouse => {
+            | SettingRow::Mouse
+            | SettingRow::StatusCpu
+            | SettingRow::StatusRam
+            | SettingRow::StatusBattery
+            | SettingRow::StatusClock => {
                 let flag = match row {
                     SettingRow::Desktop => &mut self.config.notify.desktop,
+                    SettingRow::Toasts => &mut self.config.notify.toasts,
                     SettingRow::Splash => &mut self.config.scenes.splash,
                     SettingRow::Mouse => &mut self.config.mouse,
+                    SettingRow::StatusCpu => &mut self.config.status.cpu,
+                    SettingRow::StatusRam => &mut self.config.status.ram,
+                    SettingRow::StatusBattery => &mut self.config.status.battery,
+                    SettingRow::StatusClock => &mut self.config.status.clock,
                     _ => &mut self.config.animations,
                 };
                 *flag = !*flag;
@@ -1760,11 +1867,12 @@ impl App {
         }
         let value = match row {
             SettingRow::Theme => {
-                let at = THEMES
+                let ids: Vec<String> = self.themes.ids().map(String::from).collect();
+                let at = ids
                     .iter()
                     .position(|t| *t == self.config.theme)
                     .unwrap_or(0);
-                self.config.theme = THEMES[next(THEMES.len(), at)].to_string();
+                self.config.theme = ids[next(ids.len(), at)].clone();
                 self.config.theme.clone()
             }
             SettingRow::Pane => {
@@ -1795,7 +1903,7 @@ impl App {
         let running_agents = self.state.sessions.iter().any(|s| {
             matches!(s.kind, SessionKind::Agent { .. }) && s.status.is_live() && !s.archived
         });
-        if let Some(wanted) = self.theme.stands_in_for {
+        if let Some(wanted) = self.theme.stands_in_for.clone() {
             self.settings_note(format!("{wanted} needs 256 colours; this terminal has 16"));
         } else if running_agents {
             self.settings_note("running agents keep the colours they started with");
@@ -2832,7 +2940,7 @@ mod tests {
             vec![ctrl('o'), k(K::Esc)],
             vec![
                 ctrl('o'),
-                k(K::Char('j')),
+                k(K::Down),
                 k(K::Enter),
                 k(K::Char('x')),
                 k(K::Esc),
@@ -2868,6 +2976,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_catalog_fills_the_model_list() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Claude,
+            recent: vec![],
+            catalog: ["opus", "sonnet"]
+                .map(|id| ModelInfo {
+                    id: id.into(),
+                    label: id.into(),
+                    efforts: vec![],
+                })
+                .to_vec(),
+        });
+        for c in "son".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        app.on_key(k(K::Down));
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).launch.model.as_deref(), Some("sonnet"));
+    }
+
+    // The daemon's answer must not drop the model in use, nor move the highlight off it.
+    #[test]
+    fn the_current_model_stays_listed_and_highlighted_when_the_list_comes() {
+        let (mut app, _) = app();
+        app.state.last_launch = Some(launch(Harness::Codex, Some("my-model"), None));
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Codex,
+            recent: vec![],
+            catalog: ["gpt-a", "gpt-b"]
+                .map(|id| ModelInfo {
+                    id: id.into(),
+                    label: id.into(),
+                    efforts: vec![],
+                })
+                .to_vec(),
+        });
+        let Some(Overlay::Model(m)) = app.overlays.last() else {
+            panic!("{:?}", app.overlays.last())
+        };
+        assert!(
+            m.models
+                .items()
+                .iter()
+                .any(|c| c.model().as_deref() == Some("my-model")),
+            "still listed"
+        );
+        assert_eq!(
+            m.models.selected().and_then(|c| c.model()).as_deref(),
+            Some("my-model"),
+            "still highlighted"
+        );
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).launch.model.as_deref(), Some("my-model"));
+    }
+
     // The daemon keeps the launch line but does not send the state again; the next
     // quick prompt must not open on the old one (and send that back).
     #[test]
@@ -2880,8 +3049,9 @@ mod tests {
         app.on_event(ServerEvent::Models {
             harness: Harness::Codex,
             recent: vec!["gpt-5".into()],
+            catalog: vec![],
         });
-        for key in [K::Char('j'), K::Char('l'), K::Char('l'), K::Enter] {
+        for key in [K::Down, K::Right, K::Right, K::Enter] {
             app.on_key(k(key));
         }
         let used = quick_prompt(&app).launch.clone();
@@ -2954,15 +3124,9 @@ mod tests {
         app.on_event(ServerEvent::Models {
             harness: Harness::Claude,
             recent: vec!["opus".into(), "sonnet".into()],
+            catalog: vec![],
         });
-        for key in [
-            K::Char('j'),
-            K::Char('j'),
-            K::Char('l'),
-            K::Char('l'),
-            K::Right,
-            K::Enter,
-        ] {
+        for key in [K::Down, K::Down, K::Right, K::Right, K::Right, K::Enter] {
             app.on_key(k(key));
         }
         assert_eq!(
@@ -2970,14 +3134,7 @@ mod tests {
             launch(Harness::Claude, Some("sonnet"), Some("high"))
         );
         app.on_key(ctrl('o'));
-        for key in [
-            K::Char('k'),
-            K::Char('k'),
-            K::Char('h'),
-            K::Char('h'),
-            K::Char('h'),
-            K::Enter,
-        ] {
+        for key in [K::Up, K::Up, K::Left, K::Left, K::Left, K::Enter] {
             app.on_key(k(key));
         }
         assert_eq!(
@@ -2991,8 +3148,8 @@ mod tests {
         let (mut app, _) = app();
         app.on_key(k(K::Char('p')));
         app.on_key(ctrl('o'));
-        app.on_key(k(K::Char('l')));
-        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Right));
+        app.on_key(k(K::Down));
         app.on_key(k(K::Enter));
         assert!(matches!(app.overlays.last(), Some(Overlay::ModelName(_))));
         app.on_key(k(K::Enter));
@@ -3467,7 +3624,176 @@ mod tests {
         let selection = app.selection.unwrap();
         assert_eq!(selection.session, id);
         assert_eq!((selection.anchor, selection.head), ((0, 2), (4, 2)));
-        assert_eq!(selection.copied, Some(5), "the highlight stays");
+    }
+
+    fn toast_texts(app: &App) -> Vec<String> {
+        app.toasts.items().map(|t| t.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_copy_shows_a_toast() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 5 characters"]);
+    }
+
+    #[test]
+    fn a_copy_of_one_character_says_character() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        // `o` and the blank after it, which is dropped.
+        drag(&mut app, (4, 12), (5, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 1 character"]);
+    }
+
+    #[test]
+    fn an_agent_that_waits_elsewhere_shows_a_toast() {
+        let (mut app, s) = app();
+        let other = s[2].id;
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let toasts: Vec<_> = app.toasts.items().cloned().collect();
+        assert_eq!(toasts.len(), 1);
+        assert!(
+            toasts[0].text.ends_with("waits for you"),
+            "{}",
+            toasts[0].text
+        );
+        assert_eq!(
+            toasts[0].kind,
+            ToastKind::Agent {
+                session: other,
+                status: AgentStatus::NeedsFeedback
+            }
+        );
+    }
+
+    #[test]
+    fn the_card_you_type_into_shows_no_toast() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let mut waiting = s[0].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn turning_toasts_off_keeps_the_copy_toast() {
+        let (mut app, s) = app();
+        app.config.notify.toasts = false;
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        assert!(app.toasts.is_empty(), "no agent toast");
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        assert_eq!(toast_texts(&app), ["✓ copied 5 characters"]);
+    }
+
+    #[test]
+    fn a_click_goes_to_the_toast_under_it() {
+        let (mut app, s) = app();
+        app.screen = Rect::new(0, 0, 100, 40);
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        mouse(&mut app, MouseEventKind::Up(Left), r.x + 1, r.y + 1);
+        assert!(copies(&actions).is_empty());
+        assert_eq!(app.selected, Some(s[2].id), "the card it was about");
+        assert!(app.toasts.is_empty(), "the toast goes");
+        assert_eq!(app.selection, None, "no selection starts under a toast");
+    }
+
+    /// `s[2]` waits for the user; returns a point on its toast.
+    fn waiting_toast(app: &mut App, s: &[SessionInfo]) -> (u16, u16) {
+        app.screen = Rect::new(0, 0, 100, 40);
+        let mut waiting = s[2].clone();
+        waiting.status = AgentStatus::NeedsFeedback;
+        app.on_event(ServerEvent::SessionUpdated(waiting));
+        let r = app.toasts.rects(app.screen)[0];
+        (r.x + 1, r.y + 1)
+    }
+
+    fn click(app: &mut App, (column, row): (u16, u16)) -> Vec<Action> {
+        use ratatui::crossterm::event::MouseButton::Left;
+        let mut actions = mouse(app, MouseEventKind::Down(Left), column, row);
+        actions.extend(mouse(app, MouseEventKind::Up(Left), column, row));
+        actions
+    }
+
+    // An idle waiting agent sends nothing more: the click itself attaches its card.
+    #[test]
+    fn a_click_on_an_agent_toast_attaches_its_card_in_the_grid() {
+        let (mut app, s) = app();
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert!(
+            sent(&actions).contains(&&ClientRequest::Attach {
+                session: s[2].id,
+                cols: 80,
+                rows: 20
+            }),
+            "{actions:?}"
+        );
+        assert_eq!(app.attached, Some(s[2].id));
+        assert_eq!(app.mode, Mode::Grid);
+    }
+
+    // The next key must not go to a card other than the one typed into before.
+    #[test]
+    fn a_click_on_an_agent_toast_from_the_focus_lands_in_the_grid() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert_eq!((app.selected, app.mode), (Some(s[2].id), Mode::Grid));
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::Attach { session, .. } if *session == s[2].id
+        )));
+    }
+
+    #[test]
+    fn a_click_on_an_agent_toast_leaves_the_archive_view() {
+        let (mut app, s) = app();
+        let at = waiting_toast(&mut app, &s);
+        app.set_archive_view(true);
+        click(&mut app, at);
+        assert!(!app.archive_view);
+        assert_eq!(app.selected, Some(s[2].id));
+    }
+
+    // Under an overlay the selection never moves: the click only dismisses the toast.
+    #[test]
+    fn under_an_overlay_a_click_only_dismisses_the_toast() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('p')));
+        let before = app.selected;
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert!(app.toasts.is_empty(), "the toast goes");
+        assert_eq!(app.selected, before);
+        assert!(sent(&actions).is_empty(), "{actions:?}");
+        assert_eq!(app.overlays.len(), 1);
+    }
+
+    #[test]
+    fn toasts_go_by_themselves() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        let until = app.toasts.next_expiry().unwrap();
+        assert!(app.next_wake(Instant::now()).is_some_and(|w| w <= until));
+        app.tick(until);
+        assert!(app.toasts.is_empty());
     }
 
     #[test]
@@ -4419,6 +4745,21 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_row_goes_through_every_theme() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let ids: Vec<String> = app.themes.ids().map(String::from).collect();
+        let mut seen = vec![app.config.theme.clone()];
+        for _ in 1..ids.len() {
+            app.on_key(k(K::Right));
+            seen.push(app.config.theme.clone());
+        }
+        assert_eq!(seen, ids);
+        app.on_key(k(K::Right));
+        assert_eq!(app.config.theme, ids[0], "round again");
+    }
+
+    #[test]
     fn the_theme_changes_at_once_is_saved_and_agents_are_told() {
         let (mut app, _) = app();
         app.on_key(k(K::Char('s')));
@@ -4831,6 +5172,10 @@ mod tests {
             },
             {
                 app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Right))
+            },
+            {
+                app.on_key(k(K::Char('j')));
                 app.on_key(k(K::Left))
             },
             {
@@ -4854,6 +5199,10 @@ mod tests {
                 },
                 ConfigEdit::SetBool {
                     key: "notify.desktop",
+                    value: false
+                },
+                ConfigEdit::SetBool {
+                    key: "notify.toasts",
                     value: false
                 },
                 ConfigEdit::SetBool {
@@ -4990,5 +5339,50 @@ mod tests {
             Some(s[0].id),
             "the archive view shows other cards"
         );
+    }
+
+    #[test]
+    fn the_toasts_row_turns_agent_toasts_off_and_saves_it() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::Toasts)
+            .unwrap();
+        for _ in 0..row {
+            app.on_key(k(K::Down));
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(!app.config.notify.toasts);
+        assert!(actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+            key: "notify.toasts",
+            value: false,
+        })));
+    }
+
+    #[test]
+    fn the_status_rows_turn_each_part_off_and_save_it() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        for (row, key) in [
+            (SettingRow::StatusCpu, "status.cpu"),
+            (SettingRow::StatusRam, "status.ram"),
+            (SettingRow::StatusBattery, "status.battery"),
+            (SettingRow::StatusClock, "status.clock"),
+        ] {
+            let at = SETTING_ROWS.iter().position(|r| *r == row).unwrap();
+            if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+                v.row = at;
+            }
+            let actions = app.on_key(k(K::Right));
+            assert!(
+                actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+                    key,
+                    value: false
+                })),
+                "{key}"
+            );
+        }
+        assert!(!app.config.status.any());
     }
 }

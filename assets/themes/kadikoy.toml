@@ -1,0 +1,31 @@
+# Kadıköy: dark, a club at night: nearly black, neon magenta, cyan and purple.
+name = "Kadıköy"
+
+[ui]
+bg = "#0d0b12"
+fg = "#ece6f5"
+dim = "#a196b8"
+border = "#3a3050"
+accent = "#ff3ea5"
+focus = "#22e3ff"
+warn = "#ffe14d"
+error = "#ff5470"
+archive = "#b794ff"
+selection = { fg = "#ffffff", bg = "#5a1a45" }
+tab_active = { fg = "#ece6f5", bg = "#2a2140", bold = true }
+
+[status]
+fresh = "#7a6f92"
+running = "#ffe14d"
+done = "#6f9bff"
+ready = "#3dff9a"
+waiting = "#ff5470"
+closed = "#7a6f92"
+exited = "#b794ff"
+disconnected = "#a196b8"
+
+[ansi]
+colors = [
+  "#1a1524", "#ff5470", "#3dff9a", "#ffe14d", "#6f9bff", "#ff3ea5", "#22e3ff", "#d9d1e8",
+  "#3d3352", "#ff7a90", "#7affb8", "#fff08a", "#94b4ff", "#ff70c0", "#6deeff", "#ffffff",
+]

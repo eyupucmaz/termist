@@ -40,6 +40,9 @@ impl Harness {
     }
 }
 
+/// Effort levels any agent CLI is known to take, from least to most.
+pub const EFFORT_LEVELS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
 /// What a new agent session starts with. `None` leaves the choice to the CLI: no
 /// flag is passed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,7 +52,17 @@ pub struct LaunchOptions {
     pub effort: Option<String>,
 }
 
-/// Whether the daemon found a harness's CLI when it started.
+/// A model an agent CLI offers, for the quick prompt's list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// What goes to the CLI's model flag.
+    pub id: String,
+    /// What the list shows.
+    pub label: String,
+    /// The effort levels this model takes; empty: the harness's own list.
+    pub efforts: Vec<String>,
+}
+
 /// The colours an agent is told about when it asks (OSC 10, 11 and 4): its default
 /// foreground and background and, when a theme sets them, the 16 ANSI colours.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +83,7 @@ impl Default for TermColors {
     }
 }
 
+/// Whether the daemon found a harness's CLI when it started.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub harness: Harness,

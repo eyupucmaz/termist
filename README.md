@@ -42,6 +42,9 @@
   project.
 - **Start work without leaving the grid.** `p` opens a prompt: pick the agent, model and project, and
   it starts as a new card. `Space` sends a follow-up to a finished one.
+- **Toasts and a status line.** A toast in the top right says when an agent waits for you or is done,
+  even in another project; click it to go to the card. The status line shows cpu, ram, battery and the
+  time, and each part can be turned off in the settings.
 - **Nothing lost on a reboot.** Sessions come back as `○ disconnected`; `Enter` resumes the same
   conversation.
 - **Your repositories stay yours.** termist runs the agent CLIs you already have and never writes into
@@ -69,8 +72,12 @@
   <tr>
     <td width="50%" valign="top">
       <a href="docs/moda.png"><img src="docs/moda.png" alt="The grid in the light Moda theme."></a>
-      <p><b>Themes.</b> Üsküdar (dark, the default), Moda (light), or your terminal's own colours.
-      Agents are told the colours termist draws them with, so they pick a light look on Moda.</p>
+      <p><b>Themes.</b> Üsküdar (dark, the default), Moda (light), seven Istanbul neighbourhoods (Aksaray,
+      Kadıköy, Beşiktaş, Balat, Kapalıçarşı, Adalar, Bebek), Catppuccin Mocha and Latte, Tokyo Night,
+      Gruvbox Dark, Nord, Dracula, or your terminal's own colours. Your own themes go in the
+      <code>themes/</code> folder next to <code>termist config path</code>, as <code>&lt;name&gt;.toml</code>;
+      any colour you leave out comes from Üsküdar. Agents are told the colours termist draws them with,
+      so they pick a light look on a light theme.</p>
     </td>
     <td width="50%" valign="top">
       <a href="docs/help.png"><img src="docs/help.png" alt="The help, listing the keys of the grid."></a>
@@ -125,11 +132,11 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 
 | Key | Does |
 |---|---|
-| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, `^P` project |
+| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, from the list each CLI offers, `^P` project |
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it) |
-| drag | select in the pane; letting go copies it |
+| drag | select in the pane; letting go copies it, and a toast in the top right says so |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
 | `s` / `?` | settings / every key as it is bound now |
@@ -142,14 +149,14 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 
 | Key | Does |
 |---|---|
-| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, `^P` project |
+| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, from the list each CLI offers, `^P` project |
 | `n` / `t` | new agent session / new shell |
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
-| drag | select in the pane; letting go copies it to the clipboard |
+| drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
 | `o` / `x` | open a project / close its tab (sessions keep running) |
 | `r` / `a` / `A` | rename / archive / show archived |
 | `d` | stop a session (asks first) |
@@ -187,6 +194,13 @@ Issues and pull requests are welcome. Please read the [code of conduct](CODE_OF_
 The demos are recorded with stand-in agents: `vhs assets/demo/demo.tape` after
 `cargo build --release -p termist`, and `vhs assets/demo/look.tape` for the themes, settings and help.
 The banner is drawn from the Galata scene by `python3 tools/build-banner.py`.
+
+## Credits
+
+Five themes adapt the palettes of other projects, all under the MIT licence: [Catppuccin](https://github.com/catppuccin/catppuccin)
+(Mocha and Latte), [Tokyo Night](https://github.com/folke/tokyonight.nvim), [gruvbox](https://github.com/morhetz/gruvbox),
+[Nord](https://github.com/nordtheme/nord) and [Dracula](https://github.com/dracula/dracula-theme). A few colours are
+deepened so text stays readable; each theme file says where its colours come from.
 
 ## License
 

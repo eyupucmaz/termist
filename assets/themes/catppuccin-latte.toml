@@ -1,0 +1,32 @@
+# Catppuccin Latte: light, soft pastels. A few colours are deepened to read on the light ground.
+# Colours from Catppuccin (github.com/catppuccin/catppuccin), MIT licence, (c) Catppuccin.
+name = "Catppuccin Latte"
+
+[ui]
+bg = "#eff1f5"
+fg = "#4c4f69"
+dim = "#6c6f85"
+border = "#bcc0cc"
+accent = "#8839ef"
+focus = "#d05a08"
+warn = "#a8690f"
+error = "#d20f39"
+archive = "#b4489a"
+selection = { fg = "#4c4f69", bg = "#ccd0da" }
+tab_active = { fg = "#4c4f69", bg = "#ccd0da", bold = true }
+
+[status]
+fresh = "#7c7f93"
+running = "#a8690f"
+done = "#1e66f5"
+ready = "#317a21"
+waiting = "#d20f39"
+closed = "#7c7f93"
+exited = "#8839ef"
+disconnected = "#6c6f85"
+
+[ansi]
+colors = [
+  "#5c5f77", "#d20f39", "#317a21", "#a8690f", "#1e66f5", "#b4489a", "#13777c", "#acb0be",
+  "#6c6f85", "#d20f39", "#317a21", "#a8690f", "#1e66f5", "#b4489a", "#13777c", "#bcc0cc",
+]

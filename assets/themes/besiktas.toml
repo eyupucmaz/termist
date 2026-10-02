@@ -1,0 +1,31 @@
+# Beşiktaş: black and white. The status marks tell the cards apart; only waiting is red.
+name = "Beşiktaş"
+
+[ui]
+bg = "#101010"
+fg = "#eeeeee"
+dim = "#a0a0a0"
+border = "#404040"
+accent = "#ffffff"
+focus = "#d6d6d6"
+warn = "#d6d6d6"
+error = { fg = "#ffffff", bold = true }
+archive = "#bdbdbd"
+selection = { fg = "#000000", bg = "#d6d6d6" }
+tab_active = { fg = "#ffffff", bg = "#333333", bold = true }
+
+[status]
+fresh = "#8a8a8a"
+running = "#e0e0e0"
+done = "#bdbdbd"
+ready = "#ffffff"
+waiting = "#ff5252"
+closed = "#8a8a8a"
+exited = "#a0a0a0"
+disconnected = "#a0a0a0"
+
+[ansi]
+colors = [
+  "#1c1c1c", "#ff5252", "#d0d0d0", "#e0e0e0", "#b0b0b0", "#c8c8c8", "#bcbcbc", "#e8e8e8",
+  "#4a4a4a", "#ff7b7b", "#e6e6e6", "#f0f0f0", "#cfcfcf", "#dcdcdc", "#d4d4d4", "#ffffff",
+]

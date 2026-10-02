@@ -1534,7 +1534,8 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
         next_event(&mut c, |e| matches!(e, ServerEvent::Models { .. })).await,
         ServerEvent::Models {
             harness: Harness::Claude,
-            recent: vec!["opus".into()]
+            recent: vec!["opus".into()],
+            catalog: termist_daemon::models::claude(),
         }
     );
     c.send(&ClientRequest::SetLastLaunch(launch.clone()))
@@ -1633,4 +1634,42 @@ async fn colour_queries_are_answered_with_the_clients_colours() {
     .await
     .unwrap();
     wait_screen_text(&mut c, s.id, "rgb:fbfb/f4f4/e8e8").await;
+}
+
+// A stand-in `codex` that lists two models; the daemon sends them after the first
+// answer, which has none yet.
+#[tokio::test]
+async fn the_codex_catalog_comes_from_the_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stub = tmp.path().join("codex.sh");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nif [ \"$1 $2\" = \"debug models\" ]; then\n  echo '{\"models\":[{\"slug\":\"gpt-a\",\"display_name\":\"GPT-A\",\"visibility\":\"list\",\"supported_reasoning_levels\":[{\"effort\":\"low\"}]},{\"slug\":\"gpt-b\",\"visibility\":\"list\"}]}'\nfi\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let d = start(DaemonConfig {
+        codex_bin: Some(stub.display().to_string()),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    c.send(&ClientRequest::ListModels {
+        harness: Harness::Codex,
+    })
+    .await
+    .unwrap();
+    let ev = next_event(
+        &mut c,
+        |e| matches!(e, ServerEvent::Models { catalog, .. } if !catalog.is_empty()),
+    )
+    .await;
+    let ServerEvent::Models { catalog, .. } = ev else {
+        unreachable!()
+    };
+    let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-a", "gpt-b"]);
+    assert_eq!(catalog[0].label, "GPT-A");
+    assert_eq!(catalog[0].efforts, ["low"]);
 }

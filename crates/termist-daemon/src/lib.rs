@@ -5,6 +5,7 @@ pub mod hook_client;
 pub mod hookcmd;
 pub mod launch;
 pub mod logging;
+pub mod models;
 pub mod opencode;
 pub mod registry;
 pub mod resolve;

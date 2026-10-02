@@ -6,10 +6,6 @@ use crate::model::Harness;
 use std::collections::BTreeMap;
 use toml::{Table, Value};
 
-/// The built-in themes of this version, in the order the settings screen offers them.
-pub const THEMES: [&str; 3] = ["uskudar", "moda", "terminal"];
-/// Themes planned for a later version: named in the docs, not drawn yet.
-const LATER_THEMES: [&str; 4] = ["aksaray", "kadikoy", "besiktas", "balat"];
 pub const SCENES: [&str; 6] = [
     "galata",
     "kiz-kulesi",
@@ -123,6 +119,32 @@ impl Default for ScenesConfig {
     }
 }
 
+/// What the status line on the top right shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusConfig {
+    pub cpu: bool,
+    pub ram: bool,
+    pub battery: bool,
+    pub clock: bool,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        StatusConfig {
+            cpu: true,
+            ram: true,
+            battery: true,
+            clock: true,
+        }
+    }
+}
+
+impl StatusConfig {
+    pub fn any(&self) -> bool {
+        self.cpu || self.ram || self.battery || self.clock
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifyConfig {
     /// When an agent is done.
@@ -130,6 +152,8 @@ pub struct NotifyConfig {
     /// When an agent waits for you: a question, a permission.
     pub waiting_sound: Sound,
     pub desktop: bool,
+    /// A toast in the corner when an agent waits or is done; a copy always gets one.
+    pub toasts: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +196,7 @@ pub struct KeysConfig {
 pub struct Config {
     pub prefix: String,
     pub pane_position: PanePosition,
+    /// A theme id; the TUI's theme list checks it.
     pub theme: String,
     pub colors: ColorDepth,
     pub animations: bool,
@@ -181,6 +206,7 @@ pub struct Config {
     pub editor: Option<String>,
     pub scenes: ScenesConfig,
     pub notify: NotifyConfig,
+    pub status: StatusConfig,
     pub worktrees: WorktreesConfig,
     pub agents: AgentsConfig,
     pub keys: KeysConfig,
@@ -201,7 +227,9 @@ impl Default for Config {
                 done_sound: Sound::Off,
                 waiting_sound: Sound::Off,
                 desktop: true,
+                toasts: true,
             },
+            status: StatusConfig::default(),
             worktrees: WorktreesConfig::default(),
             agents: AgentsConfig::default(),
             keys: KeysConfig::default(),
@@ -290,7 +318,10 @@ impl Reader<'_> {
                     PanePosition::id,
                 )
                 .unwrap_or(d.pane_position),
-            theme: self.theme(&mut t).unwrap_or(d.theme),
+            theme: self
+                .string(&mut t, "", "theme")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(d.theme),
             colors: self
                 .choice(&mut t, "", "colors", &ColorDepth::ALL, ColorDepth::id)
                 .unwrap_or(d.colors),
@@ -299,6 +330,7 @@ impl Reader<'_> {
             editor: self.string(&mut t, "", "editor").filter(|e| !e.is_empty()),
             scenes: self.scenes(&mut t),
             notify: self.notify(&mut t),
+            status: self.status(&mut t),
             worktrees: self.worktrees(&mut t),
             agents: self.agents(&mut t),
             keys: self.keys(&mut t),
@@ -347,6 +379,21 @@ impl Reader<'_> {
         Some(pool)
     }
 
+    fn status(&mut self, t: &mut Table) -> StatusConfig {
+        let d = StatusConfig::default();
+        let Some(mut s) = self.table(t, "", "status") else {
+            return d;
+        };
+        let status = StatusConfig {
+            cpu: self.bool(&mut s, "status", "cpu").unwrap_or(d.cpu),
+            ram: self.bool(&mut s, "status", "ram").unwrap_or(d.ram),
+            battery: self.bool(&mut s, "status", "battery").unwrap_or(d.battery),
+            clock: self.bool(&mut s, "status", "clock").unwrap_or(d.clock),
+        };
+        self.unknown("status", s);
+        status
+    }
+
     fn notify(&mut self, t: &mut Table) -> NotifyConfig {
         let d = Config::default().notify;
         let Some(mut n) = self.table(t, "", "notify") else {
@@ -365,6 +412,7 @@ impl Reader<'_> {
                 .or(both)
                 .unwrap_or(d.waiting_sound),
             desktop: self.bool(&mut n, "notify", "desktop").unwrap_or(d.desktop),
+            toasts: self.bool(&mut n, "notify", "toasts").unwrap_or(d.toasts),
         };
         self.unknown("notify", n);
         notify
@@ -437,23 +485,6 @@ impl Reader<'_> {
             }
         }
         out
-    }
-
-    fn theme(&mut self, t: &mut Table) -> Option<String> {
-        let theme = self.string(t, "", "theme")?;
-        if THEMES.contains(&theme.as_str()) {
-            return Some(theme);
-        }
-        let message = if LATER_THEMES.contains(&theme.as_str()) {
-            format!(
-                "\"{theme}\" is not in this version yet; themes: {}",
-                THEMES.join(", ")
-            )
-        } else {
-            format!("unknown theme \"{theme}\"; themes: {}", THEMES.join(", "))
-        };
-        self.problem("theme", message);
-        None
     }
 
     fn table(&mut self, t: &mut Table, parent: &str, key: &str) -> Option<Table> {
@@ -556,6 +587,42 @@ mod tests {
         (config, problems.iter().map(|p| p.to_string()).collect())
     }
 
+    #[test]
+    fn toasts_are_on_unless_turned_off() {
+        let (c, problems) = parse("");
+        assert!(c.notify.toasts);
+        assert!(problems.is_empty());
+        let (c, problems) = parse("[notify]\ntoasts = false\n");
+        assert!(!c.notify.toasts);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn the_status_line_shows_everything_unless_told() {
+        let (c, problems) = Config::parse("", None);
+        assert_eq!(
+            c.status,
+            StatusConfig {
+                cpu: true,
+                ram: true,
+                battery: true,
+                clock: true
+            }
+        );
+        assert!(problems.is_empty());
+        let (c, problems) = Config::parse("[status]\ncpu = false\nbattery = false\n", None);
+        assert!(!c.status.cpu && c.status.ram && !c.status.battery && c.status.clock);
+        assert!(c.status.any());
+        assert!(problems.is_empty());
+        let (c, _) = Config::parse(
+            "[status]\ncpu = false\nram = false\nbattery = false\nclock = false\n",
+            None,
+        );
+        assert!(!c.status.any());
+        let (_, problems) = Config::parse("[status]\ndisk = true\n", None);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
     /// The example config of the docs, every key at its default.
     const DOCUMENTED_DEFAULTS: &str = r#"
 prefix = "C-a"
@@ -573,6 +640,13 @@ pool = ["galata", "kiz-kulesi", "ayasofya", "kopru", "vapur", "yerebatan"]
 done_sound = "off"              # off | marti (a seagull) | kedi (a cat) | system | bell
 waiting_sound = "off"           # the same, for an agent that asks you something
 desktop = true
+toasts = true                  # a toast in the corner when an agent waits or is done
+
+[status]                        # the top right
+cpu = true
+ram = true
+battery = true
+clock = true
 
 [worktrees]
 location = "sibling"
@@ -665,19 +739,14 @@ pool = ["galata", "eminonu"]
 default = "aider"
 "#,
         );
-        assert_eq!(c.theme, "uskudar");
+        assert_eq!(c.theme, "kadikoy", "the TUI checks themes");
         assert!(c.animations);
         assert_eq!(c.pane_position, PanePosition::Auto);
         assert_eq!(c.colors, ColorDepth::Auto);
         assert_eq!(c.scenes.idle_minutes, 10);
         assert_eq!(c.scenes.pool, ["galata"], "the known scene stays");
         assert_eq!(c.agents.default, Harness::Claude);
-        assert_eq!(problems.len(), 7, "{problems:#?}");
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.starts_with("theme: \"kadikoy\" is not in this version yet"))
-        );
+        assert_eq!(problems.len(), 6, "{problems:#?}");
         assert!(
             problems
                 .iter()

@@ -1,5 +1,6 @@
 use crate::model::{
-    Harness, HarnessInfo, LaunchOptions, SessionInfo, SessionKind, StateSnapshot, TermColors,
+    Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
+    TermColors,
 };
 use crate::screen::{ScreenUpdate, Scroll};
 use crate::{ProjectId, SessionId};
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -134,10 +135,22 @@ pub enum ServerEvent {
     },
     /// Earlier prompts, newest first.
     PromptHistory(Vec<String>),
-    /// Models recently started with `harness`, most recent first.
+    /// Models recently started with `harness`, most recent first, and the models its
+    /// CLI offers (empty until the CLI has been asked; a second `Models` follows).
     Models {
         harness: Harness,
         recent: Vec<String>,
+        catalog: Vec<ModelInfo>,
     },
     Ack,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_protocol_is_6_since_the_model_catalog() {
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
 }

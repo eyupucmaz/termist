@@ -2,7 +2,7 @@
 source: crates/termist-tui/src/ui.rs
 expression: "render(&mut app, 80, 12).backend()"
 ---
-" termist   orbit-api ◆1✓1                                                       "
+" termist   orbit-api ◆1✓1                                                 12:00 "
 "┏━━━━━━━━━━━━━━━━━━━━━━┓┌ claude-1 — claude ───────────────────────────────────┐"
 "┃◆ claude-1            ┃│hello                                                 │"
 "┃claude · waiting      ┃│                                                      │"

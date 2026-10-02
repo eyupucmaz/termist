@@ -197,6 +197,11 @@ mod tests {
             ServerEvent::Models {
                 harness: Harness::OpenCode,
                 recent: vec!["anthropic/claude-sonnet-4-5".into()],
+                catalog: vec![crate::ModelInfo {
+                    id: "gpt-6-astra".into(),
+                    label: "GPT-6-Astra".into(),
+                    efforts: vec!["low".into(), "ultra".into()],
+                }],
             },
         ];
         for ev in events {

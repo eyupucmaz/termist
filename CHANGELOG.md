@@ -9,11 +9,30 @@
   the martı (a seagull), the kedi (a cat), the system's sound, the terminal bell, or off, and you hear a
   sound as you pick it. In `config.toml` they are `notify.done_sound` and `notify.waiting_sound`, with
   the values `marti`, `kedi`, `system`, `bell` and `off`. `termist sound test kedi` plays the cat.
+- **Toasts in the top right.** When an agent starts waiting for you or finishes, in any project, a toast
+  says so; click it to go to the card. A copy from the pane gets one too. Turn agent toasts off with
+  `notify.toasts = false` or in the settings (`s`).
+- **A status line.** The top right shows CPU, memory, battery and the time, like tmux's. Each part can
+  be turned off in the settings or under `[status]`.
+- **Models to choose from.** `Ctrl+O` in a new task lists the models each CLI offers: Claude Code's
+  `opus`, `sonnet`, `haiku` and `fable`, and what `codex debug models` and `opencode models` say. Type to
+  filter; the effort levels follow the model.
+- **Thirteen new themes.** Aksaray, Kadıköy, Beşiktaş, Balat, Kapalıçarşı, Adalar and Bebek, and
+  Catppuccin Mocha and Latte, Tokyo Night, Gruvbox Dark, Nord and Dracula. Your own themes go in the
+  `themes` folder next to `config.toml`.
 
 ### Changed
 
 - `notify.sounds` still works and sets both sounds, unless one has its own setting. Its old value
   `istanbul` means `marti`.
+- In the model list (`Ctrl+O`), `j`, `k`, `h`, `l` and `q` now type into the filter. Move with the
+  arrows and close it with `Esc`.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions
+can stop, `termist kill` and start `termist` again: until then the new TUI cannot reach the old daemon.
+Agents you stop this way come back with `Enter` on their card.
 
 ## 0.1.0 - 2026-10-02
 

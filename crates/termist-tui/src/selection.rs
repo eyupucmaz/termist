@@ -9,8 +9,6 @@ pub struct Selection {
     pub anchor: (u16, u16),
     /// Where the mouse is now.
     pub head: (u16, u16),
-    /// Characters put on the clipboard when the button came up.
-    pub copied: Option<usize>,
 }
 
 impl Selection {
@@ -19,7 +17,6 @@ impl Selection {
             session,
             anchor: at,
             head: at,
-            copied: None,
         }
     }
 
@@ -84,7 +81,6 @@ mod tests {
             session: SessionId::new(),
             anchor,
             head,
-            copied: None,
         }
     }
 

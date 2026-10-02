@@ -13,7 +13,7 @@ pub enum Pick {
     Ignored,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ListPicker<T> {
     items: Vec<T>,
     labels: Vec<String>,
@@ -23,7 +23,23 @@ pub struct ListPicker<T> {
     visible: Vec<usize>,
     /// Position in `visible`.
     highlight: usize,
+    /// Items shown whatever the query: "CLI default" and "type a model…".
+    pin: Option<fn(&T) -> bool>,
 }
+
+/// Equal when they show the same thing; `pin` is a function pointer, whose address
+/// proves nothing, so it is left out.
+impl<T: PartialEq> PartialEq for ListPicker<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.labels == other.labels
+            && self.query == other.query
+            && self.visible == other.visible
+            && self.highlight == other.highlight
+    }
+}
+
+impl<T: Eq> Eq for ListPicker<T> {}
 
 /// True when every whitespace-separated word of `query` appears whole in `label`, in
 /// any order, ignoring case. Letters scattered over a long label ("project name kind")
@@ -46,9 +62,17 @@ impl<T> ListPicker<T> {
             query: filterable.then(String::new),
             visible: vec![],
             highlight: 0,
+            pin: None,
         };
         picker.refilter();
         picker
+    }
+
+    /// Keeps the items `pin` picks visible through any query.
+    pub fn pinned(mut self, pin: fn(&T) -> bool) -> Self {
+        self.pin = Some(pin);
+        self.refilter();
+        self
     }
 
     /// Replaces the items (a newer list arrived) and keeps the highlight on the same
@@ -140,7 +164,9 @@ impl<T> ListPicker<T> {
     fn refilter(&mut self) {
         let query = self.query.clone().unwrap_or_default();
         self.visible = (0..self.items.len())
-            .filter(|&i| matches(&query, &self.labels[i]))
+            .filter(|&i| {
+                self.pin.is_some_and(|pin| pin(&self.items[i])) || matches(&query, &self.labels[i])
+            })
             .collect();
         self.highlight = self.highlight.min(self.visible.len().saturating_sub(1));
     }
@@ -229,5 +255,26 @@ mod tests {
         assert_eq!(p.selected(), Some(&"b"));
         p.set_items(vec![], |s: &&str| s.to_string());
         assert_eq!(p.selected(), None);
+    }
+
+    #[test]
+    fn pinned_items_stay_through_any_query() {
+        let mut p = ListPicker::new(
+            vec!["first", "apple", "banana", "last"],
+            |s| s.to_string(),
+            true,
+        )
+        .pinned(|s| *s == "first" || *s == "last");
+        for c in "zzz".chars() {
+            press(&mut p, K::Char(c));
+        }
+        assert_eq!(names(&p), ["first", "last"]);
+        press(&mut p, K::Backspace);
+        press(&mut p, K::Backspace);
+        press(&mut p, K::Backspace);
+        for c in "ban".chars() {
+            press(&mut p, K::Char(c));
+        }
+        assert_eq!(names(&p), ["first", "banana", "last"]);
     }
 }

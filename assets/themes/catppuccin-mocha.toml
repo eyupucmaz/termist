@@ -1,0 +1,32 @@
+# Catppuccin Mocha: dark, soft pastels.
+# Colours from Catppuccin (github.com/catppuccin/catppuccin), MIT licence, (c) Catppuccin.
+name = "Catppuccin Mocha"
+
+[ui]
+bg = "#1e1e2e"
+fg = "#cdd6f4"
+dim = "#9399b2"
+border = "#45475a"
+accent = "#cba6f7"
+focus = "#fab387"
+warn = "#f9e2af"
+error = "#f38ba8"
+archive = "#f5c2e7"
+selection = { fg = "#cdd6f4", bg = "#45475a" }
+tab_active = { fg = "#cdd6f4", bg = "#313244", bold = true }
+
+[status]
+fresh = "#7f849c"
+running = "#f9e2af"
+done = "#89b4fa"
+ready = "#a6e3a1"
+waiting = "#f38ba8"
+closed = "#7f849c"
+exited = "#cba6f7"
+disconnected = "#9399b2"
+
+[ansi]
+colors = [
+  "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+  "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+]

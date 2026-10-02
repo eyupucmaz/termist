@@ -2,7 +2,7 @@
 source: crates/termist-tui/src/ui.rs
 expression: "render(&mut app, 80, 16).backend()"
 ---
-" termist   orbit-api ◆1✓1                                                       "
+" termist   orbit-api ◆1✓1                                                 12:00 "
 "┏━━━┌ keys ────────────────────────────────────────────────────────────────┐    "
 "┃◆ c│ grid  g              new task: prompt, CLI, model                    │    "
 "┃cla│ grid  Space          send the next instruction without entering      │    "

@@ -1,0 +1,32 @@
+# Tokyo Night: dark, the lights of a city at night.
+# Colours from tokyonight.nvim (github.com/folke/tokyonight.nvim), MIT licence, (c) Folke Lemaitre.
+name = "Tokyo Night"
+
+[ui]
+bg = "#1a1b26"
+fg = "#c0caf5"
+dim = "#8189b8"
+border = "#414868"
+accent = "#7aa2f7"
+focus = "#ff9e64"
+warn = "#e0af68"
+error = "#f7768e"
+archive = "#bb9af7"
+selection = { fg = "#c0caf5", bg = "#33467c" }
+tab_active = { fg = "#c0caf5", bg = "#292e42", bold = true }
+
+[status]
+fresh = "#737aa2"
+running = "#e0af68"
+done = "#7aa2f7"
+ready = "#9ece6a"
+waiting = "#f7768e"
+closed = "#737aa2"
+exited = "#bb9af7"
+disconnected = "#8189b8"
+
+[ansi]
+colors = [
+  "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+  "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+]

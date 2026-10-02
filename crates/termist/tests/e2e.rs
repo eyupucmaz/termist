@@ -710,8 +710,10 @@ async fn quick_prompt_and_follow_up_through_the_real_tui() {
     // empty grid's "p: new task", which are then not written again.
     tui.wait_for("Alt+Enter newline", mark);
     tui.keys(b"fix the login redirect");
-    // Ctrl+O, "type a model…", effort three steps right (high), Enter
-    tui.keys(b"\x0fjlll\r");
+    // Ctrl+O, a filter no model matches (the daemon may or may not have sent Claude's
+    // aliases yet; only "CLI default" and "type a model…" stay either way), Down to
+    // "type a model…", effort three steps right (high), Enter
+    tui.keys(b"\x0fzz\x1b[B\x1b[C\x1b[C\x1b[C\r");
     tui.keys(b"my model\r");
     let mark = tui.mark();
     tui.keys(b"\r");

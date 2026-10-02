@@ -1,0 +1,31 @@
+# Aksaray: dark, a street at night: sodium lamps, concrete, a minibus and its signs.
+name = "Aksaray"
+
+[ui]
+bg = "#1c1b19"
+fg = "#e8e2d6"
+dim = "#a39c90"
+border = "#45413b"
+accent = "#ff9f1c"
+focus = "#ffd23f"
+warn = "#ffd23f"
+error = "#ff5a4a"
+archive = "#e09ac0"
+selection = { fg = "#ffffff", bg = "#5a3d12" }
+tab_active = { fg = "#e8e2d6", bg = "#3a342b", bold = true }
+
+[status]
+fresh = "#857e72"
+running = "#ffd23f"
+done = "#7fb0e0"
+ready = "#93c95a"
+waiting = "#ff5a4a"
+closed = "#857e72"
+exited = "#e09ac0"
+disconnected = "#a39c90"
+
+[ansi]
+colors = [
+  "#2a2825", "#ff5a4a", "#93c95a", "#ffd23f", "#7fb0e0", "#e09ac0", "#5cc8b8", "#d6cfc2",
+  "#4a4640", "#ff7d70", "#acd97c", "#ffe066", "#9cc4ec", "#ecb6d3", "#82d9cc", "#f5efe4",
+]

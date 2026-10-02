@@ -281,6 +281,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
     }
     draw_footer(f, app, areas.footer);
+    draw_toasts(f, app);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -335,7 +336,27 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             spans.extend(marker);
         }
     }
+    let used: usize = spans.iter().map(Span::width).sum();
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let room = (area.width as usize).saturating_sub(used + 1);
+    let status = crate::status_line::spans(
+        &app.sysstat,
+        &app.config.status,
+        (app.hour, app.minute),
+        &app.theme,
+        room,
+    );
+    let width: u16 = status.iter().map(|s| s.width() as u16).sum();
+    if width > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(status)),
+            Rect {
+                x: area.right() - width,
+                width,
+                ..area
+            },
+        );
+    }
 }
 
 fn draw_card(
@@ -382,7 +403,6 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     let back = screen.map_or(0, |s| s.scroll.offset);
     let selection = app.selection.filter(|s| s.session == info.id);
     let state = match screen {
-        _ if let Some(n) = selection.and_then(|s| s.copied) => format!(" · copied {n} characters"),
         Some(s) if app.scrolling || back > 0 => {
             format!(" · ↑ {}/{}", s.scroll.offset, s.scroll.history)
         }
@@ -528,6 +548,45 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
     };
     f.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// The toasts, over everything but a scene.
+fn draw_toasts(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let t = &app.theme;
+    for (toast, rect) in app.toasts.items().zip(app.toasts.rects(area)) {
+        let text = crate::toast::fit(&toast.text);
+        let line = match toast.kind {
+            crate::toast::ToastKind::Agent { status, .. } => {
+                let (_, color, _) = status_style(t, status);
+                let mut chars = text.chars();
+                let mark: String = chars.next().into_iter().collect();
+                Line::from(vec![
+                    Span::styled(mark, Style::default().fg(color)),
+                    Span::raw(chars.collect::<String>()),
+                ])
+            }
+            crate::toast::ToastKind::Copied => {
+                let mut chars = text.chars();
+                let mark: String = chars.next().into_iter().collect();
+                Line::from(vec![
+                    Span::styled(mark, t.accent),
+                    Span::raw(chars.collect::<String>()),
+                ])
+            }
+        };
+        f.render_widget(ratatui::widgets::Clear, rect);
+        f.render_widget(
+            Paragraph::new(line).style(t.base).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(t.border)
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            rect,
+        );
+    }
 }
 
 /// What to do on an empty grid.
@@ -1024,7 +1083,11 @@ mod tests {
         state.projects[0].open = false;
         app.on_event(ServerEvent::State(state));
         let t = render(&mut app, 60, 10);
-        assert_eq!(row(&t, 0), " termist   closed ◆1", "its agent still waits");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   closed ◆1",
+            "its agent still waits"
+        );
         assert!(screen_text(&t).contains("No project open · o opens one"));
     }
 
@@ -1087,7 +1150,7 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(info));
         let t = render(&mut app, 60, 16);
         assert_eq!(
-            row(&t, 0),
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
             " termist   orbit-api ◆1",
             "archived cards are not counted"
         );
@@ -1128,7 +1191,10 @@ mod tests {
     fn waiting_agents_of_closed_projects_are_counted_at_the_end_of_the_tab_bar() {
         let mut app = with_a_closed_project();
         let t = render(&mut app, 60, 16);
-        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1  closed ◆2");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   orbit-api ◆1✓1  closed ◆2"
+        );
         let buf = t.backend().buffer();
         assert_eq!(buf[(27, 0)].fg, Color::DarkGray, "the word is dimmed");
         assert_eq!(buf[(34, 0)].fg, Color::Red, "the diamond is red");
@@ -1142,7 +1208,11 @@ mod tests {
         assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1");
         let mut app = fixture();
         let t = render(&mut app, 60, 16);
-        assert_eq!(row(&t, 0), " termist   orbit-api ◆1✓1", "none waiting");
+        assert_eq!(
+            row(&t, 0).strip_suffix("12:00").unwrap().trim_end(),
+            " termist   orbit-api ◆1✓1",
+            "none waiting"
+        );
     }
 
     #[test]
@@ -1249,7 +1319,6 @@ mod tests {
             session: id,
             anchor: (0, 0),
             head: (2, 0),
-            copied: Some(3),
         });
         let t = render(&mut app, 60, 16);
         let buf = t.backend().buffer();
@@ -1259,7 +1328,6 @@ mod tests {
         assert!(!buf[(x + 1, y)].modifier.contains(Modifier::REVERSED));
         assert!(buf[(x + 2, y)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(x + 3, y)].modifier.contains(Modifier::REVERSED));
-        assert!(row(&t, areas.pane.y).contains("copied 3 characters"));
     }
 
     #[test]
@@ -1493,6 +1561,67 @@ mod tests {
             app.config.pane_position,
             PanePosition::Auto,
             "the setting is untouched"
+        );
+    }
+
+    #[test]
+    fn a_toast_is_drawn_in_the_top_right_corner() {
+        let mut app = fixture();
+        app.toasts.push(crate::toast::Toast {
+            text: "✓ copied 5 characters".into(),
+            kind: crate::toast::ToastKind::Copied,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        });
+        let t = render(&mut app, 80, 20);
+        // 21 characters, a space and a border on each side: columns 54-78, then one free.
+        assert!(
+            row(&t, 1).ends_with("╭───────────────────────╮"),
+            "{:?}",
+            row(&t, 1)
+        );
+        assert!(
+            row(&t, 2).ends_with("│ ✓ copied 5 characters │"),
+            "{:?}",
+            row(&t, 2)
+        );
+        assert!(
+            row(&t, 3).ends_with("╰───────────────────────╯"),
+            "{:?}",
+            row(&t, 3)
+        );
+        let buf = t.backend().buffer();
+        assert_eq!(buf[(78, 2)].symbol(), "│");
+        assert_eq!(buf[(54, 2)].symbol(), "│");
+    }
+
+    #[test]
+    fn no_toast_over_a_scene() {
+        let mut app = fixture();
+        app.start_splash(std::time::Instant::now());
+        app.toasts.push(crate::toast::Toast {
+            text: "✓ copied 5 characters".into(),
+            kind: crate::toast::ToastKind::Copied,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        });
+        let t = render(&mut app, 80, 20);
+        assert!(!screen_text(&t).contains("copied"));
+    }
+
+    #[test]
+    fn the_header_ends_with_the_status_line() {
+        let mut app = fixture();
+        app.sysstat = termist_platform::sysstat::SysStat {
+            cpu: Some(5.0),
+            ram: None,
+            battery: None,
+        };
+        app.hour = 14;
+        app.minute = 32;
+        let t = render(&mut app, 100, 20);
+        assert!(
+            row(&t, 0).trim_end().ends_with("cpu 5%  14:32"),
+            "{:?}",
+            row(&t, 0)
         );
     }
 }

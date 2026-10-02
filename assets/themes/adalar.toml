@@ -1,0 +1,31 @@
+# Adalar: light, a morning on the Princes' Islands: pine green and sea blue.
+name = "Adalar"
+
+[ui]
+bg = "#f4f7f2"
+fg = "#1f2d2a"
+dim = "#5a6b66"
+border = "#b3c4bc"
+accent = "#2b7a4b"
+focus = "#1d6ca5"
+warn = "#8f6200"
+error = "#b83226"
+archive = "#8a3fa8"
+selection = { fg = "#1f2d2a", bg = "#cfe5d8" }
+tab_active = { fg = "#1f2d2a", bg = "#bfdccb", bold = true }
+
+[status]
+fresh = "#6a7a75"
+running = "#8f6200"
+done = "#1d6ca5"
+ready = "#2b7a4b"
+waiting = "#b83226"
+closed = "#6a7a75"
+exited = "#8a3fa8"
+disconnected = "#5a6b66"
+
+[ansi]
+colors = [
+  "#1f2d2a", "#b83226", "#2b7a4b", "#8f6200", "#1d6ca5", "#8a3fa8", "#0f7b84", "#c9d4cf",
+  "#4d5f59", "#c9442f", "#2f8a55", "#9e6c00", "#2a7cbb", "#9b4fbc", "#13858f", "#eef3ef",
+]
