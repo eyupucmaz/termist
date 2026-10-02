@@ -652,6 +652,7 @@ fn grid_hint(keymap: &Keymap) -> String {
             Rename,
             Archive,
             ArchiveView,
+            PullRequests,
             Kill,
             Quit,
         ],

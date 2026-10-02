@@ -6,6 +6,7 @@ use crate::overlay::{
     self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
+use crate::prs::{self, PrAction, PrLayout, PrView, ProjectPrs};
 use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
@@ -16,10 +17,12 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
+use termist_core::github::{GhState, PrDetail, PrRef, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -54,12 +57,16 @@ pub enum Mode {
     ConfirmArchive(SessionId),
 }
 
-/// What the body shows: the grid of cards, the archived cards, or (Görev 16) pull requests.
+/// What the body shows: the grid of cards, the archived cards, or pull requests.
+// One View lives in the App; boxing the PR view would only add a pointer to every key.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum View {
     Grid,
     /// `A`: the project's archived cards instead of its live ones.
     Archive,
+    /// `v`: the project's pull requests.
+    Prs(PrView),
 }
 
 #[derive(Debug, PartialEq)]
@@ -172,6 +179,18 @@ pub struct App {
     pub screen: ratatui::layout::Rect,
     /// The terminal window is in front (focus reports; assumed without them).
     pub window_focused: bool,
+    /// Each project's pull requests, as the daemon last sent them.
+    pub prs: HashMap<ProjectId, ProjectPrs>,
+    /// Each project's repos and the logged-in accounts, for the repos window.
+    pub repo_lists: HashMap<ProjectId, (Vec<String>, Vec<RepoInfo>)>,
+    /// Pull requests read whole: how the last read went, and the last good one.
+    pub pr_details: HashMap<PrRef, (GhState, Option<PrDetail>)>,
+    /// Where the last frame put the PR view's rows and threads.
+    pub pr_layout: RefCell<PrLayout>,
+    /// Tests fix the clock; ages are counted from it.
+    pub frozen_now: Option<i64>,
+    /// What the daemon was last told this client looks at.
+    pr_focus: (Option<ProjectId>, Option<PrRef>),
     rng: u64,
 }
 
@@ -258,6 +277,12 @@ impl App {
             minute: 0,
             sysstat: Default::default(),
             window_focused: true,
+            prs: HashMap::new(),
+            repo_lists: HashMap::new(),
+            pr_details: HashMap::new(),
+            pr_layout: RefCell::default(),
+            frozen_now: None,
+            pr_focus: (None, None),
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -550,8 +575,8 @@ impl App {
                 if starts_waiting && idle {
                     self.showing = None;
                     self.last_input = Instant::now();
-                    let shown =
-                        !self.archive_view() && self.visible_sessions().iter().any(|s| s.id == id);
+                    let shown = self.view == View::Grid
+                        && self.visible_sessions().iter().any(|s| s.id == id);
                     if matches!(self.mode, Mode::Grid) && shown {
                         self.select(id);
                         self.repair_selection();
@@ -625,14 +650,35 @@ impl App {
                 self.recent_models.insert(harness, recent);
                 self.model_catalogs.insert(harness, catalog);
             }
-            ServerEvent::Hello { .. }
-            | ServerEvent::Ack
-            | ServerEvent::Prs { .. }
-            | ServerEvent::Repos { .. }
-            | ServerEvent::PrDetail { .. }
-            | ServerEvent::ReviewRequested { .. } => {}
+            ServerEvent::Prs {
+                project,
+                state,
+                discovered,
+                repos,
+            } => {
+                self.prs.insert(
+                    project,
+                    ProjectPrs {
+                        state,
+                        discovered,
+                        repos,
+                    },
+                );
+            }
+            ServerEvent::Repos {
+                project,
+                accounts,
+                repos,
+            } => {
+                self.repo_lists.insert(project, (accounts, repos));
+            }
+            ServerEvent::PrDetail { pr, state, detail } => {
+                self.pr_details.insert(pr, (state, detail.map(|d| *d)));
+            }
+            ServerEvent::Hello { .. } | ServerEvent::Ack | ServerEvent::ReviewRequested { .. } => {}
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -695,6 +741,10 @@ impl App {
                 }
                 return vec![];
             }
+            Mode::Grid if matches!(self.view, View::Prs(_)) => {
+                self.message = None;
+                actions.extend(self.prs_key(key));
+            }
             Mode::Grid if self.archive_view() => {
                 self.message = None;
                 actions.extend(self.archive_key(key));
@@ -734,6 +784,7 @@ impl App {
             }
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -1615,6 +1666,93 @@ impl App {
         self.selected = Some(ids[next]);
     }
 
+    /// Seconds since 1970, for the ages of pull requests.
+    pub fn now_secs(&self) -> i64 {
+        self.frozen_now
+            .unwrap_or_else(|| (termist_core::now_ms() / 1000) as i64)
+    }
+
+    fn toggle_prs(&mut self) {
+        self.mode = Mode::Grid;
+        self.view = match self.view {
+            View::Prs(_) => View::Grid,
+            _ => View::Prs(PrView::for_project(self.project)),
+        };
+    }
+
+    /// Keeps the PR view on the current project's data, and tells the daemon what is
+    /// looked at.
+    fn sync_prs(&mut self) -> Vec<Action> {
+        let project = self.project;
+        let focus = match &mut self.view {
+            View::Prs(view) => {
+                if view.project != project {
+                    *view = PrView::for_project(project);
+                }
+                let empty = ProjectPrs::default();
+                let data = project.and_then(|p| self.prs.get(&p)).unwrap_or(&empty);
+                let list = prs::rows(data, view);
+                view.repair(&list);
+                (project, view.detail.as_ref().map(|d| d.pr))
+            }
+            _ => (None, None),
+        };
+        if focus == self.pr_focus || !self.config.github.enabled {
+            return vec![];
+        }
+        self.pr_focus = focus;
+        vec![Action::Send(ClientRequest::SetPrFocus {
+            project: focus.0,
+            pr: focus.1,
+        })]
+    }
+
+    /// A key in the PR view. The grid's keys for tabs, help, settings, refresh and
+    /// leaving work here too, unless the search takes the keys.
+    fn prs_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let typing = matches!(&self.view, View::Prs(v) if v.typing);
+        if !typing {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.mode = Mode::ConfirmQuit;
+                return vec![];
+            }
+            if let Some(
+                action @ (KeyAction::PullRequests
+                | KeyAction::RefreshGitHub
+                | KeyAction::NextTab
+                | KeyAction::PrevTab
+                | KeyAction::Tab(_)
+                | KeyAction::Help
+                | KeyAction::Settings
+                | KeyAction::Quit),
+            ) = self.keymap.action(Context::Grid, &key)
+            {
+                return self.act(action);
+            }
+        }
+        let View::Prs(view) = &mut self.view else {
+            return vec![];
+        };
+        let empty = ProjectPrs::default();
+        let data = self
+            .project
+            .and_then(|p| self.prs.get(&p))
+            .unwrap_or(&empty);
+        let layout = self.pr_layout.borrow().clone();
+        match view.key(key, data, &layout) {
+            None => vec![],
+            Some(PrAction::Close) => {
+                self.view = View::Grid;
+                vec![]
+            }
+            Some(PrAction::Opened(pr, updated_at)) => {
+                vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
+            }
+            // Görev 20 `Action::OpenUrl` ve Görev 19 repo penceresiyle doldurur.
+            Some(PrAction::Browser(_)) | Some(PrAction::Repos) => vec![],
+        }
+    }
+
     /// The body shows the project's archived cards.
     pub fn archive_view(&self) -> bool {
         self.view == View::Archive
@@ -1682,6 +1820,14 @@ impl App {
                 }
             }
             KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
+            KeyAction::PullRequests => self.toggle_prs(),
+            KeyAction::RefreshGitHub => {
+                if let Some(project) = self.project
+                    && self.config.github.enabled
+                {
+                    return vec![Action::Send(ClientRequest::RefreshPrs { project })];
+                }
+            }
             KeyAction::Palette => self.open_palette(),
             KeyAction::HalfPageDown => self.half_page(1),
             KeyAction::HalfPageUp => self.half_page(-1),
@@ -5432,5 +5578,108 @@ mod tests {
             );
         }
         assert!(!app.config.status.any());
+    }
+
+    use crate::prs::fixtures::{project_prs, repo, summary};
+
+    fn with_prs(app: &mut App, project: ProjectId) {
+        let data = project_prs(vec![repo(
+            1,
+            "site",
+            vec![
+                summary(212, "Add a dealer filter", "bob"),
+                summary(209, "Fix lazy images", "alice"),
+            ],
+        )]);
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: data.discovered,
+            repos: data.repos,
+        });
+    }
+
+    fn focus(actions: &[Action]) -> Vec<(Option<ProjectId>, Option<u32>)> {
+        sent(actions)
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::SetPrFocus { project, pr } => Some((*project, pr.map(|p| p.number))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn v_opens_the_pull_requests_and_tells_the_daemon() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        let actions = app.on_key(k(K::Char('v')));
+        assert!(matches!(app.view, View::Prs(_)));
+        assert_eq!(focus(&actions), [(Some(api), None)]);
+        let actions = app.on_key(k(K::Char('v')));
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(focus(&actions), [(None, None)]);
+    }
+
+    #[test]
+    fn enter_opens_a_pull_request_and_marks_it_seen() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Enter));
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::MarkPrSeen { pr, .. } if pr.number == 212
+        )));
+        assert_eq!(focus(&actions), [(Some(api), Some(212))]);
+        let actions = app.on_key(k(K::Esc));
+        assert_eq!(focus(&actions), [(Some(api), None)]);
+    }
+
+    #[test]
+    fn another_tab_starts_the_view_afresh() {
+        let (mut app, s) = app();
+        let web = s[3].project;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char(']')));
+        assert_eq!(focus(&actions), [(Some(web), None)]);
+        assert!(matches!(&app.view, View::Prs(v) if v.project == Some(web)));
+    }
+
+    #[test]
+    fn with_github_off_the_daemon_is_not_told() {
+        let (mut app, _) = app();
+        app.config.github.enabled = false;
+        let actions = app.on_key(k(K::Char('v')));
+        assert!(focus(&actions).is_empty());
+        assert!(matches!(app.view, View::Prs(_)), "the view says why");
+    }
+
+    #[test]
+    fn shift_r_reads_github_again() {
+        let (mut app, s) = app();
+        let actions = app.on_key(KeyEvent::new(K::Char('R'), M::SHIFT));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::RefreshPrs {
+                project: s[0].project
+            }]
+        );
+    }
+
+    #[test]
+    fn details_from_the_daemon_are_kept() {
+        let (mut app, _) = app();
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        };
+        app.on_event(ServerEvent::PrDetail {
+            pr,
+            state: GhState::Failed("HTTP 502".into()),
+            detail: None,
+        });
+        assert_eq!(app.pr_details[&pr].0, GhState::Failed("HTTP 502".into()));
     }
 }
