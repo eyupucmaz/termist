@@ -8,6 +8,7 @@ pub mod overlay;
 pub mod overlay_view;
 pub mod run;
 pub mod scene_view;
+pub mod selection;
 pub mod settings;
 pub mod sound;
 pub mod text_input;

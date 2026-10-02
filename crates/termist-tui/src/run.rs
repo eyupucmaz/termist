@@ -8,7 +8,7 @@ use anyhow::{Context, bail};
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event, KeyEventKind, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::supports_keyboard_enhancement;
@@ -20,6 +20,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Problem, Sounds};
 use termist_core::{ClientRequest, ServerEvent, TermColors};
+use termist_platform::clipboard::{self, Clipboard};
 use termist_platform::config_file;
 use termist_platform::framed::write_frame;
 use termist_platform::host_colors;
@@ -221,10 +222,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let (input_tx, mut input_rx) = unbounded_channel::<Event>();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
-            // Mouse capture reports every move; only buttons and the wheel are used.
-            if let Event::Mouse(m) = &ev
-                && matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
-            {
+            if !wanted(&ev) {
                 continue;
             }
             if input_tx.send(ev).is_err() {
@@ -236,6 +234,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let (listing_tx, mut listing_rx) = unbounded_channel::<Listed>();
     let (bell_tx, mut bell_rx) = unbounded_channel::<()>();
     let mut alerts = Alerts::from_env(bell_tx);
+    let mut clipboard = Clipboard::open();
     app.hour = termist_platform::clock::local_hour();
     let mut hour_read = Instant::now();
     app.start_splash(Instant::now());
@@ -291,6 +290,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 }
             };
             let actions = save_settings(&paths, &mut app, actions);
+            let actions = copy_out(&mut clipboard, &mut stdout(), actions);
             mouse_on = set_mouse(mouse_on, app.config.mouse);
             let actions = alerts.give(&paths, &app, actions);
             if perform(actions, &mut writer, &listing_tx).await? {
@@ -339,6 +339,33 @@ fn set_panic_hook(enhanced: bool) {
         undo_terminal_modes(enhanced);
         previous(info);
     }));
+}
+
+/// Puts the text copied among `actions` on the clipboard and returns the rest: on the
+/// OS clipboard, and through OSC 52 on the terminal's, which is the one that reaches
+/// the user over ssh. tmux passes OSC 52 on only with `set-clipboard on`.
+fn copy_out(clipboard: &mut Clipboard, out: &mut impl Write, actions: Vec<Action>) -> Vec<Action> {
+    let (copies, rest): (Vec<_>, Vec<_>) = actions
+        .into_iter()
+        .partition(|a| matches!(a, Action::Copy(_)));
+    for copy in copies {
+        let Action::Copy(text) = copy else {
+            continue;
+        };
+        clipboard.copy(&text);
+        let _ = out.write_all(clipboard::osc52(&text).as_bytes());
+        let _ = out.flush();
+    }
+    rest
+}
+
+/// Mouse capture reports every move; only buttons, left drags and the wheel are used.
+fn wanted(ev: &Event) -> bool {
+    !matches!(
+        ev,
+        Event::Mouse(m) if matches!(m.kind, MouseEventKind::Moved)
+            || matches!(m.kind, MouseEventKind::Drag(b) if b != MouseButton::Left)
+    )
 }
 
 /// Writes the settings changes among `actions` to config.toml and returns the rest.
@@ -462,7 +489,8 @@ async fn perform(
                 });
             }
             Action::Quit => return Ok(true),
-            Action::WriteConfig(_) | Action::Alert(_) => {} // done by `save_settings`, `Alerts`
+            // done by `save_settings`, `Alerts`, `copy_out`
+            Action::WriteConfig(_) | Action::Alert(_) | Action::Copy(_) => {}
         }
     }
     Ok(false)
@@ -473,6 +501,36 @@ mod tests {
     use super::*;
     use termist_platform::framed::FramedReader;
     use termist_platform::ipc;
+
+    #[test]
+    fn the_input_thread_keeps_left_drags_and_drops_moves() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseEvent};
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(!wanted(&mouse(MouseEventKind::Moved)));
+        assert!(!wanted(&mouse(MouseEventKind::Drag(MouseButton::Right))));
+        assert!(wanted(&mouse(MouseEventKind::Drag(MouseButton::Left))));
+        assert!(wanted(&mouse(MouseEventKind::Down(MouseButton::Left))));
+        assert!(wanted(&Event::FocusGained));
+    }
+
+    #[test]
+    fn a_copy_goes_to_the_terminal_as_osc52() {
+        let mut out = Vec::new();
+        let rest = copy_out(
+            &mut Clipboard::default(),
+            &mut out,
+            vec![Action::Copy("hi".into()), Action::Quit],
+        );
+        assert_eq!(rest, vec![Action::Quit]);
+        assert_eq!(out, b"\x1b]52;c;aGk=\x07");
+    }
 
     #[test]
     fn the_daemon_runs_from_an_existing_dir_outside_the_project() {

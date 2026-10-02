@@ -3,6 +3,7 @@ use crate::app::{App, Mode};
 use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
 use crate::scene_view::{self, ShowKind, Showing};
+use crate::selection::Selection;
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -379,7 +380,9 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     let focused = matches!(app.mode, Mode::Focus | Mode::FocusPrefix);
     let screen = app.screens.get(&info.id);
     let back = screen.map_or(0, |s| s.scroll.offset);
+    let selection = app.selection.filter(|s| s.session == info.id);
     let state = match screen {
+        _ if let Some(n) = selection.and_then(|s| s.copied) => format!(" · copied {n} characters"),
         Some(s) if app.scrolling || back > 0 => {
             format!(" · ↑ {}/{}", s.scroll.offset, s.scroll.history)
         }
@@ -401,6 +404,9 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     );
     if let Some(screen) = app.screens.get(&info.id) {
         render_screen(f.buffer_mut(), areas.pane_inner, screen, &app.theme);
+        if let Some(selection) = selection {
+            draw_selection(f.buffer_mut(), areas.pane_inner, &selection);
+        }
         let c = screen.cursor;
         // An overlay on top has the keys; a text box places its own cursor.
         if focused
@@ -417,6 +423,18 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
             Paragraph::new("Not running. Enter resumes this session.").style(app.theme.dim),
             areas.pane_inner,
         );
+    }
+}
+
+/// Selected cells swap colours: what is drawn inverse comes back plain.
+fn draw_selection(buf: &mut Buffer, area: Rect, selection: &Selection) {
+    for row in 0..area.height {
+        for col in 0..area.width {
+            if selection.contains(col, row) {
+                let cell = &mut buf[(area.x + col, area.y + row)];
+                cell.modifier.toggle(Modifier::REVERSED);
+            }
+        }
     }
 }
 
@@ -1211,6 +1229,37 @@ mod tests {
         assert_eq!(inverse.fg, Color::Rgb(0x2b, 0x25, 0x30));
         assert_eq!(inverse.bg, Color::Rgb(0xfb, 0xf4, 0xe8));
         assert!(inverse.modifier.contains(Modifier::REVERSED));
+    }
+
+    /// Selected cells swap their colours, an inverse one back to plain; the title
+    /// says what went on the clipboard.
+    #[test]
+    fn a_selection_is_drawn_inverted() {
+        let mut app = fixture();
+        let id = app.selected.unwrap();
+        let mut snap = Snapshot::blank(10, 2);
+        snap.lines[0][1].flags = cell_flags::INVERSE;
+        let before = app.screens[&id].clone();
+        app.on_event(ServerEvent::Screen {
+            session: id,
+            update: diff(Some(&before), &snap).unwrap(),
+        });
+        render(&mut app, 60, 16);
+        app.selection = Some(crate::selection::Selection {
+            session: id,
+            anchor: (0, 0),
+            head: (2, 0),
+            copied: Some(3),
+        });
+        let t = render(&mut app, 60, 16);
+        let buf = t.backend().buffer();
+        let areas = layout(Rect::new(0, 0, 60, 16), 2, PanePosition::Auto);
+        let (x, y) = (areas.pane_inner.x, areas.pane_inner.y);
+        assert!(buf[(x, y)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(x + 1, y)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(x + 2, y)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(x + 3, y)].modifier.contains(Modifier::REVERSED));
+        assert!(row(&t, areas.pane.y).contains("copied 3 characters"));
     }
 
     #[test]

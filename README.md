@@ -129,6 +129,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it) |
+| drag | select in the pane; letting go copies it |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
 | `s` / `?` | settings / every key as it is bound now |
@@ -147,7 +148,8 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `Space` | send a follow-up to a card without entering it |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
-| wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live. Shift+drag selects text |
+| wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
+| drag | select in the pane; letting go copies it to the clipboard |
 | `o` / `x` | open a project / close its tab (sessions keep running) |
 | `r` / `a` / `A` | rename / archive / show archived |
 | `d` | stop a session (asks first) |

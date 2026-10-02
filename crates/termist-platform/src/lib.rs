@@ -1,5 +1,6 @@
 //! OS boundary: paths, local sockets, framing, client.
 pub mod client;
+pub mod clipboard;
 pub mod clock;
 pub mod config_file;
 pub mod framed;

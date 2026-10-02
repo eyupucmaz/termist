@@ -496,7 +496,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         }
                         SettingRow::Mouse => {
                             let on = if app.config.mouse {
-                                "on: the wheel scrolls, Shift+drag selects"
+                                "on: the wheel scrolls, a drag copies"
                             } else {
                                 "off: the terminal's own"
                             };
@@ -740,7 +740,8 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
     lines.push(Line::default());
     lines.push(heading("Scrolling back".into()));
     for (key, what) in [
-        ("wheel", "over the pane: its history (Shift+drag selects)"),
+        ("wheel", "over the pane: its history"),
+        ("drag", "over the pane: selects and copies"),
         ("↑ ↓ j k", "a line"),
         ("PgUp PgDn", "a page (also C-b, C-f)"),
         ("C-u C-d", "half a page"),

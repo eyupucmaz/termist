@@ -7,10 +7,13 @@ use crate::overlay::{
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
 use crate::scene_view::{self, ShowKind, Showing};
+use crate::selection::Selection;
 use crate::settings::ConfigEdit;
 use crate::text_input::{Edit, TextInput};
 use crate::theme::Theme;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,8 @@ pub enum Action {
     /// An agent started waiting or finished: a sound, and a desktop notification when
     /// the terminal is not in front.
     Alert(Alert),
+    /// Text dragged out of the pane, for the clipboard.
+    Copy(String),
     Quit,
 }
 
@@ -81,6 +86,8 @@ pub struct App {
     /// The pane shows the attached session's history: the scroll keys have the
     /// keyboard, on top of the grid or focus mode.
     pub scrolling: bool,
+    /// Pane text being dragged over with the mouse, or copied and still highlighted.
+    pub selection: Option<Selection>,
     pub cards_per_row: usize,
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
@@ -181,6 +188,7 @@ impl App {
             attached: None,
             pane: (0, 0),
             pane_area: Rect::default(),
+            selection: None,
             scrolling: false,
             cards_per_row: 1,
             card_rows: 1,
@@ -569,6 +577,7 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
         self.last_input = Instant::now();
+        self.selection = None;
         // A key on a scene only takes it away.
         if self.showing.take().is_some() {
             return vec![];
@@ -699,19 +708,31 @@ impl App {
         let up = match ev.kind {
             MouseEventKind::ScrollUp => true,
             MouseEventKind::ScrollDown => false,
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
+                if self.takes_mouse(ev) {
+                    self.selection = self.attached.map(|id| Selection::new(id, self.in_pane(ev)));
+                }
+                return vec![];
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let at = self.in_pane(ev);
+                if let Some(selection) = &mut self.selection {
+                    selection.head = at;
+                }
+                return vec![];
+            }
+            MouseEventKind::Up(MouseButton::Left) => return self.copy_selection(),
             _ => return vec![],
         };
-        if self.showing.is_some()
-            || !self.overlays.is_empty()
-            || !matches!(self.mode, Mode::Grid | Mode::Focus)
-            || !self.pane_area.contains(Position::new(ev.column, ev.row))
-        {
+        if !self.takes_mouse(ev) {
             return vec![];
         }
         let Some(id) = self.attached else {
             return vec![];
         };
         self.last_input = Instant::now();
+        self.selection = None;
         let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
         if modes.mouse_reporting {
             let (col, row) = (ev.column - self.pane_area.x, ev.row - self.pane_area.y);
@@ -729,6 +750,40 @@ impl App {
             (false, true) => self.scroll_down(WHEEL_LINES),
             (false, false) => vec![],
         }
+    }
+
+    /// The mouse is over the pane and nothing sits on top of it.
+    fn takes_mouse(&self, ev: MouseEvent) -> bool {
+        self.showing.is_none()
+            && self.overlays.is_empty()
+            && matches!(self.mode, Mode::Grid | Mode::Focus)
+            && self.pane_area.contains(Position::new(ev.column, ev.row))
+    }
+
+    /// Where the mouse is in the pane's cells, held to its edges.
+    fn in_pane(&self, ev: MouseEvent) -> (u16, u16) {
+        let a = self.pane_area;
+        let col = ev.column.clamp(a.x, a.right().saturating_sub(1)) - a.x;
+        let row = ev.row.clamp(a.y, a.bottom().saturating_sub(1)) - a.y;
+        (col, row)
+    }
+
+    /// The button came up: a drag puts its text on the clipboard and stays
+    /// highlighted; a click without one leaves nothing selected.
+    fn copy_selection(&mut self) -> Vec<Action> {
+        let Some(selection) = &mut self.selection else {
+            return vec![];
+        };
+        let text = match self.screens.get(&selection.session) {
+            Some(screen) if selection.anchor != selection.head => selection.text(screen),
+            _ => String::new(),
+        };
+        if text.is_empty() {
+            self.selection = None;
+            return vec![];
+        }
+        selection.copied = Some(text.chars().count());
+        vec![Action::Copy(text)]
     }
 
     /// Starts scrolling the pane `lines` back, if its session has history to show. A
@@ -808,6 +863,7 @@ impl App {
             return vec![];
         }
         self.pane = (cols, rows);
+        self.selection = None;
         if cols == 0 || rows == 0 {
             return vec![];
         }
@@ -3345,6 +3401,111 @@ mod tests {
             "scroll back is its own PageUp"
         );
         assert!(!app.scrolling, "its keys stay its own");
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) -> Vec<Action> {
+        app.on_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: M::NONE,
+        })
+    }
+
+    fn drag(app: &mut App, from: (u16, u16), to: (u16, u16)) -> Vec<Action> {
+        use ratatui::crossterm::event::MouseButton::Left;
+        let mut actions = mouse(app, MouseEventKind::Down(Left), from.0, from.1);
+        actions.extend(mouse(app, MouseEventKind::Drag(Left), to.0, to.1));
+        actions.extend(mouse(app, MouseEventKind::Up(Left), to.0, to.1));
+        actions
+    }
+
+    fn copies(actions: &[Action]) -> Vec<&str> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Copy(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The attached card's screen with `text` written on its third line.
+    fn writing(app: &mut App, text: &str) -> SessionId {
+        app.pane_area = Rect::new(0, 10, 80, 20);
+        let id = history(app, 0, 0);
+        let line = &mut app.screens.get_mut(&id).unwrap().lines[2];
+        for (c, ch) in text.chars().enumerate() {
+            line[c].ch = ch;
+        }
+        id
+    }
+
+    #[test]
+    fn a_drag_over_the_pane_copies_on_release() {
+        let (mut app, _) = app();
+        let id = writing(&mut app, "hello world");
+        let actions = drag(&mut app, (0, 12), (4, 12));
+        assert_eq!(copies(&actions), vec!["hello"]);
+        assert!(sent(&actions).is_empty(), "nothing reaches the session");
+        let selection = app.selection.unwrap();
+        assert_eq!(selection.session, id);
+        assert_eq!((selection.anchor, selection.head), ((0, 2), (4, 2)));
+        assert_eq!(selection.copied, Some(5), "the highlight stays");
+    }
+
+    #[test]
+    fn a_program_that_wants_the_mouse_does_not_get_the_drag() {
+        let (mut app, _) = app();
+        let id = writing(&mut app, "hello world");
+        let modes = &mut app.screens.get_mut(&id).unwrap().modes;
+        modes.alt_screen = true;
+        modes.mouse_reporting = true;
+        modes.sgr_mouse = true;
+        app.on_key(k(K::Enter));
+        assert_eq!(app.mode, Mode::Focus);
+        let actions = drag(&mut app, (6, 12), (10, 12));
+        assert_eq!(copies(&actions), vec!["world"]);
+        assert!(sent(&actions).is_empty());
+    }
+
+    #[test]
+    fn a_click_without_a_drag_clears_the_selection() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        let actions = drag(&mut app, (7, 12), (7, 12));
+        assert!(copies(&actions).is_empty());
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn a_drag_past_the_pane_stops_at_its_edge() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (6, 12), (200, 60));
+        assert_eq!(app.selection.unwrap().head, (79, 19));
+    }
+
+    #[test]
+    fn a_drag_that_starts_off_the_pane_selects_nothing() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        let actions = drag(&mut app, (0, 3), (4, 12));
+        assert!(copies(&actions).is_empty());
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn a_key_or_the_wheel_clears_the_selection() {
+        let (mut app, _) = app();
+        writing(&mut app, "hello world");
+        drag(&mut app, (0, 12), (4, 12));
+        app.on_key(k(K::Char('j')));
+        assert_eq!(app.selection, None, "a key");
+        drag(&mut app, (0, 12), (4, 12));
+        wheel(&mut app, true, 5, 12);
+        assert_eq!(app.selection, None, "the wheel moves what is under it");
     }
 
     #[test]
