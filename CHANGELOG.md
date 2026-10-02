@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Drag over the pane to copy.** Select text in any session, agent or shell, with the mouse; it goes to
+  the clipboard when you let go, and stays highlighted until you click, type or scroll. The pane's
+  title says how many characters were copied. termist writes the system clipboard itself, so this works
+  inside tmux too, and sends OSC 52 for terminals reached over ssh. `Shift`+drag still gives you your
+  terminal's own selection.
+
 ## 0.1.0-beta.4 - 2026-09-30
 
 You can scroll back through what an agent wrote.

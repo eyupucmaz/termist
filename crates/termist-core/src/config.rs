@@ -160,8 +160,8 @@ pub struct Config {
     pub theme: String,
     pub colors: ColorDepth,
     pub animations: bool,
-    /// termist takes the mouse: the wheel scrolls a session's history. Off, the
-    /// terminal keeps it (its own selection, no Shift needed).
+    /// termist takes the mouse: the wheel scrolls a session's history and a drag
+    /// copies from the pane. Off, the terminal keeps it (its own selection).
     pub mouse: bool,
     pub editor: Option<String>,
     pub scenes: ScenesConfig,

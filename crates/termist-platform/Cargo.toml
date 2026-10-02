@@ -9,10 +9,14 @@ repository.workspace = true
 [dependencies]
 termist-core.workspace = true
 anyhow.workspace = true
+arboard.workspace = true
 etcetera.workspace = true
 interprocess.workspace = true
 serde.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { workspace = true, features = ["wayland-data-control"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
