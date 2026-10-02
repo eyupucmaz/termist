@@ -13,6 +13,8 @@ arboard.workspace = true
 etcetera.workspace = true
 interprocess.workspace = true
 serde.workspace = true
+starship-battery.workspace = true
+sysinfo.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

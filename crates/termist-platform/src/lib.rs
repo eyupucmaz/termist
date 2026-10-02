@@ -8,6 +8,7 @@ pub mod host_colors;
 pub mod ipc;
 pub mod notify;
 pub mod paths;
+pub mod sysstat;
 pub mod term;
 
 pub use client::Client;
