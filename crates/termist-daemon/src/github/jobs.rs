@@ -23,25 +23,24 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             repos,
         } => {
             let q = query::permissions(&names(&repos));
-            let mut seen = vec![Vec::new(); repos.len()];
-            let mut failure = None;
-            for a in &accounts {
-                match gh::graphql(&*gh.0, &a.token, &q) {
-                    Ok(v) => {
-                        for (i, p) in query::parse_permissions(&v, repos.len())
-                            .into_iter()
-                            .enumerate()
-                        {
-                            seen[i].push((a.login.clone(), p, a.active));
-                        }
+            let ask = || -> Result<Vec<_>, GhState> {
+                let mut seen = vec![Vec::new(); repos.len()];
+                // One account that could not answer would read as "no access" and pick
+                // another reader: the whole question is asked again instead.
+                for a in &accounts {
+                    let v = gh::graphql(&*gh.0, &a.token, &q)?;
+                    for (i, p) in query::parse_permissions(&v, repos.len())
+                        .into_iter()
+                        .enumerate()
+                    {
+                        seen[i].push((a.login.clone(), p, a.active));
                     }
-                    Err(e) => failure = Some(e),
                 }
-            }
-            Done::Permissions(match failure {
-                Some(e) if seen.iter().all(Vec::is_empty) => Err(e),
-                _ => Ok(repos.into_iter().map(|(id, ..)| id).zip(seen).collect()),
-            })
+                Ok(seen)
+            };
+            Done::Permissions(
+                ask().map(|seen| repos.iter().map(|(id, ..)| *id).zip(seen).collect()),
+            )
         }
         Job::Inbox {
             gh,
@@ -196,6 +195,26 @@ mod tests {
                     ("me".to_string(), None, false)
                 ]
             )]
+        );
+    }
+
+    #[test]
+    fn one_account_failing_is_a_failure() {
+        let fake = FakeGh::new(|call| match call.token.as_deref() {
+            Some("tok-work") => ok(r#"{"data":{"r0":{"viewerPermission":"WRITE"}}}"#),
+            _ => fails("", "gh: HTTP 502"),
+        });
+        let done = run(
+            Job::Permissions {
+                gh: GhHandle(fake),
+                accounts: vec![account("work", true), account("me", false)],
+                repos: slugs(&["site"]),
+            },
+            &(Arc::new(|| None) as Locate),
+        );
+        assert!(
+            matches!(done, Done::Permissions(Err(GhState::Failed(_)))),
+            "{done:?}"
         );
     }
 

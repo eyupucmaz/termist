@@ -163,6 +163,16 @@ impl Repo {
         self.stored.account.as_deref().or(self.chosen.as_deref())
     }
 
+    /// Picks the account to read with; another reader is another viewer, whose first
+    /// read announces nothing.
+    fn choose(&mut self, chosen: Option<String>) {
+        let before = self.account().map(str::to_string);
+        self.chosen = chosen;
+        if self.account() != before.as_deref() {
+            self.asked = None;
+        }
+    }
+
     fn slug(&self) -> Slug {
         (
             self.stored.id,
@@ -201,6 +211,8 @@ pub struct GitHub {
     clients: HashMap<ClientId, Focus>,
     auth: Auth,
     auth_beat: Beat,
+    /// Load the accounts again while the old ones keep reading (`R`, the repos window).
+    reload: bool,
     repos: Vec<Repo>,
     discovered: HashSet<ProjectId>,
     discovering: HashSet<ProjectId>,
@@ -233,6 +245,7 @@ impl GitHub {
             clients: HashMap::new(),
             auth: Auth::Unknown,
             auth_beat: Beat::default(),
+            reload: false,
             repos: repos.into_iter().map(Repo::new).collect(),
             discovered: HashSet::new(),
             discovering: HashSet::new(),
@@ -378,6 +391,23 @@ impl GitHub {
             .collect()
     }
 
+    /// Accounts and access may have changed outside termist (a `gh auth login`, an
+    /// invitation accepted): load the accounts again and ask again about the repos of
+    /// `project` no account could see.
+    fn look_again(&mut self, project: ProjectId, now: Instant) {
+        if matches!(self.auth, Auth::Ready { .. }) {
+            self.reload = true;
+        }
+        for r in self
+            .repos
+            .iter_mut()
+            .filter(|r| r.stored.project == project && r.state == GhState::NoAccess)
+        {
+            r.checked = false;
+        }
+        self.permissions.hurry(now);
+    }
+
     pub fn request(
         &mut self,
         client: ClientId,
@@ -436,6 +466,7 @@ impl GitHub {
         }
         match req {
             ClientRequest::ListRepos { project } => {
+                self.look_again(project, now);
                 fx.send(To::One(client), self.repos_event(project));
                 if let Some(p) = projects.iter().find(|p| p.id == project)
                     && self.discovering.insert(project)
@@ -488,6 +519,7 @@ impl GitHub {
                 if matches!(self.auth, Auth::Failed(_)) {
                     self.auth_beat.hurry(now);
                 }
+                self.look_again(project, now);
                 self.hurry_project(project, now);
                 let open: Vec<PrRef> = self.clients.values().filter_map(|f| f.pr).collect();
                 for pr in open {
@@ -526,6 +558,14 @@ impl GitHub {
         if matches!(self.auth, Auth::Unknown | Auth::Failed(_)) && self.auth_beat.due(now) {
             self.auth_beat.start();
             self.auth = Auth::Loading;
+            fx.jobs.push(Job::Accounts);
+        } else if self.reload
+            && matches!(self.auth, Auth::Ready { .. })
+            && !self.auth_beat.in_flight()
+        {
+            // Ready stays, with the old accounts, until the new list arrives.
+            self.reload = false;
+            self.auth_beat.start();
             fx.jobs.push(Job::Accounts);
         }
         for p in projects.iter().filter(|p| p.open) {
@@ -657,7 +697,13 @@ impl GitHub {
                 self.auth_beat.finish(now, true, poller::AUTH_RETRY);
                 for r in &mut self.repos {
                     r.checked = false;
-                    r.chosen = None;
+                    // A reload keeps the reader while it is still logged in, until
+                    // access is asked again.
+                    let kept = r
+                        .chosen
+                        .clone()
+                        .filter(|login| accounts.iter().any(|a| &a.login == login));
+                    r.choose(kept);
                     r.state = match &r.stored.account {
                         Some(login) if !accounts.iter().any(|a| &a.login == login) => {
                             GhState::LoggedOut
@@ -668,6 +714,13 @@ impl GitHub {
                 self.permissions = Beat::default();
                 self.auth = Auth::Ready { gh, accounts };
                 fx.extend(self.snapshot(To::All, projects));
+            }
+            Done::Accounts(Err(GhState::Failed(why)))
+                if matches!(self.auth, Auth::Ready { .. }) =>
+            {
+                // A reload that could not finish: the accounts read so far still work.
+                tracing::warn!(error = %why, "could not load the GitHub accounts again");
+                self.auth_beat.finish(now, false, poller::AUTH_RETRY);
             }
             Done::Accounts(Err(state)) => {
                 self.auth_beat.finish(now, false, poller::AUTH_RETRY);
@@ -719,7 +772,7 @@ impl GitHub {
                         continue;
                     };
                     r.checked = true;
-                    r.chosen = accounts::pick(&seen);
+                    r.choose(accounts::pick(&seen));
                     if r.account().is_none() {
                         r.state = GhState::NoAccess;
                     }
@@ -1655,6 +1708,84 @@ mod tests {
         let project = w.projects[0].id;
         w.request(ClientRequest::RefreshPrs { project });
         assert!(matches!(w.tick().jobs[..], [Job::Accounts]));
+    }
+
+    /// The accounts jobs among `fx`.
+    fn reloads(fx: &Effects) -> usize {
+        fx.jobs
+            .iter()
+            .filter(|j| matches!(j, Job::Accounts))
+            .count()
+    }
+
+    #[test]
+    fn refresh_and_the_repos_window_load_the_accounts_again_and_keep_reading() {
+        let mut w = two_projects();
+        let project = w.projects[0].id;
+        w.request(ClientRequest::RefreshPrs { project });
+        let fx = w.tick();
+        assert_eq!(reloads(&fx), 1);
+        assert!(!rounds(&w, &fx).is_empty(), "the old accounts still read");
+        assert_eq!(reloads(&w.tick()), 0, "one at a time");
+        // A reload that fails keeps what was read.
+        let fx = w.done(Done::Accounts(Err(GhState::Failed("timeout".into()))));
+        assert!(fx.events.is_empty());
+        assert_eq!(w.gh.repo(w.id("site")).unwrap().account(), Some("work"));
+        w.request(ClientRequest::ListRepos { project });
+        assert_eq!(reloads(&w.tick()), 1);
+        w.done(Done::Accounts(Ok((
+            handle(),
+            vec![account("work", true), account("me", false)],
+        ))));
+        assert_eq!(
+            w.gh.repo(w.id("site")).unwrap().account(),
+            Some("work"),
+            "still read by the same account until access is asked again"
+        );
+    }
+
+    #[test]
+    fn a_repo_no_account_could_see_is_asked_again_on_refresh() {
+        let mut w = world(&["work"]);
+        w.ready(vec![account("work", true)]);
+        w.found(0, &[("site", "acme", "site")]);
+        w.permit(&[("site", &[("work", None, true)])]);
+        assert_eq!(w.gh.repo(w.id("site")).unwrap().state, GhState::NoAccess);
+        assert!(
+            !w.tick()
+                .jobs
+                .iter()
+                .any(|j| matches!(j, Job::Permissions { .. })),
+            "asked once"
+        );
+        let project = w.projects[0].id;
+        w.request(ClientRequest::RefreshPrs { project });
+        w.permit(&[("site", &[("work", Some(Read), true)])]);
+        assert_eq!(w.gh.repo(w.id("site")).unwrap().account(), Some("work"));
+    }
+
+    #[test]
+    fn another_reader_announces_nothing_on_its_first_round() {
+        let mut w = world(&["work"]);
+        w.ready(vec![account("work", true), account("me", false)]);
+        w.found(0, &[("site", "acme", "site")]);
+        w.permit(&[("site", &[("work", Some(Write), true), ("me", None, false)])]);
+        w.tick();
+        let t = "2026-10-02T10:00:00Z";
+        answer(&mut w, 0, "work", &["site"], vec![pr(212, true, t)]);
+        assert!(w.gh.repo(w.id("site")).unwrap().asked.is_some());
+        // Access changed: the other account reads it now.
+        let project = w.projects[0].id;
+        w.request(ClientRequest::RefreshPrs { project });
+        assert_eq!(reloads(&w.tick()), 1);
+        w.done(Done::Accounts(Ok((
+            handle(),
+            vec![account("work", true), account("me", false)],
+        ))));
+        w.permit(&[("site", &[("work", None, true), ("me", Some(Admin), false)])]);
+        let r = w.gh.repo(w.id("site")).unwrap();
+        assert_eq!(r.account(), Some("me"));
+        assert!(r.asked.is_none(), "a new viewer learns first");
     }
 
     #[test]
