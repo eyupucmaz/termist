@@ -544,6 +544,17 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             let on = if on { "on, in the top right" } else { "off" };
                             (name, format!("‹ {on} ›{}", local(key)))
                         }
+                        SettingRow::PullRequests => {
+                            let on = if app.config.github.enabled {
+                                "on: through gh"
+                            } else {
+                                "off"
+                            };
+                            (
+                                "pull requests",
+                                format!("‹ {on} ›{}", local("github.enabled")),
+                            )
+                        }
                     };
                     Line::from(Span::styled(
                         format!(" {name:<13} {value}"),

@@ -1798,6 +1798,7 @@ impl App {
             SettingRow::StatusRam => "status.ram",
             SettingRow::StatusBattery => "status.battery",
             SettingRow::StatusClock => "status.clock",
+            SettingRow::PullRequests => "github.enabled",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -1831,6 +1832,15 @@ impl App {
                 return vec![
                     Action::WriteConfig(ConfigEdit::Set { key, value }),
                     Action::Preview(chosen),
+                ];
+            }
+            SettingRow::PullRequests => {
+                self.config.github.enabled = !self.config.github.enabled;
+                let value = self.config.github.enabled;
+                quiet(self);
+                return vec![
+                    Action::WriteConfig(ConfigEdit::SetBool { key, value }),
+                    Action::Send(ClientRequest::SetGitHub { enabled: value }),
                 ];
             }
             SettingRow::Desktop
@@ -5363,6 +5373,26 @@ mod tests {
             key: "notify.toasts",
             value: false,
         })));
+    }
+
+    #[test]
+    fn the_pull_requests_setting_tells_the_daemon() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::PullRequests)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(!app.config.github.enabled);
+        assert!(actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+            key: "github.enabled",
+            value: false
+        })));
+        assert!(sent(&actions).contains(&&ClientRequest::SetGitHub { enabled: false }));
     }
 
     #[test]

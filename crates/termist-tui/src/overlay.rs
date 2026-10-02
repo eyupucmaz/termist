@@ -73,9 +73,11 @@ pub enum SettingRow {
     StatusRam,
     StatusBattery,
     StatusClock,
+    /// Pull requests through gh.
+    PullRequests,
 }
 
-pub const SETTING_ROWS: [SettingRow; 17] = [
+pub const SETTING_ROWS: [SettingRow; 18] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
@@ -93,6 +95,7 @@ pub const SETTING_ROWS: [SettingRow; 17] = [
     SettingRow::StatusRam,
     SettingRow::StatusBattery,
     SettingRow::StatusClock,
+    SettingRow::PullRequests,
 ];
 
 /// What a captured key will be.

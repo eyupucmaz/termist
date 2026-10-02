@@ -217,6 +217,13 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         ansi: None,
     });
     write_frame(&mut writer, &ClientRequest::SetColors(app.agent_colors())).await?;
+    write_frame(
+        &mut writer,
+        &ClientRequest::SetGitHub {
+            enabled: app.config.github.enabled,
+        },
+    )
+    .await?;
     let _ = execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
     let mut mouse_on = set_mouse(false, app.config.mouse);
     if enhanced {
