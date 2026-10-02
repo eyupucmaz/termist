@@ -2,6 +2,7 @@ use crate::app::{Action, App};
 use crate::browse::{self, Listing};
 use crate::keys::Keymap;
 use crate::settings;
+use crate::sound::Recording;
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, bail};
@@ -18,7 +19,7 @@ use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use termist_core::config::{ColorDepth, Problem, Sounds};
+use termist_core::config::{ColorDepth, Problem, Sound};
 use termist_core::{ClientRequest, ServerEvent, TermColors};
 use termist_platform::clipboard::{self, Clipboard};
 use termist_platform::config_file;
@@ -416,14 +417,22 @@ impl Alerts {
         }
     }
 
-    /// Gives the alerts among `actions` and returns the rest.
+    /// Gives the alerts and sound previews among `actions` and returns the rest.
     fn give(&mut self, paths: &Paths, app: &App, actions: Vec<Action>) -> Vec<Action> {
         let (alerts, rest): (Vec<_>, Vec<_>) = actions
             .into_iter()
-            .partition(|a| matches!(a, Action::Alert(_)));
+            .partition(|a| matches!(a, Action::Alert(_) | Action::Preview(_)));
         for alert in alerts {
-            let Action::Alert(alert) = alert else {
-                continue;
+            let alert = match alert {
+                Action::Alert(alert) => alert,
+                Action::Preview(chosen) => {
+                    let bell = self.bell.clone();
+                    sound(paths, chosen, move || {
+                        let _ = bell.send(());
+                    });
+                    continue;
+                }
+                _ => continue,
             };
             let now = Instant::now();
             if self
@@ -432,7 +441,12 @@ impl Alerts {
             {
                 self.last_sound = Some(now);
                 let bell = self.bell.clone();
-                sound(paths, app.config.notify.sounds, move || {
+                let chosen = if alert.waiting {
+                    app.config.notify.waiting_sound
+                } else {
+                    app.config.notify.done_sound
+                };
+                sound(paths, chosen, move || {
                     let _ = bell.send(());
                 });
             }
@@ -448,19 +462,24 @@ impl Alerts {
     }
 }
 
-/// Plays a sound as the settings say: termist's martı, the system's, or the bell.
-/// `failed` asks for the bell later, if a player starts but cannot play.
-fn sound(paths: &Paths, setting: Sounds, failed: impl FnOnce() + Send + 'static) {
-    let played = match setting {
-        Sounds::Off => return,
-        Sounds::Bell => false,
-        Sounds::Istanbul => crate::sound::file(&paths.data_dir.join("sounds"))
-            .is_ok_and(|file| notify::play(&file, failed)),
-        Sounds::System => notify::system_sound().is_some_and(|file| notify::play(&file, failed)),
+/// Plays a sound as the settings say: termist's martı or kedi, the system's, or the
+/// bell. `failed` asks for the bell later, if a player starts but cannot play.
+fn sound(paths: &Paths, setting: Sound, failed: impl FnOnce() + Send + 'static) {
+    let file = match setting {
+        Sound::Off => return,
+        Sound::Bell => None,
+        Sound::Marti => recording(paths, Recording::Marti),
+        Sound::Kedi => recording(paths, Recording::Kedi),
+        Sound::System => notify::system_sound(),
     };
+    let played = file.is_some_and(|file| notify::play(&file, failed));
     if !played {
         ring_bell();
     }
+}
+
+fn recording(paths: &Paths, recording: Recording) -> Option<PathBuf> {
+    crate::sound::file(&paths.data_dir.join("sounds"), recording).ok()
 }
 
 fn ring_bell() {
@@ -490,7 +509,7 @@ async fn perform(
             }
             Action::Quit => return Ok(true),
             // done by `save_settings`, `Alerts`, `copy_out`
-            Action::WriteConfig(_) | Action::Alert(_) | Action::Copy(_) => {}
+            Action::WriteConfig(_) | Action::Alert(_) | Action::Preview(_) | Action::Copy(_) => {}
         }
     }
     Ok(false)

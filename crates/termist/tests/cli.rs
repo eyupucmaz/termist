@@ -126,8 +126,19 @@ fn sound_test_writes_the_sound_and_names_it() {
         tmp.path().join("data").join("sounds").join("marti.wav")
     );
     assert!(std::fs::read(&path).unwrap().starts_with(b"RIFF"));
+    let out = termist(tmp.path(), &["sound", "test", "kedi"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        tmp.path()
+            .join("data")
+            .join("sounds")
+            .join("kedi.wav")
+            .display()
+            .to_string()
+    );
     let out = termist(tmp.path(), &["sound", "test", "vapur"]);
-    assert_eq!(out.status.code(), Some(2), "there is no other sound");
+    assert_eq!(out.status.code(), Some(2), "there is no ferry any more");
 }
 
 /// A stand-in `curl` on PATH: GitHub's API names v9.9.9, and the release's installer

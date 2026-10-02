@@ -71,24 +71,36 @@ impl ColorDepth {
     }
 }
 
+/// The sound for one kind of alert: one of termist's recordings, the system's, the
+/// terminal bell, or none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Sounds {
-    #[default]
-    Istanbul,
+pub enum Sound {
+    /// A seagull.
+    Marti,
+    /// A cat's meow.
+    Kedi,
     System,
     Bell,
+    #[default]
     Off,
 }
 
-impl Sounds {
-    pub const ALL: [Sounds; 4] = [Sounds::Istanbul, Sounds::System, Sounds::Bell, Sounds::Off];
+impl Sound {
+    pub const ALL: [Sound; 5] = [
+        Sound::Marti,
+        Sound::Kedi,
+        Sound::System,
+        Sound::Bell,
+        Sound::Off,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
-            Sounds::Istanbul => "istanbul",
-            Sounds::System => "system",
-            Sounds::Bell => "bell",
-            Sounds::Off => "off",
+            Sound::Marti => "marti",
+            Sound::Kedi => "kedi",
+            Sound::System => "system",
+            Sound::Bell => "bell",
+            Sound::Off => "off",
         }
     }
 }
@@ -113,7 +125,10 @@ impl Default for ScenesConfig {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifyConfig {
-    pub sounds: Sounds,
+    /// When an agent is done.
+    pub done_sound: Sound,
+    /// When an agent waits for you: a question, a permission.
+    pub waiting_sound: Sound,
     pub desktop: bool,
 }
 
@@ -183,7 +198,8 @@ impl Default for Config {
             editor: None,
             scenes: ScenesConfig::default(),
             notify: NotifyConfig {
-                sounds: Sounds::Off,
+                done_sound: Sound::Off,
+                waiting_sound: Sound::Off,
                 desktop: true,
             },
             worktrees: WorktreesConfig::default(),
@@ -336,10 +352,18 @@ impl Reader<'_> {
         let Some(mut n) = self.table(t, "", "notify") else {
             return d;
         };
+        // Earlier releases had one `sounds` setting for both alerts; it still serves an
+        // alert without its own.
+        let both = self.sound(&mut n, "sounds");
         let notify = NotifyConfig {
-            sounds: self
-                .choice(&mut n, "notify", "sounds", &Sounds::ALL, Sounds::id)
-                .unwrap_or(d.sounds),
+            done_sound: self
+                .sound(&mut n, "done_sound")
+                .or(both)
+                .unwrap_or(d.done_sound),
+            waiting_sound: self
+                .sound(&mut n, "waiting_sound")
+                .or(both)
+                .unwrap_or(d.waiting_sound),
             desktop: self.bool(&mut n, "notify", "desktop").unwrap_or(d.desktop),
         };
         self.unknown("notify", n);
@@ -499,6 +523,14 @@ impl Reader<'_> {
         found
     }
 
+    /// A sound in `[notify]`; `istanbul`, the martı's name before there was a cat, too.
+    fn sound(&mut self, n: &mut Table, key: &str) -> Option<Sound> {
+        if n.get(key).and_then(Value::as_str) == Some("istanbul") {
+            n.insert(key.into(), Value::String(Sound::Marti.id().into()));
+        }
+        self.choice(n, "notify", key, &Sound::ALL, Sound::id)
+    }
+
     /// Whatever is left in `t` was not read: report each key.
     fn unknown(&mut self, parent: &str, t: Table) {
         for key in t.keys() {
@@ -538,7 +570,8 @@ idle_minutes = 10               # 0 = off
 pool = ["galata", "kiz-kulesi", "ayasofya", "kopru", "vapur", "yerebatan"]
 
 [notify]
-sounds = "off"                  # off | istanbul (a martı) | system | bell
+done_sound = "off"              # off | marti (a seagull) | kedi (a cat) | system | bell
+waiting_sound = "off"           # the same, for an agent that asks you something
 desktop = true
 
 [worktrees]
@@ -576,7 +609,8 @@ editor = "zed"
 idle_minutes = 0
 pool = ["galata", "vapur"]
 [notify]
-sounds = "istanbul"
+done_sound = "kedi"
+waiting_sound = "bell"
 [agents]
 default = "codex"
 [keys.grid]
@@ -596,7 +630,8 @@ default = "codex"
         assert_eq!(c.scenes.idle_minutes, 0);
         assert_eq!(c.scenes.pool, ["galata", "vapur"]);
         assert!(c.scenes.splash, "untouched keys keep their default");
-        assert_eq!(c.notify.sounds, Sounds::Istanbul);
+        assert_eq!(c.notify.done_sound, Sound::Kedi);
+        assert_eq!(c.notify.waiting_sound, Sound::Bell);
         assert_eq!(c.agents.default, Harness::Codex);
         assert_eq!(c.keys.grid["g"], "quick_prompt");
         assert_eq!(c.keys.grid["p"], "none");
@@ -649,6 +684,31 @@ default = "aider"
                 .any(|p| p.starts_with("animations: should be true or false"))
         );
         assert!(problems.iter().any(|p| p.contains("eminonu")));
+    }
+
+    #[test]
+    fn the_old_sounds_setting_serves_both_alerts_unless_one_has_its_own() {
+        let (c, problems) = parse("[notify]\nsounds = \"istanbul\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(c.notify.done_sound, Sound::Marti);
+        assert_eq!(c.notify.waiting_sound, Sound::Marti);
+        let (c, problems) = Config::parse(
+            "[notify]\nsounds = \"system\"\n",
+            Some("[notify]\nwaiting_sound = \"kedi\"\n"),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(c.notify.done_sound, Sound::System);
+        assert_eq!(c.notify.waiting_sound, Sound::Kedi);
+    }
+
+    #[test]
+    fn an_unknown_sound_names_the_sounds() {
+        let (c, problems) = parse("[notify]\ndone_sound = \"vapur\"\n");
+        assert_eq!(c.notify.done_sound, Sound::Off);
+        assert_eq!(
+            problems,
+            ["notify.done_sound: unknown value \"vapur\"; one of: marti, kedi, system, bell, off"]
+        );
     }
 
     #[test]

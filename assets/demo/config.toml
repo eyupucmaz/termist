@@ -3,5 +3,6 @@
 pool = ["galata"]
 
 [notify]
-sounds = "off"
+done_sound = "off"
+waiting_sound = "off"
 desktop = false

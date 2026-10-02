@@ -1,6 +1,6 @@
 mod update;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,6 +9,7 @@ use termist_core::{ClientRequest, ServerEvent};
 use termist_daemon::hook_client::run_hook;
 use termist_daemon::launch::DaemonConfig;
 use termist_platform::{Client, Paths};
+use termist_tui::sound::Recording;
 
 /// terminal istanbul — mission control for your coding agents
 #[derive(Parser)]
@@ -35,7 +36,7 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
-    /// Hear the sound: `termist sound test` plays the martı
+    /// Hear the sounds: `termist sound test kedi` plays the cat
     Sound {
         #[command(subcommand)]
         cmd: SoundCmd,
@@ -51,8 +52,20 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SoundCmd {
-    /// Play the martı as termist would, and print where its file is
-    Test,
+    /// Play a sound as termist would, and print where its file is
+    Test {
+        #[arg(value_enum, default_value_t = SoundName::Marti)]
+        sound: SoundName,
+    },
+}
+
+/// termist's own sounds, by their names in config.toml.
+#[derive(Clone, Copy, ValueEnum)]
+enum SoundName {
+    /// A seagull
+    Marti,
+    /// A cat
+    Kedi,
 }
 
 #[derive(Subcommand)]
@@ -100,10 +113,14 @@ fn main() -> ExitCode {
         return config(&paths, cmd);
     }
     if let Some(Cmd::Sound {
-        cmd: SoundCmd::Test,
+        cmd: SoundCmd::Test { sound },
     }) = &cli.cmd
     {
-        return sound_test(&paths);
+        let recording = match sound {
+            SoundName::Marti => Recording::Marti,
+            SoundName::Kedi => Recording::Kedi,
+        };
+        return sound_test(&paths, recording);
     }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let tui = cli.cmd.is_none();
@@ -188,8 +205,8 @@ fn config(paths: &Paths, cmd: &ConfigCmd) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn sound_test(paths: &Paths) -> ExitCode {
-    match termist_tui::sound::file(&paths.data_dir.join("sounds")) {
+fn sound_test(paths: &Paths, recording: Recording) -> ExitCode {
+    match termist_tui::sound::file(&paths.data_dir.join("sounds"), recording) {
         Ok(file) => {
             println!("{}", file.display());
             let (tx, rx) = std::sync::mpsc::channel();

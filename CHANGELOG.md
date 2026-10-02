@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A second sound, a kedi, and a sound for each alert.** The settings (`s`) now have a *done sound* and
+  a *waiting sound*: one for an agent that is done, one for an agent that asks you something. Each can be
+  the martı (a seagull), the kedi (a cat), the system's sound, the terminal bell, or off, and you hear a
+  sound as you pick it. In `config.toml` they are `notify.done_sound` and `notify.waiting_sound`, with
+  the values `marti`, `kedi`, `system`, `bell` and `off`. `termist sound test kedi` plays the cat.
+
+### Changed
+
+- `notify.sounds` still works and sets both sounds, unless one has its own setting. Its old value
+  `istanbul` means `marti`.
+
 ## 0.1.0 - 2026-10-02
 
 termist leaves beta. Everything the betas brought, themes, Istanbul scenes, sounds, notifications,
