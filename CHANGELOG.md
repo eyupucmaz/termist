@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-02
+
+Toasts tell you when an agent needs you, a status line shows the machine, the model list knows what
+each CLI offers, and there are thirteen new themes and a second sound.
 
 ### Added
 

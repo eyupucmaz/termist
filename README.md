@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.0-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.1-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,8 +28,9 @@
 </div>
 
 > [!NOTE]
-> **termist 0.1.0 is out**, the first full release: themes, Istanbul scenes, sounds, notifications,
-> settings, scrolling back and copying from the pane. It is used every day by its author; please
+> **termist 0.1.1 is out**: toasts in the top right, a status line, each CLI's own model list, thirteen
+> new themes and a second sound, on top of 0.1.0's themes, Istanbul scenes, notifications, settings,
+> scrolling back and copying from the pane. It is used every day by its author; please
 > [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
 
 ## Why termist
