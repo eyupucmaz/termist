@@ -489,6 +489,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             };
                             ("desktop", format!("‹ {on} ›{}", local("notify.desktop")))
                         }
+                        SettingRow::Toasts => {
+                            let on = if app.config.notify.toasts {
+                                "on, for agents that wait or are done"
+                            } else {
+                                "off (a copy still shows one)"
+                            };
+                            ("toasts", format!("‹ {on} ›{}", local("notify.toasts")))
+                        }
                         SettingRow::Splash => {
                             let on = if app.config.scenes.splash {
                                 "on"

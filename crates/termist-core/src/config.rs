@@ -130,6 +130,8 @@ pub struct NotifyConfig {
     /// When an agent waits for you: a question, a permission.
     pub waiting_sound: Sound,
     pub desktop: bool,
+    /// A toast in the corner when an agent waits or is done; a copy always gets one.
+    pub toasts: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +203,7 @@ impl Default for Config {
                 done_sound: Sound::Off,
                 waiting_sound: Sound::Off,
                 desktop: true,
+                toasts: true,
             },
             worktrees: WorktreesConfig::default(),
             agents: AgentsConfig::default(),
@@ -365,6 +368,7 @@ impl Reader<'_> {
                 .or(both)
                 .unwrap_or(d.waiting_sound),
             desktop: self.bool(&mut n, "notify", "desktop").unwrap_or(d.desktop),
+            toasts: self.bool(&mut n, "notify", "toasts").unwrap_or(d.toasts),
         };
         self.unknown("notify", n);
         notify
@@ -556,6 +560,16 @@ mod tests {
         (config, problems.iter().map(|p| p.to_string()).collect())
     }
 
+    #[test]
+    fn toasts_are_on_unless_turned_off() {
+        let (c, problems) = parse("");
+        assert!(c.notify.toasts);
+        assert!(problems.is_empty());
+        let (c, problems) = parse("[notify]\ntoasts = false\n");
+        assert!(!c.notify.toasts);
+        assert!(problems.is_empty());
+    }
+
     /// The example config of the docs, every key at its default.
     const DOCUMENTED_DEFAULTS: &str = r#"
 prefix = "C-a"
@@ -573,6 +587,7 @@ pool = ["galata", "kiz-kulesi", "ayasofya", "kopru", "vapur", "yerebatan"]
 done_sound = "off"              # off | marti (a seagull) | kedi (a cat) | system | bell
 waiting_sound = "off"           # the same, for an agent that asks you something
 desktop = true
+toasts = true                  # a toast in the corner when an agent waits or is done
 
 [worktrees]
 location = "sibling"

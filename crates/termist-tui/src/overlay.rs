@@ -62,13 +62,14 @@ pub enum SettingRow {
     DoneSound,
     WaitingSound,
     Desktop,
+    Toasts,
     Splash,
     Idle,
     Animations,
     Mouse,
 }
 
-pub const SETTING_ROWS: [SettingRow; 12] = [
+pub const SETTING_ROWS: [SettingRow; 13] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
@@ -77,6 +78,7 @@ pub const SETTING_ROWS: [SettingRow; 12] = [
     SettingRow::DoneSound,
     SettingRow::WaitingSound,
     SettingRow::Desktop,
+    SettingRow::Toasts,
     SettingRow::Splash,
     SettingRow::Idle,
     SettingRow::Animations,

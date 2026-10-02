@@ -1692,6 +1692,7 @@ impl App {
             SettingRow::DoneSound => "notify.done_sound",
             SettingRow::WaitingSound => "notify.waiting_sound",
             SettingRow::Desktop => "notify.desktop",
+            SettingRow::Toasts => "notify.toasts",
             SettingRow::Splash => "scenes.splash",
             SettingRow::Idle => "scenes.idle_minutes",
             SettingRow::Animations => "animations",
@@ -1732,11 +1733,13 @@ impl App {
                 ];
             }
             SettingRow::Desktop
+            | SettingRow::Toasts
             | SettingRow::Splash
             | SettingRow::Animations
             | SettingRow::Mouse => {
                 let flag = match row {
                     SettingRow::Desktop => &mut self.config.notify.desktop,
+                    SettingRow::Toasts => &mut self.config.notify.toasts,
                     SettingRow::Splash => &mut self.config.scenes.splash,
                     SettingRow::Mouse => &mut self.config.mouse,
                     _ => &mut self.config.animations,
@@ -4831,6 +4834,10 @@ mod tests {
             },
             {
                 app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Right))
+            },
+            {
+                app.on_key(k(K::Char('j')));
                 app.on_key(k(K::Left))
             },
             {
@@ -4854,6 +4861,10 @@ mod tests {
                 },
                 ConfigEdit::SetBool {
                     key: "notify.desktop",
+                    value: false
+                },
+                ConfigEdit::SetBool {
+                    key: "notify.toasts",
                     value: false
                 },
                 ConfigEdit::SetBool {
@@ -4990,5 +5001,24 @@ mod tests {
             Some(s[0].id),
             "the archive view shows other cards"
         );
+    }
+
+    #[test]
+    fn the_toasts_row_turns_agent_toasts_off_and_saves_it() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::Toasts)
+            .unwrap();
+        for _ in 0..row {
+            app.on_key(k(K::Down));
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(!app.config.notify.toasts);
+        assert!(actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+            key: "notify.toasts",
+            value: false,
+        })));
     }
 }
