@@ -505,6 +505,23 @@ mod tests {
     }
 
     #[test]
+    fn rows_arriving_above_the_highlight_do_not_move_it() {
+        let mut m = ModelPicker::new(
+            &launch(Harness::Codex, None, None),
+            vec!["gpt-5.5".into()],
+            &[],
+        );
+        m.models.select_index(2);
+        assert_eq!(m.models.selected(), Some(&ModelChoice::Type));
+        m.set_lists(vec!["gpt-5.5".into()], &codex_catalog(), None);
+        assert_eq!(
+            m.models.selected(),
+            Some(&ModelChoice::Type),
+            "the catalog added a row above it"
+        );
+    }
+
+    #[test]
     fn filtering_keeps_default_and_type_your_own() {
         let mut m = ModelPicker::new(
             &launch(Harness::Codex, None, None),

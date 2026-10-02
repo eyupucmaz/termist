@@ -117,6 +117,7 @@ pub struct App {
     prompt_draft: Option<String>,
     /// Recently used models per harness, as the daemon last sent them.
     recent_models: HashMap<Harness, Vec<String>>,
+    /// Each CLI's own model list per harness, as the daemon last sent it.
     pub model_catalogs: HashMap<Harness, Vec<ModelInfo>>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
