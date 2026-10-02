@@ -19,14 +19,15 @@ use repos::LocalRepo;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use termist_core::github::{GhState, PrDetail, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs};
+use termist_core::github::{
+    GhState, PrDetail, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, rfc3339,
+};
+use termist_core::status::now_ms;
 use termist_core::{ClientRequest, ProjectId, ProjectInfo, ServerEvent};
 
 /// Pull requests kept whole, to open one again at once.
-#[allow(dead_code)] // read by the rounds of Task 11
 const DETAILS: usize = 50;
 /// Below this many points left in the hour, an account is read slowly.
-#[allow(dead_code)] // read by the rounds of Task 11
 const RATE_FLOOR: u32 = 300;
 
 /// A repo to read: its id, owner and name.
@@ -193,7 +194,6 @@ struct Focus {
     pr: Option<PrRef>,
 }
 
-#[allow(dead_code)] // detail_beats, details, slow_until, seen: read by Task 11
 pub struct GitHub {
     /// The last client's `[github] enabled`.
     enabled: bool,
@@ -257,7 +257,6 @@ impl GitHub {
         self.enabled && !self.clients.is_empty()
     }
 
-    #[allow(dead_code)] // used by Task 11, and by the tests
     fn repo(&self, id: RepoId) -> Option<&Repo> {
         self.repos.iter().find(|r| r.stored.id == id)
     }
@@ -399,6 +398,38 @@ impl GitHub {
             }
             return fx;
         }
+        if let ClientRequest::SetPrFocus { project, pr } = req {
+            let before = self
+                .clients
+                .insert(client, Focus { project, pr })
+                .unwrap_or_default();
+            if let Some(p) = project
+                && before.project != Some(p)
+            {
+                for ((bp, _), beat) in &mut self.beats {
+                    if *bp == p {
+                        beat.freshen(now, poller::FOCUSED);
+                        beat.cap(now, poller::FOCUSED);
+                    }
+                }
+            }
+            if let Some(pr) = pr
+                && before.pr != Some(pr)
+            {
+                if let Some(detail) = self.cached(pr) {
+                    fx.send(
+                        To::One(client),
+                        ServerEvent::PrDetail {
+                            pr,
+                            state: GhState::Ok,
+                            detail: Some(Box::new(detail.clone())),
+                        },
+                    );
+                }
+                self.detail_beats.entry(pr).or_default().hurry(now);
+            }
+            return fx;
+        }
         if !self.enabled {
             return fx;
         }
@@ -450,6 +481,35 @@ impl GitHub {
                 }
                 self.hurry_project(project, now);
                 fx.send(To::All, self.repos_event(project));
+                fx.send(To::All, self.prs_event(project));
+            }
+            ClientRequest::RefreshPrs { project } => {
+                if matches!(self.auth, Auth::Failed(_)) {
+                    self.auth_beat.hurry(now);
+                }
+                self.hurry_project(project, now);
+                let open: Vec<PrRef> = self.clients.values().filter_map(|f| f.pr).collect();
+                for pr in open {
+                    if let Some(beat) = self.detail_beats.get_mut(&pr) {
+                        beat.hurry(now);
+                    }
+                }
+            }
+            ClientRequest::MarkPrSeen { pr, updated_at } => {
+                let Some(r) = self.repos.iter_mut().find(|r| r.stored.id == pr.repo) else {
+                    return fx;
+                };
+                let key = (r.stored.owner.clone(), r.stored.name.clone(), pr.number);
+                if let Err(e) = store.mark_seen(&key.0, &key.1, key.2, &updated_at) {
+                    tracing::warn!(error = %e, "could not store a pull request as seen");
+                }
+                if let Some(p) = r.prs.iter_mut().find(|p| p.number == pr.number)
+                    && p.updated_at <= updated_at
+                {
+                    p.unseen = false;
+                }
+                let project = r.stored.project;
+                self.seen.insert(key, updated_at);
                 fx.send(To::All, self.prs_event(project));
             }
             _ => {}
@@ -516,6 +576,70 @@ impl GitHub {
                 });
             }
         }
+        fx.extend(self.rounds(now, projects, &gh, &accounts));
+        fx
+    }
+
+    fn cached(&self, pr: PrRef) -> Option<&PrDetail> {
+        self.details.iter().find(|(p, _)| *p == pr).map(|(_, d)| d)
+    }
+
+    fn cache(&mut self, pr: PrRef, detail: PrDetail) {
+        self.details.retain(|(p, _)| *p != pr);
+        self.details.push((pr, detail));
+        if self.details.len() > DETAILS {
+            self.details.remove(0);
+        }
+    }
+
+    /// The inbox rounds that are due, and the open pull requests' details.
+    fn rounds(
+        &mut self,
+        now: Instant,
+        projects: &[ProjectInfo],
+        gh: &GhHandle,
+        accounts: &[Account],
+    ) -> Effects {
+        let mut fx = Effects::default();
+        for p in projects.iter().filter(|p| p.open) {
+            for (account, repos) in self.batches(p.id, accounts, |r| r.stored.visible) {
+                let beat = self.beats.entry((p.id, account.login.clone())).or_default();
+                if beat.due(now) {
+                    beat.start();
+                    fx.jobs.push(Job::Inbox {
+                        gh: gh.clone(),
+                        project: p.id,
+                        account,
+                        repos,
+                    });
+                }
+            }
+        }
+        let open: HashSet<PrRef> = self.clients.values().filter_map(|f| f.pr).collect();
+        self.detail_beats.retain(|pr, _| open.contains(pr));
+        for pr in open {
+            if self.detail_beats.get(&pr).is_some_and(|b| !b.due(now)) {
+                continue;
+            }
+            let Some(r) = self.repo(pr.repo) else {
+                continue;
+            };
+            let Some(account) = r
+                .account()
+                .and_then(|login| accounts.iter().find(|a| a.login == login))
+            else {
+                continue;
+            };
+            let job = Job::Detail {
+                gh: gh.clone(),
+                pr,
+                account: account.clone(),
+                owner: r.stored.owner.clone(),
+                name: r.stored.name.clone(),
+            };
+            self.detail_beats.entry(pr).or_default().start();
+            fx.jobs.push(job);
+        }
         fx
     }
 
@@ -542,6 +666,7 @@ impl GitHub {
                 }
                 self.permissions = Beat::default();
                 self.auth = Auth::Ready { gh, accounts };
+                fx.extend(self.snapshot(To::All, projects));
             }
             Done::Accounts(Err(state)) => {
                 self.auth_beat.finish(now, false, poller::AUTH_RETRY);
@@ -621,7 +746,121 @@ impl GitHub {
                 }
                 fx.send(To::All, self.repos_event(project));
             }
-            Done::Inbox { .. } | Done::Detail { .. } => {}
+            Done::Inbox {
+                project,
+                account,
+                ids,
+                reply,
+            } => {
+                let ok = reply.is_ok();
+                let stamp = rfc3339((now_ms() / 1000) as i64);
+                match reply {
+                    Ok(reply) => {
+                        if let Some(rate) = &reply.rate
+                            && rate.remaining < RATE_FLOOR
+                        {
+                            self.slow_until.insert(account.clone(), now + poller::SLOW);
+                        }
+                        for (id, result) in ids.iter().zip(reply.repos) {
+                            let Some(r) = self.repos.iter_mut().find(|r| r.stored.id == *id) else {
+                                continue;
+                            };
+                            match result {
+                                Ok((mut prs, total)) => {
+                                    for p in &mut prs {
+                                        let key = (
+                                            r.stored.owner.clone(),
+                                            r.stored.name.clone(),
+                                            p.number,
+                                        );
+                                        p.unseen = self
+                                            .seen
+                                            .get(&key)
+                                            .is_none_or(|at| at.as_str() < p.updated_at.as_str());
+                                    }
+                                    let asked: HashSet<u32> = prs
+                                        .iter()
+                                        .filter(|p| p.requested_you && !p.draft)
+                                        .map(|p| p.number)
+                                        .collect();
+                                    if let Some(before) = &r.asked {
+                                        for p in prs.iter().filter(|p| {
+                                            asked.contains(&p.number) && !before.contains(&p.number)
+                                        }) {
+                                            fx.send(
+                                                To::All,
+                                                ServerEvent::ReviewRequested {
+                                                    project,
+                                                    pr: PrRef {
+                                                        repo: *id,
+                                                        number: p.number,
+                                                    },
+                                                    repo: folder_name(&r.stored.path),
+                                                    title: p.title.clone(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    r.asked = Some(asked);
+                                    r.prs = prs;
+                                    r.total = total;
+                                    r.viewer = Some(reply.viewer.clone());
+                                    r.state = GhState::Ok;
+                                    r.fetched_at = Some(stamp.clone());
+                                    r.failed_at = None;
+                                }
+                                Err(state) => {
+                                    r.state = state;
+                                    r.failed_at = Some(stamp.clone());
+                                }
+                            }
+                        }
+                    }
+                    Err(state) => {
+                        if matches!(state, GhState::RateLimited { .. }) {
+                            self.slow_until.insert(account.clone(), now + poller::SLOW);
+                        }
+                        if state == GhState::LoggedOut && matches!(self.auth, Auth::Ready { .. }) {
+                            // A token that stopped working: load the accounts again.
+                            self.auth = Auth::Unknown;
+                            self.auth_beat.hurry(now);
+                        }
+                        for r in self.repos.iter_mut().filter(|r| ids.contains(&r.stored.id)) {
+                            r.state = state.clone();
+                            r.failed_at = Some(stamp.clone());
+                        }
+                    }
+                }
+                let focused = self.clients.values().any(|f| f.project == Some(project));
+                let slow = self.slow_until.get(&account).is_some_and(|t| now < *t);
+                if let Some(beat) = self.beats.get_mut(&(project, account)) {
+                    beat.finish(now, ok, poller::every(focused, slow));
+                }
+                fx.send(To::All, self.prs_event(project));
+            }
+            Done::Detail { pr, reply } => {
+                let ok = reply.is_ok();
+                if let Some(beat) = self.detail_beats.get_mut(&pr) {
+                    beat.finish(now, ok, poller::DETAIL);
+                }
+                let state = match reply {
+                    Ok(detail) => {
+                        self.cache(pr, detail);
+                        GhState::Ok
+                    }
+                    Err(state) => state,
+                };
+                let event = ServerEvent::PrDetail {
+                    pr,
+                    state,
+                    detail: self.cached(pr).cloned().map(Box::new),
+                };
+                for (client, focus) in &self.clients {
+                    if focus.pr == Some(pr) {
+                        fx.send(To::One(*client), event.clone());
+                    }
+                }
+            }
         }
         fx
     }
@@ -970,5 +1209,436 @@ mod tests {
         };
         let counts: Vec<_> = repos.iter().map(|r| r.open_count).collect();
         assert_eq!(counts, [Some(1), Some(3)]);
+    }
+
+    use std::time::Duration;
+
+    const S: Duration = Duration::from_secs(1);
+
+    fn pr(number: u32, requested_you: bool, updated_at: &str) -> PrSummary {
+        PrSummary {
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/acme/site/pull/{number}"),
+            author: "bob".into(),
+            draft: false,
+            state: termist_core::github::PrState::Open,
+            created_at: "2026-10-01T10:00:00Z".into(),
+            updated_at: updated_at.into(),
+            head: "feat".into(),
+            base: "main".into(),
+            additions: 1,
+            deletions: 1,
+            changed_files: 1,
+            mergeable: termist_core::github::Mergeable::Yes,
+            decision: None,
+            requested: if requested_you {
+                vec!["alice".into()]
+            } else {
+                vec![]
+            },
+            requested_you,
+            verdicts: vec![],
+            checks: termist_core::github::Checks::Passing,
+            unseen: false,
+        }
+    }
+
+    fn reply(
+        remaining: u32,
+        repos: Vec<Result<(Vec<PrSummary>, u32), GhState>>,
+    ) -> query::InboxReply {
+        query::InboxReply {
+            viewer: "alice".into(),
+            rate: Some(query::Rate {
+                remaining,
+                reset_at: "2026-10-02T11:00:00Z".into(),
+            }),
+            repos,
+        }
+    }
+
+    /// Inbox jobs of `fx`: (project index, account, repo names).
+    fn rounds(w: &World, fx: &Effects) -> Vec<(usize, String, Vec<String>)> {
+        fx.jobs
+            .iter()
+            .filter_map(|j| match j {
+                Job::Inbox {
+                    project,
+                    account,
+                    repos,
+                    ..
+                } => Some((
+                    w.projects.iter().position(|p| p.id == *project).unwrap(),
+                    account.login.clone(),
+                    repos.iter().map(|(_, _, n)| n.clone()).collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The inbox jobs the next tick starts.
+    fn ticked(w: &mut World) -> Vec<(usize, String, Vec<String>)> {
+        let fx = w.tick();
+        rounds(w, &fx)
+    }
+
+    /// A work project with acme/site and acme/admin, a personal one with me/termist,
+    /// each repo read by its account, nothing read yet.
+    fn two_projects() -> World {
+        let mut w = world(&["work", "termist"]);
+        w.ready(vec![account("work", true), account("me", false)]);
+        w.found(0, &[("site", "acme", "site"), ("admin", "acme", "admin")]);
+        w.found(1, &[("termist", "me", "termist")]);
+        w.permit(&[
+            ("site", &[("work", Some(Write), true)]),
+            ("admin", &[("work", Some(Write), true)]),
+            (
+                "termist",
+                &[("work", Some(Read), true), ("me", Some(Admin), false)],
+            ),
+        ]);
+        w
+    }
+
+    /// Answers project `i`'s round for `account` with `prs` in its first repo.
+    fn answer(
+        w: &mut World,
+        i: usize,
+        account: &str,
+        names: &[&str],
+        first: Vec<PrSummary>,
+    ) -> Effects {
+        let ids: Vec<RepoId> = names.iter().map(|n| w.id(n)).collect();
+        let mut repos = vec![Ok((first.clone(), first.len() as u32))];
+        repos.extend((1..ids.len()).map(|_| Ok((vec![], 0))));
+        let project = w.projects[i].id;
+        w.done(Done::Inbox {
+            project,
+            account: account.into(),
+            ids,
+            reply: Ok(reply(4000, repos)),
+        })
+    }
+
+    #[test]
+    fn an_inbox_round_per_project_and_account() {
+        let mut w = two_projects();
+        w.request(ClientRequest::SetRepoVisible {
+            repo: w.id("admin"),
+            visible: false,
+        });
+        let fx = w.tick();
+        assert_eq!(
+            rounds(&w, &fx),
+            [
+                (0, "work".to_string(), vec!["site".to_string()]),
+                (1, "me".to_string(), vec!["termist".to_string()]),
+            ]
+        );
+        assert!(ticked(&mut w).is_empty(), "not twice");
+    }
+
+    #[test]
+    fn a_focused_project_is_read_every_30s_others_every_3m() {
+        let mut w = two_projects();
+        let p0 = w.projects[0].id;
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(p0),
+            pr: None,
+        });
+        w.tick();
+        answer(&mut w, 0, "work", &["site", "admin"], vec![]);
+        answer(&mut w, 1, "me", &["termist"], vec![]);
+        w.now += 30 * S;
+        assert_eq!(ticked(&mut w).iter().map(|r| r.0).collect::<Vec<_>>(), [0]);
+        answer(&mut w, 0, "work", &["site", "admin"], vec![]);
+        w.now += 150 * S;
+        let due: Vec<usize> = ticked(&mut w).iter().map(|r| r.0).collect();
+        assert_eq!(due, [0, 1]);
+    }
+
+    #[test]
+    fn a_failed_round_keeps_the_last_list() {
+        let mut w = two_projects();
+        w.tick();
+        answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, false, "2026-10-02T10:00:00Z")],
+        );
+        let project = w.projects[0].id;
+        let fx = w.done(Done::Inbox {
+            project,
+            account: "work".into(),
+            ids: vec![w.id("site"), w.id("admin")],
+            reply: Err(GhState::Failed("HTTP 502".into())),
+        });
+        let Some((_, ServerEvent::Prs { repos, .. })) = fx.events.last() else {
+            panic!()
+        };
+        let site = repos.iter().find(|r| r.name == "site").unwrap();
+        assert_eq!(site.state, GhState::Failed("HTTP 502".into()));
+        assert_eq!(site.prs.len(), 1, "the last list stays");
+        assert!(site.fetched_at.is_some() && site.failed_at.is_some());
+    }
+
+    #[test]
+    fn a_review_request_after_the_first_round_is_announced_once() {
+        let mut w = two_projects();
+        w.tick();
+        let announced = |fx: &Effects| -> Vec<u32> {
+            fx.events
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    ServerEvent::ReviewRequested { pr, .. } => Some(pr.number),
+                    _ => None,
+                })
+                .collect()
+        };
+        let t = "2026-10-02T10:00:00Z";
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, true, t)],
+        );
+        assert!(announced(&fx).is_empty(), "the first round only learns");
+        let mut draft = pr(216, true, t);
+        draft.draft = true;
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, true, t), pr(215, true, t), draft],
+        );
+        assert_eq!(announced(&fx), [215]);
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, true, t), pr(215, true, t)],
+        );
+        assert!(announced(&fx).is_empty());
+    }
+
+    #[test]
+    fn unseen_follows_what_you_opened() {
+        let mut w = two_projects();
+        w.tick();
+        let unseen = |fx: &Effects| -> Vec<bool> {
+            match fx.events.last() {
+                Some((_, ServerEvent::Prs { repos, .. })) => repos
+                    .iter()
+                    .find(|r| r.name == "site")
+                    .unwrap()
+                    .prs
+                    .iter()
+                    .map(|p| p.unseen)
+                    .collect(),
+                _ => panic!(),
+            }
+        };
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, false, "2026-10-02T10:00:00Z")],
+        );
+        assert_eq!(unseen(&fx), [true]);
+        let site = w.id("site");
+        let fx = w.request(ClientRequest::MarkPrSeen {
+            pr: PrRef {
+                repo: site,
+                number: 212,
+            },
+            updated_at: "2026-10-02T10:00:00Z".into(),
+        });
+        assert_eq!(unseen(&fx), [false]);
+        assert_eq!(w.store.seen().unwrap().len(), 1);
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, false, "2026-10-02T10:00:00Z")],
+        );
+        assert_eq!(unseen(&fx), [false]);
+        let fx = answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, false, "2026-10-02T11:00:00Z")],
+        );
+        assert_eq!(unseen(&fx), [true], "changed since");
+    }
+
+    #[test]
+    fn the_open_pr_is_read_and_sent_to_who_looks() {
+        let mut w = two_projects();
+        let other = ClientId(2);
+        w.gh.connected(other);
+        let pr = PrRef {
+            repo: w.id("site"),
+            number: 212,
+        };
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(w.projects[0].id),
+            pr: Some(pr),
+        });
+        let fx = w.tick();
+        assert!(
+            fx.jobs
+                .iter()
+                .any(|j| matches!(j, Job::Detail { pr: p, .. } if *p == pr))
+        );
+        let detail = PrDetail {
+            summary: super::query::summary(
+                &serde_json::json!({"number": 212, "title": "x"}),
+                "alice",
+            )
+            .unwrap(),
+            body: "body".into(),
+            comments: vec![],
+            reviews: vec![],
+            threads: vec![],
+            checks: vec![],
+            files: vec![],
+            more: Default::default(),
+        };
+        let fx = w.done(Done::Detail {
+            pr,
+            reply: Ok(detail),
+        });
+        assert_eq!(fx.events.len(), 1);
+        assert_eq!(fx.events[0].0, To::One(w.client));
+        let fx = w.gh.request(
+            other,
+            ClientRequest::SetPrFocus {
+                project: None,
+                pr: Some(pr),
+            },
+            &w.store,
+            &w.projects,
+            w.now,
+        );
+        assert!(
+            matches!(&fx.events[0], (To::One(c), ServerEvent::PrDetail { detail: Some(_), .. }) if *c == other),
+            "the second one gets it at once"
+        );
+    }
+
+    #[test]
+    fn a_client_that_leaves_drops_its_focus() {
+        let mut w = two_projects();
+        let pr = PrRef {
+            repo: w.id("site"),
+            number: 212,
+        };
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(w.projects[0].id),
+            pr: Some(pr),
+        });
+        w.gh.connected(ClientId(2));
+        w.gh.gone(w.client);
+        let fx = w.tick();
+        assert!(!fx.jobs.iter().any(|j| matches!(j, Job::Detail { .. })));
+    }
+
+    #[test]
+    fn nothing_is_read_without_a_client() {
+        let mut w = two_projects();
+        w.gh.gone(w.client);
+        assert!(w.tick().jobs.is_empty());
+    }
+
+    #[test]
+    fn a_low_rate_limit_slows_that_account() {
+        let mut w = two_projects();
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(w.projects[0].id),
+            pr: None,
+        });
+        w.tick();
+        let ids = vec![w.id("site"), w.id("admin")];
+        let project = w.projects[0].id;
+        w.done(Done::Inbox {
+            project,
+            account: "work".into(),
+            ids,
+            reply: Ok(reply(100, vec![Ok((vec![], 0)), Ok((vec![], 0))])),
+        });
+        w.now += 60 * S;
+        assert!(ticked(&mut w).iter().all(|r| r.1 != "work"));
+        w.now += 540 * S;
+        assert!(ticked(&mut w).iter().any(|r| r.1 == "work"));
+    }
+
+    #[test]
+    fn a_token_that_stops_working_loads_the_accounts_again() {
+        let mut w = two_projects();
+        w.tick();
+        let project = w.projects[1].id;
+        let ids = vec![w.id("termist")];
+        w.done(Done::Inbox {
+            project,
+            account: "me".into(),
+            ids,
+            reply: Err(GhState::LoggedOut),
+        });
+        assert!(matches!(w.tick().jobs.first(), Some(Job::Accounts)));
+    }
+
+    #[test]
+    fn refresh_reads_now_and_retries_failed_accounts() {
+        let mut w = two_projects();
+        w.tick();
+        answer(&mut w, 0, "work", &["site", "admin"], vec![]);
+        let project = w.projects[0].id;
+        w.request(ClientRequest::RefreshPrs { project });
+        assert_eq!(ticked(&mut w).len(), 1);
+
+        let mut w = world(&["work"]);
+        w.gh.connected(w.client);
+        w.request(ClientRequest::SetGitHub { enabled: true });
+        w.tick();
+        w.done(Done::Accounts(Err(GhState::LoggedOut)));
+        let project = w.projects[0].id;
+        w.request(ClientRequest::RefreshPrs { project });
+        assert!(matches!(w.tick().jobs[..], [Job::Accounts]));
+    }
+
+    #[test]
+    fn loaded_accounts_clear_a_failure_every_client_still_shows() {
+        let mut w = world(&["work"]);
+        w.gh.connected(w.client);
+        w.request(ClientRequest::SetGitHub { enabled: true });
+        w.tick();
+        w.found(0, &[]);
+        let fx = w.done(Done::Accounts(Err(GhState::NoGh)));
+        assert_eq!(shown(&fx).map(|s| s.0), Some(GhState::NoGh));
+        let fx = w.done(Done::Accounts(Ok((handle(), vec![account("work", true)]))));
+        assert!(
+            matches!(
+                fx.events.last(),
+                Some((
+                    To::All,
+                    ServerEvent::Prs {
+                        state: GhState::Ok,
+                        ..
+                    }
+                ))
+            ),
+            "{:?}",
+            fx.events
+        );
     }
 }
