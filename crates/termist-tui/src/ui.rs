@@ -281,6 +281,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
     }
     draw_footer(f, app, areas.footer);
+    draw_toasts(f, app);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -527,6 +528,45 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
     };
     f.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// The toasts, over everything but a scene.
+fn draw_toasts(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let t = &app.theme;
+    for (toast, rect) in app.toasts.items().zip(app.toasts.rects(area)) {
+        let text = crate::toast::fit(&toast.text);
+        let line = match toast.kind {
+            crate::toast::ToastKind::Agent { status, .. } => {
+                let (_, color, _) = status_style(t, status);
+                let mut chars = text.chars();
+                let mark: String = chars.next().into_iter().collect();
+                Line::from(vec![
+                    Span::styled(mark, Style::default().fg(color)),
+                    Span::raw(chars.collect::<String>()),
+                ])
+            }
+            crate::toast::ToastKind::Copied => {
+                let mut chars = text.chars();
+                let mark: String = chars.next().into_iter().collect();
+                Line::from(vec![
+                    Span::styled(mark, t.accent),
+                    Span::raw(chars.collect::<String>()),
+                ])
+            }
+        };
+        f.render_widget(ratatui::widgets::Clear, rect);
+        f.render_widget(
+            Paragraph::new(line).style(t.base).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(t.border)
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            rect,
+        );
+    }
 }
 
 /// What to do on an empty grid.
@@ -1491,5 +1531,48 @@ mod tests {
             PanePosition::Auto,
             "the setting is untouched"
         );
+    }
+
+    #[test]
+    fn a_toast_is_drawn_in_the_top_right_corner() {
+        let mut app = fixture();
+        app.toasts.push(crate::toast::Toast {
+            text: "✓ copied 5 characters".into(),
+            kind: crate::toast::ToastKind::Copied,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        });
+        let t = render(&mut app, 80, 20);
+        // 21 characters, a space and a border on each side: columns 54-78, then one free.
+        assert!(
+            row(&t, 1).ends_with("╭───────────────────────╮"),
+            "{:?}",
+            row(&t, 1)
+        );
+        assert!(
+            row(&t, 2).ends_with("│ ✓ copied 5 characters │"),
+            "{:?}",
+            row(&t, 2)
+        );
+        assert!(
+            row(&t, 3).ends_with("╰───────────────────────╯"),
+            "{:?}",
+            row(&t, 3)
+        );
+        let buf = t.backend().buffer();
+        assert_eq!(buf[(78, 2)].symbol(), "│");
+        assert_eq!(buf[(54, 2)].symbol(), "│");
+    }
+
+    #[test]
+    fn no_toast_over_a_scene() {
+        let mut app = fixture();
+        app.start_splash(std::time::Instant::now());
+        app.toasts.push(crate::toast::Toast {
+            text: "✓ copied 5 characters".into(),
+            kind: crate::toast::ToastKind::Copied,
+            until: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        });
+        let t = render(&mut app, 80, 20);
+        assert!(!screen_text(&t).contains("copied"));
     }
 }
