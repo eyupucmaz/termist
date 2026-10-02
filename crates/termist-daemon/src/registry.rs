@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
-    ServerEvent, SessionId, SessionInfo, SessionKind, Signal, StateSnapshot, TermColors, now_ms,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
+    ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Signal, StateSnapshot,
+    TermColors, now_ms,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -29,6 +30,12 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// The agent CLIs a rescan found, with the program to launch for each.
 #[derive(Debug)]
 pub struct Rescanned(pub Vec<(Harness, PathBuf)>);
+
+/// A catalog read on a blocking thread, for `catalog_read`.
+pub struct Catalog(pub Harness, pub Vec<ModelInfo>);
+
+/// A CLI's model list is asked for again after this long.
+pub const CATALOG_FRESH: Duration = Duration::from_secs(60 * 60);
 
 pub enum Msg {
     Connected {
@@ -103,6 +110,14 @@ pub struct Registry {
     last_rescan: Option<std::time::Instant>,
     /// Looks a CLI up (PATH, then the login shell).
     find_program: fn(&str) -> Option<PathBuf>,
+    /// The models each CLI offers, and when they were read.
+    catalogs: HashMap<Harness, (Vec<ModelInfo>, std::time::Instant)>,
+    /// Clients that asked while a CLI's list was being read; each gets it when it comes.
+    catalog_waiters: HashMap<Harness, Vec<ClientId>>,
+    catalog_tx: UnboundedSender<Catalog>,
+    catalog_rx: Option<UnboundedReceiver<Catalog>>,
+    /// Asks a CLI for its models (a stand-in in tests).
+    read_catalog: fn(Harness, &str) -> Vec<ModelInfo>,
 }
 
 impl Registry {
@@ -125,6 +140,7 @@ impl Registry {
             .unwrap_or(0);
         let last_launch = store.last_launch();
         let (rescans, rescans_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (catalog_tx, catalog_rx) = tokio::sync::mpsc::unbounded_channel();
         Registry {
             launcher,
             harnesses,
@@ -145,6 +161,11 @@ impl Registry {
             rescanning: false,
             last_rescan: None,
             find_program: crate::resolve::find_program,
+            catalogs: HashMap::new(),
+            catalog_waiters: HashMap::new(),
+            catalog_tx,
+            catalog_rx: Some(catalog_rx),
+            read_catalog: crate::models::catalog,
         }
     }
 
@@ -473,15 +494,7 @@ impl Registry {
                 self.last_launch = Some(launch);
             }
             ClientRequest::ListModels { harness } => {
-                let recent = self.store.recent_models(harness);
-                self.send(
-                    client,
-                    ServerEvent::Models {
-                        harness,
-                        recent,
-                        catalog: vec![],
-                    },
-                );
+                self.list_models(client, harness, std::time::Instant::now());
             }
             ClientRequest::RescanHarnesses => self.rescan(std::time::Instant::now()),
             ClientRequest::SetColors(colors) => {
@@ -829,6 +842,74 @@ impl Registry {
         });
     }
 
+    /// Answers at once with the recent models and the catalog as it is; a catalog older
+    /// than `CATALOG_FRESH` (or none) is read again, and sent when it comes.
+    pub fn list_models(&mut self, client: ClientId, harness: Harness, now: std::time::Instant) {
+        let recent = self.store.recent_models(harness);
+        if harness == Harness::Claude {
+            let catalog = crate::models::claude();
+            self.send(
+                client,
+                ServerEvent::Models {
+                    harness,
+                    recent,
+                    catalog,
+                },
+            );
+            return;
+        }
+        let (catalog, fresh) = match self.catalogs.get(&harness) {
+            Some((list, at)) => (
+                list.clone(),
+                now.saturating_duration_since(*at) < CATALOG_FRESH,
+            ),
+            None => (vec![], false),
+        };
+        self.send(
+            client,
+            ServerEvent::Models {
+                harness,
+                recent,
+                catalog,
+            },
+        );
+        if fresh {
+            return;
+        }
+        let waiters = self.catalog_waiters.entry(harness).or_default();
+        let reading = !waiters.is_empty();
+        if !waiters.contains(&client) {
+            waiters.push(client);
+        }
+        if reading {
+            return;
+        }
+        let (tx, read) = (self.catalog_tx.clone(), self.read_catalog);
+        let program = self.launcher.programs.get(harness).to_string();
+        tokio::task::spawn_blocking(move || {
+            let _ = tx.send(Catalog(harness, read(harness, &program)));
+        });
+    }
+
+    /// A catalog was read: it is kept, and sent to every client that waited for it.
+    pub fn catalog_read(&mut self, Catalog(harness, list): Catalog, now: std::time::Instant) {
+        if list.is_empty() {
+            tracing::info!(?harness, "the CLI listed no models");
+        }
+        self.catalogs.insert(harness, (list.clone(), now));
+        let recent = self.store.recent_models(harness);
+        for client in self.catalog_waiters.remove(&harness).unwrap_or_default() {
+            self.send(
+                client,
+                ServerEvent::Models {
+                    harness,
+                    recent: recent.clone(),
+                    catalog: list.clone(),
+                },
+            );
+        }
+    }
+
     /// A rescan finished: newly found CLIs become available to every client.
     pub fn rescanned(&mut self, Rescanned(found): Rescanned) {
         self.rescanning = false;
@@ -1029,6 +1110,7 @@ pub async fn run(
     let mut transcripts = tokio::time::interval(Duration::from_millis(500));
     transcripts.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut rescans = reg.rescans_rx.take().expect("a registry runs once");
+    let mut catalogs = reg.catalog_rx.take().expect("a registry runs once");
     loop {
         tokio::select! {
             msg = rx.recv() => match msg {
@@ -1037,6 +1119,7 @@ pub async fn run(
             },
             Some(note) = notes.recv() => reg.note(note),
             Some(found) = rescans.recv() => reg.rescanned(found),
+            Some(c) = catalogs.recv() => reg.catalog_read(c, std::time::Instant::now()),
             _ = transcripts.tick() => {
                 reg.poll_transcripts();
                 reg.poll_idle_titles(std::time::Instant::now());
@@ -1544,5 +1627,93 @@ mod tests {
             reg.session(id).unwrap().info.status,
             AgentStatus::NeedsFeedback
         );
+    }
+
+    fn gpt() -> Vec<ModelInfo> {
+        vec![ModelInfo {
+            id: "gpt-6-astra".into(),
+            label: "GPT-6-Astra".into(),
+            efforts: vec!["low".into()],
+        }]
+    }
+
+    fn models(rx: &mut UnboundedReceiver<ServerEvent>) -> Vec<(Vec<String>, Vec<ModelInfo>)> {
+        let mut out = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            if let ServerEvent::Models {
+                recent, catalog, ..
+            } = ev
+            {
+                out.push((recent, catalog));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn claude_gets_its_aliases_at_once() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::ListModels {
+                harness: Harness::Claude,
+            },
+        });
+        let got = models(&mut rx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, crate::models::claude());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_is_read_once_an_hour_and_sent_when_it_comes() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.read_catalog = |_, _| gpt();
+        let mut rx = connect(&mut reg);
+        let mut results = reg.catalog_rx.take().unwrap();
+        let t0 = std::time::Instant::now();
+        reg.list_models(ClientId(1), Harness::Codex, t0);
+        assert_eq!(
+            models(&mut rx),
+            [(vec![], vec![])],
+            "at once, with what there is"
+        );
+        reg.catalog_read(results.recv().await.unwrap(), t0);
+        assert_eq!(models(&mut rx), [(vec![], gpt())], "then the list");
+        reg.list_models(ClientId(1), Harness::Codex, t0 + Duration::from_secs(60));
+        assert_eq!(models(&mut rx), [(vec![], gpt())]);
+        tokio::task::yield_now().await;
+        assert!(
+            results.try_recv().is_err(),
+            "not read again within the hour"
+        );
+        reg.list_models(ClientId(1), Harness::Codex, t0 + CATALOG_FRESH);
+        assert_eq!(
+            models(&mut rx),
+            [(vec![], gpt())],
+            "the old list while the new is read"
+        );
+        results.recv().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_asks_while_reading_start_one_read() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        reg.read_catalog = |_, _| gpt();
+        let mut rx = connect(&mut reg);
+        let mut results = reg.catalog_rx.take().unwrap();
+        let t0 = std::time::Instant::now();
+        reg.list_models(ClientId(1), Harness::OpenCode, t0);
+        reg.list_models(ClientId(1), Harness::OpenCode, t0);
+        let found = results.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(results.try_recv().is_err(), "one read");
+        reg.catalog_read(found, t0);
+        let got = models(&mut rx);
+        assert_eq!(got.len(), 3, "two answers at once, one with the list");
+        assert_eq!(got[2].1, gpt());
     }
 }
