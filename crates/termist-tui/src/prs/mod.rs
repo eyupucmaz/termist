@@ -1,14 +1,21 @@
 //! The pull request view: a project's open pull requests (the inbox) and one of them
 //! whole (the detail). This module keeps its state and keys; `inbox_view` and
 //! `detail_view` draw it.
+pub mod inbox_view;
 pub mod markdown;
 
+use crate::app::App;
 use crate::list_picker::matches;
+use crate::theme::Theme;
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::Span;
 use std::collections::HashSet;
+use termist_core::AgentStatus;
 use termist_core::ProjectId;
-use termist_core::github::{GhState, PrRef, PrSummary, RepoPrs};
+use termist_core::github::{Checks, GhState, Mergeable, PrRef, PrSummary, RepoPrs, ReviewDecision};
 
 /// A project's pull requests as the daemon last sent them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,6 +411,64 @@ impl PrView {
             _ => {}
         }
         None
+    }
+}
+
+/// The PR view in `area`: the inbox, or the open pull request.
+pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
+    inbox_view::draw(f, app, view, area);
+}
+
+/// The footer while the PR view is up.
+pub fn hint(app: &App, view: &PrView) -> String {
+    use crate::keys::{Action, Context};
+    let key = |action| app.keymap.key(Context::Grid, action).unwrap_or_default();
+    if view.typing {
+        return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
+    }
+    if let Some(d) = &view.detail {
+        return format!(
+            "#{} · Tab section · j/k scroll · n/N next open thread · Enter fold · b browser · {} refresh · Esc list",
+            d.pr.number,
+            key(Action::RefreshGitHub)
+        );
+    }
+    format!(
+        "pull requests · Enter open · / search · f {} · m repos · b browser · {} refresh · Esc grid",
+        view.filter.next().label(),
+        key(Action::RefreshGitHub)
+    )
+}
+
+fn fg(color: ratatui::style::Color) -> Style {
+    Style::default().fg(color)
+}
+
+/// `◇` asked of you, `✓` approved, `✗` changes requested, `·` no verdict.
+pub fn review_mark(t: &Theme, pr: &PrSummary) -> Span<'static> {
+    if pr.requested_you {
+        return Span::styled("◇", fg(t.status(AgentStatus::NeedsFeedback)));
+    }
+    match pr.decision {
+        Some(ReviewDecision::Approved) => Span::styled("✓", fg(t.status(AgentStatus::Unseen))),
+        Some(ReviewDecision::ChangesRequested) => Span::styled("✗", t.error),
+        _ => Span::styled("·", t.dim),
+    }
+}
+
+pub fn checks_mark(t: &Theme, checks: Checks) -> Span<'static> {
+    match checks {
+        Checks::Passing => Span::styled("✓", fg(t.status(AgentStatus::Unseen))),
+        Checks::Failing => Span::styled("✗", t.error),
+        Checks::Pending => Span::styled("◐", fg(t.status(AgentStatus::Running))),
+        Checks::None => Span::raw(" "),
+    }
+}
+
+pub fn conflict_mark(t: &Theme, pr: &PrSummary) -> Span<'static> {
+    match pr.mergeable {
+        Mergeable::Conflicting => Span::styled("⚠", t.warn),
+        _ => Span::raw(" "),
     }
 }
 

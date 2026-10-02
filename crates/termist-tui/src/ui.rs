@@ -1,5 +1,5 @@
 //! Rendering: header, cards, live pane and footer.
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, View};
 use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
 use crate::scene_view::{self, ShowKind, Showing};
@@ -214,6 +214,15 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         None => {}
     }
     draw_header(f, app, areas.header);
+    if let View::Prs(view) = &app.view {
+        crate::prs::draw(f, app, view, areas.body);
+        for (i, overlay) in app.overlays.iter().enumerate() {
+            overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
+        }
+        draw_footer(f, app, areas.footer);
+        draw_toasts(f, app);
+        return;
+    }
     let sessions = app.project_sessions();
     if sessions.is_empty() && app.connected && !app.archive_view() {
         let hint = empty_hint(app);
@@ -295,6 +304,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             app.theme.archive.add_modifier(Modifier::BOLD),
         ));
     }
+    if matches!(app.view, View::Prs(_)) {
+        spans.push(Span::styled(
+            "pull requests ",
+            app.theme.accent.add_modifier(Modifier::BOLD),
+        ));
+    }
     for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
             app.theme.tab_active
@@ -321,6 +336,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(color),
                 ));
             }
+        }
+        let asked = app.prs.get(&p.id).map_or(0, |d| {
+            d.repos
+                .iter()
+                .flat_map(|r| &r.prs)
+                .filter(|pr| pr.requested_you && !pr.draft)
+                .count()
+        });
+        if asked > 0 && app.config.github.enabled {
+            spans.push(Span::styled(
+                format!("⇄{asked}"),
+                Style::default().fg(app.theme.status(AgentStatus::NeedsFeedback)),
+            ));
         }
     }
     // Agents waiting in closed projects; the first thing to go when space is short.
@@ -490,6 +518,10 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &Snapshot, theme: &Theme)
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let shows_message = app.mode == Mode::Grid || !app.overlays.is_empty();
+    let prs_view = match &app.view {
+        View::Prs(v) => Some(v),
+        _ => None,
+    };
     let (text, style) = match (&app.message, app.mode) {
         (Some(m), _) if shows_message => (m.clone(), t.error),
         _ if !app.overlays.is_empty() => (
@@ -542,6 +574,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             (text, t.warn)
         }
         (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
+        (_, Mode::Grid) if prs_view.is_some() => (crate::prs::hint(app, prs_view.unwrap()), t.dim),
         (_, Mode::Grid) if app.archive_view() => (archive_hint(&app.keymap), t.dim),
         (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
         (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
@@ -1624,5 +1657,109 @@ mod tests {
             "{:?}",
             row(&t, 0)
         );
+    }
+
+    use crate::prs::fixtures::{repo, summary};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use termist_core::github::{Checks, GhState, Mergeable, ReviewDecision, unix_secs};
+
+    fn screen(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The fixture's project with four pull requests in two repos, the PR view open,
+    /// the clock at noon on 2026-10-02.
+    fn pr_fixture() -> App {
+        let mut app = fixture();
+        let project = app.state.projects[0].id;
+        let mut review = summary(212, "Add a dealer filter to search", "bob");
+        review.requested_you = true;
+        review.unseen = true;
+        let mut failing = summary(209, "Fix image lazy loading", "alice");
+        failing.checks = Checks::Failing;
+        failing.decision = Some(ReviewDecision::ChangesRequested);
+        failing.updated_at = "2026-10-01T12:00:00Z".into();
+        let mut wip = summary(201, "WIP: new header", "alice");
+        wip.draft = true;
+        wip.updated_at = "2026-09-27T12:00:00Z".into();
+        let mut conflict = summary(140, "Paginate /vehicles", "carol");
+        conflict.mergeable = Mergeable::Conflicting;
+        conflict.decision = Some(ReviewDecision::Approved);
+        conflict.updated_at = "2026-10-02T06:00:00Z".into();
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: 3,
+            repos: vec![
+                repo(1, "site", vec![review, failing, wip]),
+                repo(2, "admin-api", vec![conflict]),
+            ],
+        });
+        app.frozen_now = unix_secs("2026-10-02T12:00:00Z");
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn the_inbox_beside_the_selected_pr() {
+        let mut app = pr_fixture();
+        insta::assert_snapshot!(render(&mut app, 110, 16).backend());
+    }
+
+    #[test]
+    fn a_narrow_inbox_is_only_the_list() {
+        let mut app = pr_fixture();
+        let text = screen(&render(&mut app, 70, 12));
+        assert!(text.contains("#212"));
+        assert!(
+            !text.contains("bob · feat → main"),
+            "no preview below 100 columns"
+        );
+        insta::assert_snapshot!(render(&mut app, 70, 12).backend());
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_the_row() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let data = app.prs.get_mut(&project).unwrap();
+        data.repos[0].prs[0].title = "word ".repeat(60);
+        let text = screen(&render(&mut app, 70, 12));
+        let row = text.lines().find(|l| l.contains("#212")).unwrap();
+        assert!(row.contains('…'), "{row}");
+        assert!(row.contains("2h"), "the age stays: {row}");
+    }
+
+    #[test]
+    fn without_gh_the_inbox_says_how_to_get_it() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        app.prs.get_mut(&project).unwrap().state = GhState::NoGh;
+        let text = screen(&render(&mut app, 80, 12));
+        assert!(
+            text.contains("Install gh, then run: gh auth login"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_tab_bar_counts_reviews_asked_of_you() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let header = screen(&render(&mut app, 80, 12))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(header.contains("⇄1"), "{header}");
+        assert!(!header.contains("pull requests"), "back on the grid");
     }
 }
