@@ -8,6 +8,7 @@ pub mod host_colors;
 pub mod ipc;
 pub mod notify;
 pub mod paths;
+pub mod process;
 pub mod sysstat;
 pub mod term;
 

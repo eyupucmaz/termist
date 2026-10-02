@@ -5,6 +5,7 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use termist_core::{Harness, ModelInfo};
+use termist_platform::process;
 
 pub const CLAUDE_ALIASES: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
 /// How long a CLI may take to list its models.
@@ -66,15 +67,15 @@ pub fn parse_opencode(text: &str) -> Vec<ModelInfo> {
 }
 
 /// Runs `program args` and returns what it printed if it succeeds within `limit`; one
-/// that takes longer is killed.
+/// that takes longer is killed, with whatever it started.
 pub fn run(program: &str, args: &[&str], limit: Duration) -> Option<String> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    process::quiet_child(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     // Read while it runs, so a long list cannot fill the pipe and stall it.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -88,16 +89,17 @@ pub fn run(program: &str, args: &[&str], limit: Duration) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 // Something the CLI started may keep the pipe open after it exits, so the
-                // output is waited for only until the deadline.
-                let out = rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .ok()?;
+                // output is waited for only until the deadline; then that goes too.
+                let Ok(out) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                else {
+                    process::kill_quiet_child(&mut child);
+                    return None;
+                };
                 return status.success().then_some(out);
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                process::kill_quiet_child(&mut child);
                 // The reader ends when the pipe closes; it is not waited for, in case
                 // something the CLI started keeps the pipe open.
                 return None;
@@ -228,6 +230,64 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
             started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    fn gone_within(pid: libc::pid_t, limit: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            // SAFETY: kill(2) with signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: as above; the test cleans up what it started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        false
+    }
+
+    /// Runs `sh -c body` (`$PID_FILE` names a file for a pid) and returns the pid
+    /// written there. `/bin/sh` is used, not a fresh script, which macOS may hold back
+    /// on its first run.
+    #[cfg(unix)]
+    fn run_and_read_pid(body: &str, limit: Duration) -> libc::pid_t {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("child.pid");
+        let body = body.replace("$PID_FILE", &format!("'{}'", pid_file.display()));
+        assert_eq!(run("/bin/sh", &["-c", &body], limit), None);
+        std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    // A node shim that times out must not leave the native CLI it started behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_hangs_is_killed_with_what_it_started() {
+        let pid = run_and_read_pid(
+            "sleep 30 &\necho $! > $PID_FILE\nwait",
+            Duration::from_millis(500),
+        );
+        assert!(
+            gone_within(pid, Duration::from_secs(3)),
+            "the CLI's own child still runs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_keeps_the_output_open_after_the_cli_exits_is_killed() {
+        let pid = run_and_read_pid(
+            "sleep 30 &\necho $! > $PID_FILE\necho done",
+            Duration::from_millis(500),
+        );
+        assert!(
+            gone_within(pid, Duration::from_secs(3)),
+            "what holds the output open still runs"
         );
     }
 }
