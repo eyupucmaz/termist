@@ -816,7 +816,10 @@ impl GitHub {
                             self.slow_until.insert(account.clone(), now + poller::SLOW);
                         }
                         for (id, result) in ids.iter().zip(reply.repos) {
-                            let Some(r) = self.repos.iter_mut().find(|r| r.stored.id == *id) else {
+                            // A repo read by another account since: this answer is stale.
+                            let Some(r) = self.repos.iter_mut().find(|r| {
+                                r.stored.id == *id && r.account() == Some(account.as_str())
+                            }) else {
                                 continue;
                             };
                             match result {
@@ -879,7 +882,9 @@ impl GitHub {
                             self.auth = Auth::Unknown;
                             self.auth_beat.hurry(now);
                         }
-                        for r in self.repos.iter_mut().filter(|r| ids.contains(&r.stored.id)) {
+                        for r in self.repos.iter_mut().filter(|r| {
+                            ids.contains(&r.stored.id) && r.account() == Some(account.as_str())
+                        }) {
                             r.state = state.clone();
                             r.failed_at = Some(stamp.clone());
                         }
@@ -1786,6 +1791,40 @@ mod tests {
         let r = w.gh.repo(w.id("site")).unwrap();
         assert_eq!(r.account(), Some("me"));
         assert!(r.asked.is_none(), "a new viewer learns first");
+    }
+
+    #[test]
+    fn an_answer_for_an_account_that_no_longer_reads_the_repo_is_dropped() {
+        let mut w = two_projects();
+        w.tick();
+        let site = w.id("site");
+        w.request(ClientRequest::SetRepoAccount {
+            repo: site,
+            account: Some("me".into()),
+        });
+        let t = "2026-10-02T10:00:00Z";
+        answer(
+            &mut w,
+            0,
+            "work",
+            &["site", "admin"],
+            vec![pr(212, true, t)],
+        );
+        let r = w.gh.repo(site).unwrap();
+        assert!(r.prs.is_empty() && r.viewer.is_none() && r.asked.is_none());
+        assert_eq!(
+            w.gh.repo(w.id("admin")).unwrap().viewer.as_deref(),
+            Some("alice"),
+            "its other repos still count"
+        );
+        let project = w.projects[0].id;
+        w.done(Done::Inbox {
+            project,
+            account: "work".into(),
+            ids: vec![site],
+            reply: Err(GhState::Failed("HTTP 502".into())),
+        });
+        assert_eq!(w.gh.repo(site).unwrap().state, GhState::Ok);
     }
 
     #[test]
