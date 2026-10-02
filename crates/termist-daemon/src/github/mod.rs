@@ -726,7 +726,11 @@ impl GitHub {
                 self.auth_beat.finish(now, false, poller::AUTH_RETRY);
             }
             Done::Accounts(Err(state)) => {
-                self.auth_beat.finish(now, false, poller::AUTH_RETRY);
+                let every = match state {
+                    GhState::Failed(_) => poller::AUTH_FAILED,
+                    _ => poller::AUTH_RETRY,
+                };
+                self.auth_beat.finish(now, false, every);
                 self.auth = Auth::Failed(state);
                 fx.extend(self.snapshot(To::All, projects));
             }
@@ -1137,6 +1141,24 @@ mod tests {
         assert_eq!(shown(&fx), Some((GhState::NoGh, 0, vec![])));
         assert!(w.tick().jobs.is_empty(), "not again at once");
         w.now += poller::AUTH_RETRY;
+        assert!(matches!(w.tick().jobs[..], [Job::Accounts]));
+    }
+
+    #[test]
+    fn accounts_out_of_reach_are_tried_again_soon() {
+        let mut w = world(&["work"]);
+        w.request(ClientRequest::SetGitHub { enabled: true });
+        w.tick();
+        let fx = w.done(Done::Accounts(Err(GhState::Failed(
+            "could not reach GitHub".into(),
+        ))));
+        assert_eq!(
+            shown(&fx).map(|s| s.0),
+            Some(GhState::Failed("could not reach GitHub".into()))
+        );
+        w.now += 59 * S;
+        assert!(w.tick().jobs.is_empty());
+        w.now += S;
         assert!(matches!(w.tick().jobs[..], [Job::Accounts]));
     }
 

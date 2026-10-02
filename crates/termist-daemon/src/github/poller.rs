@@ -12,6 +12,9 @@ pub const SLOW: Duration = Duration::from_secs(600);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// Accounts that could not be loaded (no gh, logged out) are tried again this often.
 pub const AUTH_RETRY: Duration = Duration::from_secs(600);
+/// Accounts that failed otherwise (GitHub out of reach) are tried again this often,
+/// doubling after each failure.
+pub const AUTH_FAILED: Duration = Duration::from_secs(30);
 /// Permission questions that failed are asked again this often.
 pub const PERMISSIONS: Duration = Duration::from_secs(30);
 

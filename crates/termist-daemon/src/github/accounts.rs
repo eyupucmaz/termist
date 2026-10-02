@@ -46,8 +46,20 @@ impl std::fmt::Debug for Account {
     }
 }
 
-/// The github.com accounts `gh auth status --json hosts` lists as working.
-pub fn parse_status(json: &str) -> Vec<(String, bool)> {
+/// What `gh auth status` found out about an account's token. gh checks each token
+/// with GitHub, so offline every account comes back failed, not only a bad one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checked {
+    Works,
+    /// GitHub turned the token down: logged out.
+    Refused,
+    /// GitHub could not be asked (offline, timed out): the token may well work.
+    Unreachable,
+}
+
+/// The github.com accounts `gh auth status --json hosts` lists: login, active, and
+/// how its token fared.
+pub fn parse_status(json: &str) -> Vec<(String, bool, Checked)> {
     let Ok(v) = serde_json::from_str::<Value>(json) else {
         return vec![];
     };
@@ -55,30 +67,53 @@ pub fn parse_status(json: &str) -> Vec<(String, bool)> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|a| a["state"].as_str() == Some("success"))
         .filter_map(|a| {
+            let login = a["login"].as_str().filter(|l| !l.is_empty())?;
+            let error = a["error"].as_str().unwrap_or("").to_lowercase();
+            let checked = match a["state"].as_str() {
+                Some("success") => Checked::Works,
+                Some("timeout") => Checked::Unreachable,
+                _ if ["401", "bad credentials", "unauthorized", "token"]
+                    .iter()
+                    .any(|s| error.contains(s)) =>
+                {
+                    Checked::Refused
+                }
+                Some("error") => Checked::Unreachable,
+                _ => Checked::Refused,
+            };
             Some((
-                a["login"].as_str()?.to_string(),
+                login.to_string(),
                 a["active"].as_bool().unwrap_or(false),
+                checked,
             ))
         })
         .collect()
 }
 
-/// Every working account with its token.
+/// Every account whose token was not turned down, with its token.
 pub fn load(gh: &dyn Gh) -> Result<Vec<Account>, GhState> {
     let status = gh.run(&["auth", "status", "--json", "hosts"], None, None)?;
     let listed = parse_status(&status.stdout);
-    if listed.is_empty() {
-        if status.stderr.contains("unknown flag") {
-            return Err(GhState::Failed(
-                "this gh is too old for termist (no `auth status --json`); upgrade gh".into(),
-            ));
-        }
-        return Err(GhState::LoggedOut);
+    if listed.is_empty() && status.stderr.contains("unknown flag") {
+        return Err(GhState::Failed(
+            "this gh is too old for termist (no `auth status --json`); upgrade gh".into(),
+        ));
+    }
+    if !listed.iter().any(|(_, _, c)| *c == Checked::Works) {
+        return Err(
+            if listed.iter().any(|(_, _, c)| *c == Checked::Unreachable) {
+                GhState::Failed("could not reach GitHub".into())
+            } else {
+                GhState::LoggedOut
+            },
+        );
     }
     let mut accounts = Vec::new();
-    for (login, active) in listed {
+    for (login, active, _) in listed
+        .into_iter()
+        .filter(|(_, _, c)| *c != Checked::Refused)
+    {
         let out = gh.run(
             &[
                 "auth",
@@ -125,16 +160,19 @@ mod tests {
         "github.com":[
             {"login":"alice","active":true,"state":"success","host":"github.com"},
             {"login":"alice-work","active":false,"state":"success","host":"github.com"},
-            {"login":"stale","active":false,"state":"error","host":"github.com"}],
+            {"login":"stale","active":false,"state":"error","host":"github.com",
+             "error":"non-200 OK status code: 401 Unauthorized body: \"Bad credentials\""},
+            {"login":"","active":false,"state":"error","host":"github.com","tokenSource":"GH_TOKEN"}],
         "ghe.acme.com":[{"login":"corp","active":true,"state":"success"}]}}"#;
 
     #[test]
-    fn status_lists_the_working_github_accounts() {
+    fn status_lists_the_github_accounts_and_how_their_tokens_fared() {
         assert_eq!(
             parse_status(STATUS),
             [
-                ("alice".to_string(), true),
-                ("alice-work".to_string(), false)
+                ("alice".to_string(), true, Checked::Works),
+                ("alice-work".to_string(), false, Checked::Works),
+                ("stale".to_string(), false, Checked::Refused),
             ]
         );
         assert!(parse_status(r#"{"hosts":{}}"#).is_empty());
@@ -187,6 +225,44 @@ mod tests {
         assert_eq!(load(&*gh), Err(GhState::LoggedOut));
         let gone = FakeGh::new(|_| Err(GhState::NoGh));
         assert_eq!(load(&*gone), Err(GhState::NoGh));
+    }
+
+    /// What gh 2.x prints offline: every token is checked with GitHub and fails.
+    const OFFLINE: &str = r#"{"hosts":{"github.com":[
+        {"state":"error","error":"Get \"https://api.github.com/\": dial tcp: lookup api.github.com: no such host",
+         "active":true,"host":"github.com","login":"alice","tokenSource":"keyring"},
+        {"state":"timeout","error":"context deadline exceeded",
+         "active":false,"host":"github.com","login":"alice-work","tokenSource":"keyring"}]}}"#;
+
+    #[test]
+    fn offline_is_a_failure_to_retry_soon_not_logged_out() {
+        let gh = FakeGh::new(|_| ok(OFFLINE));
+        assert_eq!(
+            load(&*gh),
+            Err(GhState::Failed("could not reach GitHub".into()))
+        );
+        assert_eq!(gh.calls().len(), 1, "no token read");
+        let refused = r#"{"hosts":{"github.com":[{"state":"error","active":true,
+            "error":"HTTP 401: Bad credentials (https://api.github.com/)","login":"alice"}]}}"#;
+        let gh = FakeGh::new(move |_| ok(refused));
+        assert_eq!(load(&*gh), Err(GhState::LoggedOut));
+    }
+
+    #[test]
+    fn an_account_that_timed_out_next_to_a_working_one_still_reads() {
+        let mixed = r#"{"hosts":{"github.com":[
+            {"state":"success","active":true,"login":"alice"},
+            {"state":"timeout","active":false,"login":"alice-work"},
+            {"state":"error","active":false,"login":"stale","error":"HTTP 401: Bad credentials"}]}}"#;
+        let gh = FakeGh::new(move |call| {
+            if call.args[1] == "status" {
+                ok(mixed)
+            } else {
+                ok(&format!("tok-{}\n", call.args.last().unwrap()))
+            }
+        });
+        let logins: Vec<String> = load(&*gh).unwrap().into_iter().map(|a| a.login).collect();
+        assert_eq!(logins, ["alice", "alice-work"]);
     }
 
     #[test]
