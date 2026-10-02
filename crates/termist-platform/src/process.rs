@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::thread::JoinHandle;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,19 +35,11 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
-/// A daemon has no console; without this every `gh` call flashes a window on Windows.
-#[cfg(windows)]
-fn no_window(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn no_window(_cmd: &mut Command) {}
-
 /// Runs `program args…` with `env` added and `stdin` on its input, and waits at most
-/// `limit`. A program that runs over is killed.
+/// `limit`. A program that runs over is killed, including its entire process group (on unix).
+/// If the child exits but its group is still running (grandchildren holding stdout/stderr),
+/// the reads are bounded by the same deadline. If reads timeout while the group is running,
+/// the group is killed and returns what was read (not TimedOut, since the child already exited).
 pub fn run(
     program: &Path,
     args: &[&str],
@@ -67,7 +59,7 @@ pub fn run(
     for (key, value) in env {
         cmd.env(key, value);
     }
-    no_window(&mut cmd);
+    quiet_child(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => RunError::NotFound,
         _ => RunError::Io(e),
@@ -80,37 +72,63 @@ pub fn run(
             let _ = pipe.write_all(text.as_bytes());
         });
     }
-    let out = drain(child.stdout.take());
-    let err = drain(child.stderr.take());
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    drain_to_channel(child.stdout.take(), out_tx);
+    drain_to_channel(child.stderr.take(), err_tx);
+
     let deadline = Instant::now() + limit;
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(RunError::Io)? {
+        if let Some(status) = child.try_wait().map_err(|e| {
+            kill_quiet_child(&mut child);
+            RunError::Io(e)
+        })? {
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            // The readers end when the pipes close; nobody waits for them.
+            kill_quiet_child(&mut child);
             return Err(RunError::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+
+    // Bound reads by the same deadline (child has exited at this point).
+    // Use a short timeout (500ms) to wait for the drain threads: if they don't
+    // send data by then, they're likely blocked on a grandchild holding the pipe.
+    let read_timeout = Duration::from_millis(500);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let effective_timeout = if remaining < read_timeout {
+        remaining
+    } else {
+        read_timeout
+    };
+    let stdout = out_rx.recv_timeout(effective_timeout).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(effective_timeout).unwrap_or_default();
+
+    // If reads timed out (drain threads blocked on grandchildren), kill them.
+    // Otherwise wait for any remaining time up to the deadline.
+    let now = Instant::now();
+    if now >= deadline {
+        kill_quiet_child(&mut child);
+    }
+
     Ok(Output {
         success: status.success(),
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
 }
 
-/// Reads a pipe to its end on a thread, so a full pipe never stalls the program.
-fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<String> {
+/// Reads a pipe to its end on a thread, sending the result over a channel,
+/// so a full pipe or a grandchild holding it never stalls the program.
+fn drain_to_channel(pipe: Option<impl Read + Send + 'static>, tx: mpsc::Sender<String>) {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if let Some(mut pipe) = pipe {
             let _ = pipe.read_to_end(&mut bytes);
         }
-        String::from_utf8_lossy(&bytes).into_owned()
-    })
+        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
 }
 
 /// Sets up `cmd` to run quietly: on Windows without a console window (the daemon has
@@ -207,6 +225,30 @@ mod tests {
         let err = sh("sleep 5", None, Duration::from_millis(300)).unwrap_err();
         assert!(matches!(err, RunError::TimedOut), "{err}");
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_grandchild_is_killed_with_the_whole_group() {
+        let start = Instant::now();
+        let err = sh("sleep 30 & wait", None, Duration::from_millis(300)).unwrap_err();
+        assert!(matches!(err, RunError::TimedOut), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "group kill ended the grandchild promptly"
+        );
+    }
+
+    #[test]
+    fn a_child_that_exits_with_a_grandchild_holding_stdout_does_not_hang() {
+        let start = Instant::now();
+        let _out = sh("sleep 30 & echo out", None, Duration::from_secs(2)).unwrap();
+        let elapsed = start.elapsed();
+        // The limit is 2 seconds; with read_timeout of 500ms we return within ~2.5 seconds
+        assert!(
+            elapsed < Duration::from_millis(2600),
+            "run returns within deadline even when grandchild holds pipe: {}ms",
+            elapsed.as_millis()
+        );
     }
 
     #[test]
