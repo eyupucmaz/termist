@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use termist_core::config::{ColorDepth, PanePosition, Sounds};
+use termist_core::config::{ColorDepth, PanePosition, Sound};
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -455,14 +455,31 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             ("pane", format!("‹ {place} ›{}", local("pane_position")))
                         }
                         SettingRow::Keys => ("keys", format!("…{}", local("keys"))),
-                        SettingRow::Sounds => {
-                            let sounds = match app.config.notify.sounds {
-                                Sounds::Istanbul => "istanbul (a martı)",
-                                Sounds::System => "the system's",
-                                Sounds::Bell => "the terminal bell",
-                                Sounds::Off => "off",
+                        SettingRow::DoneSound | SettingRow::WaitingSound => {
+                            let (name, sound, key) = match row {
+                                SettingRow::DoneSound => (
+                                    "done sound",
+                                    app.config.notify.done_sound,
+                                    "notify.done_sound",
+                                ),
+                                _ => (
+                                    "waiting sound",
+                                    app.config.notify.waiting_sound,
+                                    "notify.waiting_sound",
+                                ),
                             };
-                            ("sounds", format!("‹ {sounds} ›{}", local("notify.sounds")))
+                            let sound = match sound {
+                                Sound::Marti => "martı (a seagull)",
+                                Sound::Kedi => "kedi (a cat)",
+                                Sound::System => "the system's",
+                                Sound::Bell => "the terminal bell",
+                                Sound::Off => "off",
+                            };
+                            let local = match local(key) {
+                                "" => local("notify.sounds"),
+                                set => set,
+                            };
+                            (name, format!("‹ {sound} ›{local}"))
                         }
                         SettingRow::Desktop => {
                             let on = if app.config.notify.desktop {
@@ -504,7 +521,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         }
                     };
                     Line::from(Span::styled(
-                        format!(" {name:<9} {value}"),
+                        format!(" {name:<13} {value}"),
                         highlighted(Style::default(), i == view.row),
                     ))
                 })

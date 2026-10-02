@@ -18,7 +18,7 @@ use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use termist_core::config::{ColorDepth, Config, PanePosition, Sounds, THEMES};
+use termist_core::config::{ColorDepth, Config, PanePosition, Sound, THEMES};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
     ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
@@ -63,6 +63,8 @@ pub enum Action {
     /// An agent started waiting or finished: a sound, and a desktop notification when
     /// the terminal is not in front.
     Alert(Alert),
+    /// A sound just chosen in the settings, played once so you hear it.
+    Preview(Sound),
     /// Text dragged out of the pane, for the clipboard.
     Copy(String),
     Quit,
@@ -71,6 +73,8 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
     pub text: String,
+    /// It waits for you; otherwise it is done.
+    pub waiting: bool,
 }
 
 pub struct App {
@@ -250,6 +254,7 @@ impl App {
         let what = if waiting { "waits for you" } else { "is done" };
         Some(Action::Alert(Alert {
             text: format!("{} · {project} {what}", s.display_name()),
+            waiting,
         }))
     }
 
@@ -1684,7 +1689,8 @@ impl App {
             SettingRow::Theme => "theme",
             SettingRow::Colors => "colors",
             SettingRow::Pane => "pane_position",
-            SettingRow::Sounds => "notify.sounds",
+            SettingRow::DoneSound => "notify.done_sound",
+            SettingRow::WaitingSound => "notify.waiting_sound",
             SettingRow::Desktop => "notify.desktop",
             SettingRow::Splash => "scenes.splash",
             SettingRow::Idle => "scenes.idle_minutes",
@@ -1692,9 +1698,14 @@ impl App {
             SettingRow::Mouse => "mouse",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
-        // config.local.toml wins over the settings it sets.
-        if self.local_settings.iter().any(|k| k == key) {
-            self.settings_note(format!("{key} is set in config.local.toml"));
+        // config.local.toml wins over the settings it sets, the old `sounds` too.
+        let sound = matches!(row, SettingRow::DoneSound | SettingRow::WaitingSound);
+        if let Some(set) = self
+            .local_settings
+            .iter()
+            .find(|k| *k == key || (sound && *k == "notify.sounds"))
+        {
+            self.settings_note(format!("{set} is set in config.local.toml"));
             return vec![];
         }
         let next = |len: usize, at: usize| (at as isize + step).rem_euclid(len as isize) as usize;
@@ -1704,16 +1715,21 @@ impl App {
             }
         };
         match row {
-            SettingRow::Sounds => {
-                let all = Sounds::ALL;
-                let at = all
-                    .iter()
-                    .position(|x| *x == self.config.notify.sounds)
-                    .unwrap_or(0);
-                self.config.notify.sounds = all[next(all.len(), at)];
+            SettingRow::DoneSound | SettingRow::WaitingSound => {
+                let sound = match row {
+                    SettingRow::DoneSound => &mut self.config.notify.done_sound,
+                    _ => &mut self.config.notify.waiting_sound,
+                };
+                let all = Sound::ALL;
+                let at = all.iter().position(|x| x == sound).unwrap_or(0);
+                *sound = all[next(all.len(), at)];
+                let chosen = *sound;
                 quiet(self);
-                let value = self.config.notify.sounds.id().to_string();
-                return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
+                let value = chosen.id().to_string();
+                return vec![
+                    Action::WriteConfig(ConfigEdit::Set { key, value }),
+                    Action::Preview(chosen),
+                ];
             }
             SettingRow::Desktop
             | SettingRow::Splash
@@ -4750,6 +4766,7 @@ mod tests {
             alerts(&waiting),
             [&Alert {
                 text: format!("{} · api waits for you", s[1].display_name()),
+                waiting: true,
             }]
         );
         assert!(
@@ -4758,6 +4775,7 @@ mod tests {
         );
         let done = update(&mut app, &s[1], AgentStatus::Unseen);
         assert!(alerts(&done)[0].text.ends_with("is done"));
+        assert!(!alerts(&done)[0].waiting);
         assert!(alerts(&update(&mut app, &s[1], AgentStatus::Running)).is_empty());
     }
 
@@ -4801,6 +4819,10 @@ mod tests {
             app.on_key(k(K::Right)),
             {
                 app.on_key(k(K::Char('j')));
+                app.on_key(k(K::Left))
+            },
+            {
+                app.on_key(k(K::Char('j')));
                 app.on_key(k(K::Enter))
             },
             {
@@ -4823,8 +4845,12 @@ mod tests {
             edits,
             [
                 ConfigEdit::Set {
-                    key: "notify.sounds",
-                    value: "istanbul".into()
+                    key: "notify.done_sound",
+                    value: "marti".into()
+                },
+                ConfigEdit::Set {
+                    key: "notify.waiting_sound",
+                    value: "bell".into()
                 },
                 ConfigEdit::SetBool {
                     key: "notify.desktop",
@@ -4844,7 +4870,8 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(app.config.notify.sounds, Sounds::Istanbul);
+        assert_eq!(app.config.notify.done_sound, Sound::Marti);
+        assert_eq!(app.config.notify.waiting_sound, Sound::Bell);
         assert!(!app.config.animations);
         app.local_settings = vec!["scenes.idle_minutes".into()];
         app.on_key(k(K::Char('k')));
@@ -4854,6 +4881,45 @@ mod tests {
         );
         app.on_key(k(K::Char('k')));
         assert_eq!(app.on_key(k(K::Right)).len(), 1, "the splash is not");
+    }
+
+    #[test]
+    fn a_sound_chosen_in_the_settings_is_heard_once() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        for _ in 0..6 {
+            app.on_key(k(K::Char('j')));
+        }
+        let actions = app.on_key(k(K::Left));
+        assert!(matches!(
+            actions[..],
+            [Action::WriteConfig(_), Action::Preview(Sound::Bell)]
+        ));
+        app.on_key(k(K::Char('k')));
+        let actions = app.on_key(k(K::Right));
+        assert!(matches!(
+            actions[..],
+            [Action::WriteConfig(_), Action::Preview(Sound::Marti)]
+        ));
+    }
+
+    #[test]
+    fn the_old_sounds_setting_in_the_local_file_holds_both_sounds() {
+        let (mut app, _) = app();
+        app.local_settings = vec!["notify.sounds".into()];
+        app.on_key(k(K::Char('s')));
+        for _ in 0..5 {
+            app.on_key(k(K::Char('j')));
+        }
+        assert!(app.on_key(k(K::Right)).is_empty());
+        assert_eq!(
+            top_note(&app).unwrap(),
+            "notify.sounds is set in config.local.toml"
+        );
+        app.on_key(k(K::Char('j')));
+        assert!(app.on_key(k(K::Right)).is_empty());
+        app.on_key(k(K::Char('j')));
+        assert_eq!(app.on_key(k(K::Right)).len(), 1, "desktop is not");
     }
 
     #[test]

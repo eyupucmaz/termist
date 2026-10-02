@@ -59,7 +59,8 @@ pub enum SettingRow {
     Prefix,
     Pane,
     Keys,
-    Sounds,
+    DoneSound,
+    WaitingSound,
     Desktop,
     Splash,
     Idle,
@@ -67,13 +68,14 @@ pub enum SettingRow {
     Mouse,
 }
 
-pub const SETTING_ROWS: [SettingRow; 11] = [
+pub const SETTING_ROWS: [SettingRow; 12] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
     SettingRow::Pane,
     SettingRow::Keys,
-    SettingRow::Sounds,
+    SettingRow::DoneSound,
+    SettingRow::WaitingSound,
     SettingRow::Desktop,
     SettingRow::Splash,
     SettingRow::Idle,

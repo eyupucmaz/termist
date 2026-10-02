@@ -5,7 +5,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 /// One change to config.toml.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigEdit {
-    /// A text setting: `theme = "moda"`, or `notify.sounds = "bell"` in its table.
+    /// A text setting: `theme = "moda"`, or `notify.done_sound = "kedi"` in its table.
     Set { key: &'static str, value: String },
     /// A true/false setting: `animations = false`, `scenes.splash = false`.
     SetBool { key: &'static str, value: bool },
@@ -212,7 +212,7 @@ mod tests {
             },
         )
         .unwrap();
-        let out = apply(&out, &set("notify.sounds", "bell")).unwrap();
+        let out = apply(&out, &set("notify.waiting_sound", "bell")).unwrap();
         let out = apply(
             &out,
             &ConfigEdit::SetBool {
@@ -229,7 +229,10 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}\n{out}");
         assert!(!config.scenes.splash);
         assert_eq!(config.scenes.idle_minutes, 5);
-        assert_eq!(config.notify.sounds, termist_core::config::Sounds::Bell);
+        assert_eq!(
+            config.notify.waiting_sound,
+            termist_core::config::Sound::Bell
+        );
         assert!(!config.animations);
     }
 }
