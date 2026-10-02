@@ -123,6 +123,32 @@ impl Default for ScenesConfig {
     }
 }
 
+/// What the status line on the top right shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusConfig {
+    pub cpu: bool,
+    pub ram: bool,
+    pub battery: bool,
+    pub clock: bool,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        StatusConfig {
+            cpu: true,
+            ram: true,
+            battery: true,
+            clock: true,
+        }
+    }
+}
+
+impl StatusConfig {
+    pub fn any(&self) -> bool {
+        self.cpu || self.ram || self.battery || self.clock
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifyConfig {
     /// When an agent is done.
@@ -183,6 +209,7 @@ pub struct Config {
     pub editor: Option<String>,
     pub scenes: ScenesConfig,
     pub notify: NotifyConfig,
+    pub status: StatusConfig,
     pub worktrees: WorktreesConfig,
     pub agents: AgentsConfig,
     pub keys: KeysConfig,
@@ -205,6 +232,7 @@ impl Default for Config {
                 desktop: true,
                 toasts: true,
             },
+            status: StatusConfig::default(),
             worktrees: WorktreesConfig::default(),
             agents: AgentsConfig::default(),
             keys: KeysConfig::default(),
@@ -302,6 +330,7 @@ impl Reader<'_> {
             editor: self.string(&mut t, "", "editor").filter(|e| !e.is_empty()),
             scenes: self.scenes(&mut t),
             notify: self.notify(&mut t),
+            status: self.status(&mut t),
             worktrees: self.worktrees(&mut t),
             agents: self.agents(&mut t),
             keys: self.keys(&mut t),
@@ -348,6 +377,21 @@ impl Reader<'_> {
             return None;
         }
         Some(pool)
+    }
+
+    fn status(&mut self, t: &mut Table) -> StatusConfig {
+        let d = StatusConfig::default();
+        let Some(mut s) = self.table(t, "", "status") else {
+            return d;
+        };
+        let status = StatusConfig {
+            cpu: self.bool(&mut s, "status", "cpu").unwrap_or(d.cpu),
+            ram: self.bool(&mut s, "status", "ram").unwrap_or(d.ram),
+            battery: self.bool(&mut s, "status", "battery").unwrap_or(d.battery),
+            clock: self.bool(&mut s, "status", "clock").unwrap_or(d.clock),
+        };
+        self.unknown("status", s);
+        status
     }
 
     fn notify(&mut self, t: &mut Table) -> NotifyConfig {
@@ -570,6 +614,32 @@ mod tests {
         assert!(problems.is_empty());
     }
 
+    #[test]
+    fn the_status_line_shows_everything_unless_told() {
+        let (c, problems) = Config::parse("", None);
+        assert_eq!(
+            c.status,
+            StatusConfig {
+                cpu: true,
+                ram: true,
+                battery: true,
+                clock: true
+            }
+        );
+        assert!(problems.is_empty());
+        let (c, problems) = Config::parse("[status]\ncpu = false\nbattery = false\n", None);
+        assert!(!c.status.cpu && c.status.ram && !c.status.battery && c.status.clock);
+        assert!(c.status.any());
+        assert!(problems.is_empty());
+        let (c, _) = Config::parse(
+            "[status]\ncpu = false\nram = false\nbattery = false\nclock = false\n",
+            None,
+        );
+        assert!(!c.status.any());
+        let (_, problems) = Config::parse("[status]\ndisk = true\n", None);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
     /// The example config of the docs, every key at its default.
     const DOCUMENTED_DEFAULTS: &str = r#"
 prefix = "C-a"
@@ -588,6 +658,12 @@ done_sound = "off"              # off | marti (a seagull) | kedi (a cat) | syste
 waiting_sound = "off"           # the same, for an agent that asks you something
 desktop = true
 toasts = true                  # a toast in the corner when an agent waits or is done
+
+[status]                        # the top right
+cpu = true
+ram = true
+battery = true
+clock = true
 
 [worktrees]
 location = "sibling"

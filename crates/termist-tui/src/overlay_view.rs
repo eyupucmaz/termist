@@ -527,6 +527,22 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             };
                             ("mouse", format!("‹ {on} ›{}", local("mouse")))
                         }
+                        SettingRow::StatusCpu
+                        | SettingRow::StatusRam
+                        | SettingRow::StatusBattery
+                        | SettingRow::StatusClock => {
+                            let s = app.config.status;
+                            let (name, on, key) = match row {
+                                SettingRow::StatusCpu => ("cpu", s.cpu, "status.cpu"),
+                                SettingRow::StatusRam => ("ram", s.ram, "status.ram"),
+                                SettingRow::StatusBattery => {
+                                    ("battery", s.battery, "status.battery")
+                                }
+                                _ => ("clock", s.clock, "status.clock"),
+                            };
+                            let on = if on { "on, in the top right" } else { "off" };
+                            (name, format!("‹ {on} ›{}", local(key)))
+                        }
                     };
                     Line::from(Span::styled(
                         format!(" {name:<13} {value}"),

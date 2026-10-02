@@ -1752,6 +1752,10 @@ impl App {
             SettingRow::Idle => "scenes.idle_minutes",
             SettingRow::Animations => "animations",
             SettingRow::Mouse => "mouse",
+            SettingRow::StatusCpu => "status.cpu",
+            SettingRow::StatusRam => "status.ram",
+            SettingRow::StatusBattery => "status.battery",
+            SettingRow::StatusClock => "status.clock",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -1791,12 +1795,20 @@ impl App {
             | SettingRow::Toasts
             | SettingRow::Splash
             | SettingRow::Animations
-            | SettingRow::Mouse => {
+            | SettingRow::Mouse
+            | SettingRow::StatusCpu
+            | SettingRow::StatusRam
+            | SettingRow::StatusBattery
+            | SettingRow::StatusClock => {
                 let flag = match row {
                     SettingRow::Desktop => &mut self.config.notify.desktop,
                     SettingRow::Toasts => &mut self.config.notify.toasts,
                     SettingRow::Splash => &mut self.config.scenes.splash,
                     SettingRow::Mouse => &mut self.config.mouse,
+                    SettingRow::StatusCpu => &mut self.config.status.cpu,
+                    SettingRow::StatusRam => &mut self.config.status.ram,
+                    SettingRow::StatusBattery => &mut self.config.status.battery,
+                    SettingRow::StatusClock => &mut self.config.status.clock,
                     _ => &mut self.config.animations,
                 };
                 *flag = !*flag;
@@ -5161,5 +5173,31 @@ mod tests {
             key: "notify.toasts",
             value: false,
         })));
+    }
+
+    #[test]
+    fn the_status_rows_turn_each_part_off_and_save_it() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        for (row, key) in [
+            (SettingRow::StatusCpu, "status.cpu"),
+            (SettingRow::StatusRam, "status.ram"),
+            (SettingRow::StatusBattery, "status.battery"),
+            (SettingRow::StatusClock, "status.clock"),
+        ] {
+            let at = SETTING_ROWS.iter().position(|r| *r == row).unwrap();
+            if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+                v.row = at;
+            }
+            let actions = app.on_key(k(K::Right));
+            assert!(
+                actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+                    key,
+                    value: false
+                })),
+                "{key}"
+            );
+        }
+        assert!(!app.config.status.any());
     }
 }
