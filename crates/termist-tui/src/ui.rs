@@ -1851,6 +1851,69 @@ mod tests {
     }
 
     #[test]
+    fn a_repo_not_read_yet_says_so_not_that_it_has_nothing() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let mut fresh = repo(3, "discord", vec![]);
+        fresh.fetched_at = None;
+        fresh.viewer = None;
+        let mut read = repo(4, "docs", vec![]);
+        read.total = 0;
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: 2,
+            repos: vec![fresh, read],
+        });
+        let text = screen(&render(&mut app, 80, 10));
+        let line = |name: &str| {
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines.iter().position(|l| l.contains(name)).unwrap();
+            lines[at + 1].to_string()
+        };
+        assert!(line("discord").contains("reading…"), "{text}");
+        assert!(line("docs").contains("no open pull requests"), "{text}");
+    }
+
+    #[test]
+    fn the_repos_window_tells_not_asked_yet_from_no_access() {
+        use termist_core::github::{RepoId, RepoInfo};
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let project = app.state.projects[0].id;
+        let info = |id: i64, name: &str, state: GhState| RepoInfo {
+            id: RepoId(id),
+            name: name.into(),
+            slug: format!("acme/{name}"),
+            visible: true,
+            account: None,
+            pinned: false,
+            open_count: None,
+            state,
+        };
+        app.on_event(ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into()],
+            repos: vec![
+                info(1, "asking", GhState::Ok),
+                info(2, "hidden", GhState::NoAccess),
+                info(3, "broken", GhState::Failed("HTTP 502".into())),
+            ],
+        });
+        let row =
+            |text: &str, name: &str| text.lines().find(|l| l.contains(name)).unwrap().to_string();
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(row(&text, "asking").contains('…'), "{text}");
+        assert!(!row(&text, "asking").contains("no access"), "{text}");
+        assert!(row(&text, "hidden").contains("no access"), "{text}");
+        assert!(row(&text, "broken").contains("HTTP 502"), "{text}");
+        // GitHub as a whole is the trouble: its reason, not "…".
+        app.prs.get_mut(&project).unwrap().state = GhState::LoggedOut;
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(row(&text, "asking").contains("logged out"), "{text}");
+    }
+
+    #[test]
     fn the_wheel_moves_through_the_inbox_and_a_click_opens() {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         let mut app = pr_fixture();

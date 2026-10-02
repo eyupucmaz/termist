@@ -35,7 +35,7 @@ pub fn trouble(state: &GhState) -> Option<Vec<String>> {
 }
 
 /// A few words for a repo heading.
-fn short_trouble(state: &GhState) -> Option<&'static str> {
+pub fn short_trouble(state: &GhState) -> Option<&'static str> {
     match state {
         GhState::Ok => None,
         GhState::NoGh => Some("no gh"),
@@ -213,10 +213,12 @@ fn row_line(t: &Theme, row: &Row, selected: bool, width: usize, now: i64) -> Lin
             Line::from(spans)
         }
         Row::Nothing { repo } => {
-            let what = if repo.prs.is_empty() {
-                "   no open pull requests"
-            } else {
-                "   nothing matches"
+            // Never read is not an answer yet.
+            let what = match (&repo.fetched_at, &repo.state) {
+                (None, GhState::Ok) => "   reading…",
+                (None, _) => "   not read yet",
+                _ if repo.prs.is_empty() => "   no open pull requests",
+                _ => "   nothing matches",
             };
             Line::from(Span::styled(what, t.dim))
         }

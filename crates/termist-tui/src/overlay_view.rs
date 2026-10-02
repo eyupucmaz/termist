@@ -685,6 +685,8 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 .iter()
                 .find(|p| p.id == *project)
                 .map_or("", |p| p.name.as_str());
+            // Why no account reads a repo when GitHub as a whole is the trouble.
+            let everywhere = app.prs.get(project).map_or(&GhState::Ok, |d| &d.state);
             let rows = picker
                 .visible()
                 .map(|(_, r, on)| {
@@ -693,8 +695,20 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         .open_count
                         .map_or("—".to_string(), |n| format!("{n} open"));
                     let account = match (&r.state, &r.account) {
-                        (GhState::NoAccess, _) | (_, None) => "no access".to_string(),
+                        (GhState::NoAccess, _) => "no access".to_string(),
                         (GhState::LoggedOut, Some(a)) => format!("{a} logged out"),
+                        (GhState::Failed(why), None) => crate::prs::markdown::cut(why, 22),
+                        (GhState::Ok, None) => match everywhere {
+                            GhState::Failed(why) => crate::prs::markdown::cut(why, 22),
+                            // Access not asked yet.
+                            GhState::Ok => "…".to_string(),
+                            other => crate::prs::inbox_view::short_trouble(other)
+                                .unwrap_or("…")
+                                .to_string(),
+                        },
+                        (other, None) => crate::prs::inbox_view::short_trouble(other)
+                            .unwrap_or("…")
+                            .to_string(),
                         (_, Some(a)) if r.pinned => format!("{a}*"),
                         (_, Some(a)) => a.clone(),
                     };
