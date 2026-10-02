@@ -503,6 +503,13 @@ impl Registry {
                     let _ = cmd.send(SessionCmd::SetColors(colors));
                 }
             }
+            ClientRequest::SetGitHub { .. }
+            | ClientRequest::SetPrFocus { .. }
+            | ClientRequest::ListRepos { .. }
+            | ClientRequest::SetRepoVisible { .. }
+            | ClientRequest::SetRepoAccount { .. }
+            | ClientRequest::RefreshPrs { .. }
+            | ClientRequest::MarkPrSeen { .. } => {}
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {

@@ -617,7 +617,12 @@ impl App {
                 self.recent_models.insert(harness, recent);
                 self.model_catalogs.insert(harness, catalog);
             }
-            ServerEvent::Hello { .. } | ServerEvent::Ack => {}
+            ServerEvent::Hello { .. }
+            | ServerEvent::Ack
+            | ServerEvent::Prs { .. }
+            | ServerEvent::Repos { .. }
+            | ServerEvent::PrDetail { .. }
+            | ServerEvent::ReviewRequested { .. } => {}
         }
         actions.extend(self.sync_attachment());
         actions
