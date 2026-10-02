@@ -35,13 +35,17 @@ async fn start(config: DaemonConfig) -> Daemon {
 /// Says why a daemon never answered: it stopped (and with what), or it was still starting.
 async fn gave_up(task: tokio::task::JoinHandle<anyhow::Result<()>>) -> ! {
     if task.is_finished() {
-        match task.await {
-            Ok(Ok(())) => panic!("daemon did not come up: it stopped without an error"),
-            Ok(Err(e)) => panic!("daemon did not come up: {e:#}"),
-            Err(e) => panic!("daemon did not come up: its task failed: {e}"),
-        }
+        stopped(task.await);
     }
     panic!("daemon did not come up: still starting after 5 s");
+}
+
+fn stopped(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> ! {
+    match result {
+        Ok(Ok(())) => panic!("daemon did not come up: it stopped without an error"),
+        Ok(Err(e)) => panic!("daemon did not come up: {e:#}"),
+        Err(e) => panic!("daemon did not come up: its task failed: {e}"),
+    }
 }
 
 fn shell_config() -> DaemonConfig {
@@ -167,10 +171,21 @@ async fn run_daemon(
     paths: &Paths,
     config: DaemonConfig,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    let task = tokio::spawn(server::run(paths.clone(), config));
+    // Every test's daemon lives in this one process. The last daemon on these paths has
+    // stopped, but a PTY child another test forked a moment ago can still hold a copy of its
+    // lock file (a lock follows the open file, which fork shares until exec), so for a few
+    // milliseconds a restart can be told "already running": start it again.
+    let start = || tokio::spawn(server::run(paths.clone(), config.clone()));
+    let mut task = start();
     for _ in 0..250 {
         if Client::connect(paths).await.is_ok() {
             return task;
+        }
+        if task.is_finished() {
+            match (&mut task).await {
+                Ok(Err(e)) if e.to_string().contains("already running") => task = start(),
+                result => stopped(result),
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
