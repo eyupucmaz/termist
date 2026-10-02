@@ -298,8 +298,17 @@ impl Registry {
     fn github_effects(&mut self, fx: Effects) {
         for job in fx.jobs {
             let (tx, locate) = (self.github_tx.clone(), self.locate.clone());
+            // A job that panics still reports, or its beat would stay in flight.
+            let fallback = github::jobs::failed(&job);
             tokio::task::spawn_blocking(move || {
-                let _ = tx.send(github::jobs::run(job, &locate));
+                let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    github::jobs::run(job, &locate)
+                }))
+                .unwrap_or_else(|_| {
+                    tracing::error!("a GitHub job panicked");
+                    fallback
+                });
+                let _ = tx.send(done);
             });
         }
         for (to, event) in fx.events {

@@ -83,6 +83,10 @@ pub enum Done {
         project: ProjectId,
         repos: Vec<LocalRepo>,
     },
+    /// Looking through the project failed: what was stored stays.
+    Undiscovered {
+        project: ProjectId,
+    },
     /// Per repo: each account's login, its access, and whether it is gh's active one.
     Permissions(Result<Access, GhState>),
     Inbox {
@@ -784,6 +788,12 @@ impl GitHub {
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
             }
+            Done::Undiscovered { project } => {
+                self.discovering.remove(&project);
+                self.discovered.insert(project);
+                fx.send(To::All, self.repos_event(project));
+                fx.send(To::All, self.prs_event(project));
+            }
             Done::Permissions(Ok(results)) => {
                 self.permissions.finish(now, true, poller::PERMISSIONS);
                 let mut touched = HashSet::new();
@@ -1230,6 +1240,24 @@ mod tests {
         want[0] = false;
         want[10] = false;
         assert_eq!(visible, want);
+    }
+
+    #[test]
+    fn a_look_through_that_failed_keeps_what_was_stored() {
+        let mut w = world(&["work"]);
+        w.ready(vec![account("work", true)]);
+        w.found(0, &[("site", "acme", "site")]);
+        let project = w.projects[0].id;
+        w.request(ClientRequest::ListRepos { project });
+        let fx = w.done(Done::Undiscovered { project });
+        assert_eq!(listed(&fx), [("site".to_string(), None, true)]);
+        assert!(
+            !w.tick()
+                .jobs
+                .iter()
+                .any(|j| matches!(j, Job::Discover { .. })),
+            "not looked through again at once"
+        );
     }
 
     #[test]

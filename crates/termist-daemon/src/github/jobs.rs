@@ -89,6 +89,41 @@ pub fn run(job: Job, locate: &Locate) -> Done {
     }
 }
 
+/// What `job` reports when it could not finish (it panicked): a failure of its kind,
+/// so its beat is not left in flight.
+pub fn failed(job: &Job) -> Done {
+    let why = || GhState::Failed("internal error".into());
+    match job {
+        Job::Accounts => Done::Accounts(Err(why())),
+        Job::Discover { project, .. } => Done::Undiscovered { project: *project },
+        Job::Permissions { .. } => Done::Permissions(Err(why())),
+        Job::Inbox {
+            project,
+            account,
+            repos,
+            ..
+        } => Done::Inbox {
+            project: *project,
+            account: account.login.clone(),
+            ids: repos.iter().map(|(id, ..)| *id).collect(),
+            reply: Err(why()),
+        },
+        Job::Counts {
+            project, batches, ..
+        } => Done::Counts {
+            project: *project,
+            counts: batches
+                .iter()
+                .flat_map(|(_, repos)| repos.iter().map(|(id, ..)| (*id, None)))
+                .collect(),
+        },
+        Job::Detail { pr, .. } => Done::Detail {
+            pr: *pr,
+            reply: Err(why()),
+        },
+    }
+}
+
 fn names(repos: &[Slug]) -> Vec<(String, String)> {
     repos
         .iter()
@@ -230,6 +265,70 @@ mod tests {
             &(Arc::new(|| None) as Locate),
         );
         assert!(matches!(done, Done::Permissions(Err(GhState::Failed(_)))));
+    }
+
+    #[test]
+    fn a_job_that_could_not_finish_fails_as_its_kind() {
+        let gh = || GhHandle(FakeGh::new(|_| ok("")));
+        let project = ProjectId::new();
+        let internal = GhState::Failed("internal error".into());
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        assert!(matches!(failed(&Job::Accounts), Done::Accounts(Err(ref e)) if *e == internal));
+        assert!(matches!(
+            failed(&Job::Discover {
+                project,
+                path: "/code".into()
+            }),
+            Done::Undiscovered { project: p } if p == project
+        ));
+        assert!(matches!(
+            failed(&Job::Permissions {
+                gh: gh(),
+                accounts: vec![account("work", true)],
+                repos: slugs(&["site"]),
+            }),
+            Done::Permissions(Err(_))
+        ));
+        let Done::Inbox {
+            project: p,
+            account: login,
+            ids,
+            reply,
+        } = failed(&Job::Inbox {
+            gh: gh(),
+            project,
+            account: account("work", true),
+            repos: slugs(&["site", "admin"]),
+        })
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (p, login.as_str(), ids),
+            (project, "work", vec![RepoId(1), RepoId(2)])
+        );
+        assert_eq!(reply.unwrap_err(), internal);
+        let Done::Counts { counts, .. } = failed(&Job::Counts {
+            gh: gh(),
+            project,
+            batches: vec![(account("work", true), slugs(&["site", "admin"]))],
+        }) else {
+            panic!()
+        };
+        assert_eq!(counts, [(RepoId(1), None), (RepoId(2), None)]);
+        assert!(matches!(
+            failed(&Job::Detail {
+                gh: gh(),
+                pr,
+                account: account("work", true),
+                owner: "acme".into(),
+                name: "site".into(),
+            }),
+            Done::Detail { pr: p, reply: Err(_) } if p == pr
+        ));
     }
 
     #[test]
