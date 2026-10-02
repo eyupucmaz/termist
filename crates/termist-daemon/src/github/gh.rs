@@ -10,6 +10,9 @@ use termist_platform::process::{self, RunError};
 /// How long one call may take.
 pub const LIMIT: Duration = Duration::from_secs(20);
 
+/// Variables that would point gh at another host than github.com.
+const OTHER_HOST: &[&str] = &["GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GhOutput {
     pub success: bool,
@@ -59,7 +62,7 @@ impl Gh for CliGh {
         if let Some(token) = token {
             env.push(("GH_TOKEN", token));
         }
-        match process::run(&self.program, args, &env, stdin, LIMIT) {
+        match process::run_without(&self.program, args, &env, OTHER_HOST, stdin, LIMIT) {
             Ok(out) => Ok(GhOutput {
                 success: out.success,
                 stdout: out.stdout,
@@ -106,7 +109,7 @@ pub fn classify(out: &GhOutput) -> GhState {
 pub fn graphql(gh: &dyn Gh, token: &str, query: &str) -> Result<Value, GhState> {
     let body = serde_json::json!({ "query": query }).to_string();
     let out = gh.run(
-        &["api", "graphql", "--input", "-"],
+        &["api", "graphql", "--hostname", "github.com", "--input", "-"],
         Some(token),
         Some(&body),
     )?;
@@ -246,7 +249,10 @@ mod tests {
         assert_eq!(v["data"]["viewer"]["login"], "alice");
         let calls = gh.calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].args, ["api", "graphql", "--input", "-"]);
+        assert_eq!(
+            calls[0].args,
+            ["api", "graphql", "--hostname", "github.com", "--input", "-"]
+        );
         assert_eq!(calls[0].token.as_deref(), Some("tok-alice"));
         assert_eq!(calls[0].query(), "query { viewer { login } }");
     }
@@ -301,5 +307,15 @@ mod tests {
             .run(&["-c", "printf %s \"$GH_TOKEN\""], Some("tok"), None)
             .unwrap();
         assert_eq!(out.stdout, "tok");
+        // Never another host's, whatever the daemon inherited.
+        let script = OTHER_HOST
+            .iter()
+            .map(|v| format!("${{{v}-unset}}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let out = echo
+            .run(&["-c", &format!("printf %s \"{script}\"")], None, None)
+            .unwrap();
+        assert_eq!(out.stdout, "unset unset unset");
     }
 }

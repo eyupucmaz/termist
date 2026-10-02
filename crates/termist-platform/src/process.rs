@@ -49,6 +49,18 @@ pub fn run(
     stdin: Option<&str>,
     limit: Duration,
 ) -> Result<Output, RunError> {
+    run_without(program, args, env, &[], stdin, limit)
+}
+
+/// `run`, with the variables named in `remove` taken out of what the program inherits.
+pub fn run_without(
+    program: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    remove: &[&str],
+    stdin: Option<&str>,
+    limit: Duration,
+) -> Result<Output, RunError> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(if stdin.is_some() {
@@ -58,6 +70,9 @@ pub fn run(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for key in remove {
+        cmd.env_remove(key);
+    }
     for (key, value) in env {
         cmd.env(key, value);
     }
@@ -252,6 +267,20 @@ mod tests {
         .unwrap();
         assert!(out.success);
         assert_eq!(out.stdout, "piped from env\n");
+    }
+
+    #[test]
+    fn removed_variables_are_not_inherited() {
+        let out = run_without(
+            Path::new("/bin/sh"),
+            &["-c", "printf %s \"${HOME-unset} $TERMIST_TEST_VALUE\""],
+            &[("TERMIST_TEST_VALUE", "kept")],
+            &["HOME"],
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(out.stdout, "unset kept");
     }
 
     #[test]
