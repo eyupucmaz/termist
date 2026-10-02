@@ -27,6 +27,10 @@ pub enum Action {
     Rename,
     Archive,
     ArchiveView,
+    /// The pull requests of the project (the view, or back to the grid).
+    PullRequests,
+    /// Read GitHub again now.
+    RefreshGitHub,
     Palette,
     HalfPageDown,
     HalfPageUp,
@@ -86,6 +90,8 @@ pub const GRID_ACTIONS: &[Action] = &[
     Rename,
     Archive,
     ArchiveView,
+    PullRequests,
+    RefreshGitHub,
     Kill,
     Settings,
     Help,
@@ -97,6 +103,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     Grid,
     QuickPrompt,
     Palette,
+    PullRequests,
     NextAttention,
     PrevAttention,
     NewSession,
@@ -124,6 +131,8 @@ impl Action {
             Rename => "rename",
             Archive => "archive",
             ArchiveView => "archive_view",
+            PullRequests => "pull_requests",
+            RefreshGitHub => "refresh_github",
             Palette => "palette",
             HalfPageDown => "half_page_down",
             HalfPageUp => "half_page_up",
@@ -167,6 +176,8 @@ impl Action {
             Rename => "rename",
             Archive => "archive",
             ArchiveView => "archived",
+            PullRequests => "pull requests",
+            RefreshGitHub => "refresh",
             Palette => "sessions",
             HalfPageDown => "half page down",
             HalfPageUp => "half page up",
@@ -199,6 +210,8 @@ impl Action {
             Rename => "rename the card",
             Archive => "archive the card",
             ArchiveView => "show archived cards",
+            PullRequests => "the project's pull requests",
+            RefreshGitHub => "read GitHub again now",
             Palette => "find a session",
             HalfPageDown => "half a page down",
             HalfPageUp => "half a page up",
@@ -410,6 +423,8 @@ impl Keymap {
             ("r", Rename),
             ("a", Archive),
             ("A", ArchiveView),
+            ("v", PullRequests),
+            ("R", RefreshGitHub),
             ("d", Kill),
             ("s", Settings),
             ("?", Help),
@@ -426,6 +441,7 @@ impl Keymap {
             ("q", Grid),
             ("p", QuickPrompt),
             ("/", Palette),
+            ("v", PullRequests),
             (".", NextAttention),
             (",", PrevAttention),
             ("n", NewSession),
@@ -661,6 +677,12 @@ mod tests {
         assert_eq!(grid(' '), Some(FollowUp));
         assert_eq!(grid('3'), Some(Tab(3)));
         assert_eq!(grid('A'), Some(ArchiveView));
+        assert_eq!(grid('v'), Some(PullRequests));
+        assert_eq!(grid('R'), Some(RefreshGitHub));
+        assert_eq!(
+            m.action(Context::Focus, &ev(KeyCode::Char('v'), KeyModifiers::NONE)),
+            Some(PullRequests)
+        );
         assert_eq!(
             m.action(
                 Context::Grid,

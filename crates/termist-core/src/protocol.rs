@@ -1,3 +1,4 @@
+use crate::github::{GhState, PrDetail, PrRef, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
     Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
     TermColors,
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -111,6 +112,38 @@ pub enum ClientRequest {
     /// The colours the client draws agents with; every session answers colour queries
     /// with them from now on. The last client to send them wins.
     SetColors(TermColors),
+    /// Whether termist reads GitHub at all (`[github] enabled`); the last client wins.
+    SetGitHub {
+        enabled: bool,
+    },
+    /// What this client looks at: a project's pull requests, and maybe one of them.
+    /// The daemon reads those more often; `None`, `None` is nothing.
+    SetPrFocus {
+        project: Option<ProjectId>,
+        pr: Option<PrRef>,
+    },
+    /// Answered with `Repos`, and again when the open counts come.
+    ListRepos {
+        project: ProjectId,
+    },
+    SetRepoVisible {
+        repo: RepoId,
+        visible: bool,
+    },
+    /// `None`: the account with the most access.
+    SetRepoAccount {
+        repo: RepoId,
+        account: Option<String>,
+    },
+    /// Reads the project's pull requests again now.
+    RefreshPrs {
+        project: ProjectId,
+    },
+    /// The PR was opened as it was at `updated_at`.
+    MarkPrSeen {
+        pr: PrRef,
+        updated_at: String,
+    },
     Shutdown,
 }
 
@@ -142,6 +175,34 @@ pub enum ServerEvent {
         recent: Vec<String>,
         catalog: Vec<ModelInfo>,
     },
+    /// A project's pull requests, repo by repo, for its visible repos. `state` is the
+    /// project-wide trouble (no gh, logged out); `discovered` counts every repo found.
+    Prs {
+        project: ProjectId,
+        state: GhState,
+        discovered: u32,
+        repos: Vec<RepoPrs>,
+    },
+    /// Every repo found in a project, for the repos window, and the logged-in accounts.
+    Repos {
+        project: ProjectId,
+        accounts: Vec<String>,
+        repos: Vec<RepoInfo>,
+    },
+    /// The whole of one pull request; `detail` stays the last one read when `state`
+    /// says the newest read failed.
+    PrDetail {
+        pr: PrRef,
+        state: GhState,
+        detail: Option<Box<PrDetail>>,
+    },
+    /// You were asked for a review since the last round.
+    ReviewRequested {
+        project: ProjectId,
+        pr: PrRef,
+        repo: String,
+        title: String,
+    },
     Ack,
 }
 
@@ -150,7 +211,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_6_since_the_model_catalog() {
-        assert_eq!(PROTOCOL_VERSION, 6);
+    fn the_protocol_is_7_since_pull_requests() {
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 }

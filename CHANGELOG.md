@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Pull requests (`v`).** A project's open pull requests, read through the GitHub CLI: repo by repo for a
+  folder of repos, with reviews asked of you (`⇄` on the tab, a toast), checks and conflicts at a glance.
+  Enter opens one whole: description, conversation with line threads, checks, files. `m` chooses the
+  repos and the account each is read with, `b` opens it in the browser, `R` reads GitHub again. Turn it
+  off with `[github] enabled = false` or in the settings (`s`).
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions
+can stop, `termist kill` and start `termist` again: until then the new TUI cannot reach the old daemon.
+Agents you stop this way come back with `Enter` on their card.
+
 ## 0.1.1 - 2026-10-02
 
 Toasts tell you when an agent needs you, a status line shows the machine, the model list knows what

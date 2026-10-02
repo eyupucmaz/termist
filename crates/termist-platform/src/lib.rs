@@ -1,4 +1,5 @@
 //! OS boundary: paths, local sockets, framing, client.
+pub mod browser;
 pub mod client;
 pub mod clipboard;
 pub mod clock;

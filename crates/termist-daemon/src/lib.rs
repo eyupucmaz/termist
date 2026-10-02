@@ -1,6 +1,7 @@
 //! The termist daemon: PTYs, sessions, status, local socket server.
 pub mod claude;
 pub mod codex;
+pub mod github;
 pub mod hook_client;
 pub mod hookcmd;
 pub mod launch;

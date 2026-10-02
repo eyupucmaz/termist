@@ -1,5 +1,5 @@
 //! Rendering: header, cards, live pane and footer.
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, View};
 use crate::keys::{Action, Context, Keymap};
 use crate::overlay_view;
 use crate::scene_view::{self, ShowKind, Showing};
@@ -214,8 +214,17 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         None => {}
     }
     draw_header(f, app, areas.header);
+    if let View::Prs(view) = &app.view {
+        crate::prs::draw(f, app, view, areas.body);
+        for (i, overlay) in app.overlays.iter().enumerate() {
+            overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
+        }
+        draw_footer(f, app, areas.footer);
+        draw_toasts(f, app);
+        return;
+    }
     let sessions = app.project_sessions();
-    if sessions.is_empty() && app.connected && !app.archive_view {
+    if sessions.is_empty() && app.connected && !app.archive_view() {
         let hint = empty_hint(app);
         draw_scene(
             f,
@@ -289,10 +298,16 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " termist ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    if app.archive_view {
+    if app.archive_view() {
         spans.push(Span::styled(
             "archive ",
             app.theme.archive.add_modifier(Modifier::BOLD),
+        ));
+    }
+    if matches!(app.view, View::Prs(_)) {
+        spans.push(Span::styled(
+            "pull requests ",
+            app.theme.accent.add_modifier(Modifier::BOLD),
         ));
     }
     for p in app.open_projects() {
@@ -321,6 +336,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(color),
                 ));
             }
+        }
+        let asked = app.prs.get(&p.id).map_or(0, |d| {
+            d.repos
+                .iter()
+                .flat_map(|r| &r.prs)
+                .filter(|pr| pr.requested_you && !pr.draft)
+                .count()
+        });
+        if asked > 0 && app.config.github.enabled {
+            spans.push(Span::styled(
+                format!("⇄{asked}"),
+                Style::default().fg(app.theme.status(AgentStatus::NeedsFeedback)),
+            ));
         }
     }
     // Agents waiting in closed projects; the first thing to go when space is short.
@@ -490,6 +518,10 @@ fn render_screen(buf: &mut Buffer, area: Rect, screen: &Snapshot, theme: &Theme)
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let shows_message = app.mode == Mode::Grid || !app.overlays.is_empty();
+    let prs_view = match &app.view {
+        View::Prs(v) => Some(v),
+        _ => None,
+    };
     let (text, style) = match (&app.message, app.mode) {
         (Some(m), _) if shows_message => (m.clone(), t.error),
         _ if !app.overlays.is_empty() => (
@@ -542,7 +574,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             (text, t.warn)
         }
         (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
-        (_, Mode::Grid) if app.archive_view => (archive_hint(&app.keymap), t.dim),
+        (_, Mode::Grid) if prs_view.is_some() => (crate::prs::hint(app, prs_view.unwrap()), t.dim),
+        (_, Mode::Grid) if app.archive_view() => (archive_hint(&app.keymap), t.dim),
         (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
         (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
         (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
@@ -566,7 +599,7 @@ fn draw_toasts(f: &mut Frame, app: &App) {
                     Span::raw(chars.collect::<String>()),
                 ])
             }
-            crate::toast::ToastKind::Copied => {
+            crate::toast::ToastKind::Copied | crate::toast::ToastKind::Review { .. } => {
                 let mut chars = text.chars();
                 let mark: String = chars.next().into_iter().collect();
                 Line::from(vec![
@@ -652,6 +685,7 @@ fn grid_hint(keymap: &Keymap) -> String {
             Rename,
             Archive,
             ArchiveView,
+            PullRequests,
             Kill,
             Quit,
         ],
@@ -1622,6 +1656,290 @@ mod tests {
             row(&t, 0).trim_end().ends_with("cpu 5%  14:32"),
             "{:?}",
             row(&t, 0)
+        );
+    }
+
+    use crate::prs::fixtures::{repo, summary};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use termist_core::github::{Checks, GhState, Mergeable, ReviewDecision, unix_secs};
+
+    fn screen(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The fixture's project with four pull requests in two repos, the PR view open,
+    /// the clock at noon on 2026-10-02.
+    fn pr_fixture() -> App {
+        let mut app = fixture();
+        let project = app.state.projects[0].id;
+        let mut review = summary(212, "Add a dealer filter to search", "bob");
+        review.requested_you = true;
+        review.unseen = true;
+        let mut failing = summary(209, "Fix image lazy loading", "alice");
+        failing.checks = Checks::Failing;
+        failing.decision = Some(ReviewDecision::ChangesRequested);
+        failing.updated_at = "2026-10-01T12:00:00Z".into();
+        let mut wip = summary(201, "WIP: new header", "alice");
+        wip.draft = true;
+        wip.updated_at = "2026-09-27T12:00:00Z".into();
+        let mut conflict = summary(140, "Paginate /vehicles", "carol");
+        conflict.mergeable = Mergeable::Conflicting;
+        conflict.decision = Some(ReviewDecision::Approved);
+        conflict.updated_at = "2026-10-02T06:00:00Z".into();
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: 3,
+            repos: vec![
+                repo(1, "site", vec![review, failing, wip]),
+                repo(2, "admin-api", vec![conflict]),
+            ],
+        });
+        app.frozen_now = unix_secs("2026-10-02T12:00:00Z");
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app
+    }
+
+    fn open_detail(app: &mut App) {
+        let project = app.state.projects[0].id;
+        let pr = app.prs[&project].repos[0].prs[0].clone();
+        let pr_ref = termist_core::github::PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: pr.number,
+        };
+        app.on_event(ServerEvent::PrDetail {
+            pr: pr_ref,
+            state: GhState::Ok,
+            detail: Some(Box::new(crate::prs::fixtures::detail(pr))),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn a_pull_request_whole() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        insta::assert_snapshot!("pr_overview", render(&mut app, 90, 16).backend());
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        insta::assert_snapshot!("pr_conversation", render(&mut app, 90, 28).backend());
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 90, 16));
+        assert!(text.contains("✗ lint"), "failing first: {text}");
+        assert!(text.contains("1m 12s"));
+    }
+
+    #[test]
+    fn n_jumps_to_the_open_thread_after_a_frame() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 12);
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let layout = app.pr_layout.borrow().clone();
+        let t1 = layout.threads.iter().find(|a| a.id == "T1").unwrap().line;
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.detail.as_ref().unwrap().scroll, t1.min(layout.end));
+    }
+
+    #[test]
+    fn a_screen_without_the_list_leaves_no_stale_layout() {
+        let mut app = pr_fixture();
+        render(&mut app, 110, 16);
+        assert_ne!(app.pr_layout.borrow().list, Rect::default());
+        let project = app.state.projects[0].id;
+        app.prs.get_mut(&project).unwrap().state = GhState::NoGh;
+        render(&mut app, 110, 16);
+        assert_eq!(app.pr_layout.borrow().list, Rect::default());
+    }
+
+    #[test]
+    fn the_inbox_beside_the_selected_pr() {
+        let mut app = pr_fixture();
+        insta::assert_snapshot!(render(&mut app, 110, 16).backend());
+    }
+
+    #[test]
+    fn a_narrow_inbox_is_only_the_list() {
+        let mut app = pr_fixture();
+        let text = screen(&render(&mut app, 70, 12));
+        assert!(text.contains("#212"));
+        assert!(
+            !text.contains("bob · feat → main"),
+            "no preview below 100 columns"
+        );
+        insta::assert_snapshot!(render(&mut app, 70, 12).backend());
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_the_row() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let data = app.prs.get_mut(&project).unwrap();
+        data.repos[0].prs[0].title = "word ".repeat(60);
+        let text = screen(&render(&mut app, 70, 12));
+        let row = text.lines().find(|l| l.contains("#212")).unwrap();
+        assert!(row.contains('…'), "{row}");
+        assert!(row.contains("2h"), "the age stays: {row}");
+    }
+
+    #[test]
+    fn without_gh_the_inbox_says_how_to_get_it() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        app.prs.get_mut(&project).unwrap().state = GhState::NoGh;
+        let text = screen(&render(&mut app, 80, 12));
+        assert!(
+            text.contains("Install gh, then run: gh auth login"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_tab_bar_counts_reviews_asked_of_you() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let header = screen(&render(&mut app, 80, 12))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(header.contains("⇄1"), "{header}");
+        assert!(!header.contains("pull requests"), "back on the grid");
+    }
+
+    #[test]
+    fn the_repos_window() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let project = app.state.projects[0].id;
+        use termist_core::github::{RepoId, RepoInfo};
+        app.on_event(ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into()],
+            repos: vec![
+                RepoInfo {
+                    id: RepoId(2),
+                    name: "admin-api".into(),
+                    slug: "acme/admin-api".into(),
+                    visible: true,
+                    account: Some("work".into()),
+                    pinned: true,
+                    open_count: Some(1),
+                    state: GhState::Ok,
+                },
+                RepoInfo {
+                    id: RepoId(3),
+                    name: "discord".into(),
+                    slug: "acme/discord".into(),
+                    visible: false,
+                    account: None,
+                    pinned: false,
+                    open_count: None,
+                    state: GhState::NoAccess,
+                },
+            ],
+        });
+        insta::assert_snapshot!(render(&mut app, 80, 14).backend());
+    }
+
+    #[test]
+    fn a_repo_not_read_yet_says_so_not_that_it_has_nothing() {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let mut fresh = repo(3, "discord", vec![]);
+        fresh.fetched_at = None;
+        fresh.viewer = None;
+        let mut read = repo(4, "docs", vec![]);
+        read.total = 0;
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: 2,
+            repos: vec![fresh, read],
+        });
+        let text = screen(&render(&mut app, 80, 10));
+        let line = |name: &str| {
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines.iter().position(|l| l.contains(name)).unwrap();
+            lines[at + 1].to_string()
+        };
+        assert!(line("discord").contains("reading…"), "{text}");
+        assert!(line("docs").contains("no open pull requests"), "{text}");
+    }
+
+    #[test]
+    fn the_repos_window_tells_not_asked_yet_from_no_access() {
+        use termist_core::github::{RepoId, RepoInfo};
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let project = app.state.projects[0].id;
+        let info = |id: i64, name: &str, state: GhState| RepoInfo {
+            id: RepoId(id),
+            name: name.into(),
+            slug: format!("acme/{name}"),
+            visible: true,
+            account: None,
+            pinned: false,
+            open_count: None,
+            state,
+        };
+        app.on_event(ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into()],
+            repos: vec![
+                info(1, "asking", GhState::Ok),
+                info(2, "hidden", GhState::NoAccess),
+                info(3, "broken", GhState::Failed("HTTP 502".into())),
+            ],
+        });
+        let row =
+            |text: &str, name: &str| text.lines().find(|l| l.contains(name)).unwrap().to_string();
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(row(&text, "asking").contains('…'), "{text}");
+        assert!(!row(&text, "asking").contains("no access"), "{text}");
+        assert!(row(&text, "hidden").contains("no access"), "{text}");
+        assert!(row(&text, "broken").contains("HTTP 502"), "{text}");
+        // GitHub as a whole is the trouble: its reason, not "…".
+        app.prs.get_mut(&project).unwrap().state = GhState::LoggedOut;
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(row(&text, "asking").contains("logged out"), "{text}");
+    }
+
+    #[test]
+    fn the_wheel_moves_through_the_inbox_and_a_click_opens() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = pr_fixture();
+        render(&mut app, 110, 16);
+        let at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(at(MouseEventKind::ScrollDown, 5, 5));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.selected.map(|p| p.number), Some(209));
+        let list = app.pr_layout.borrow().list;
+        // rows: site, #212, #209, #201 → #201 is the fourth
+        let y = list.y + 3 - app.pr_layout.borrow().first as u16;
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Left), list.x + 4, y));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(v.selected.map(|p| p.number), Some(201));
+        assert!(v.detail.is_none(), "the first click selects");
+        app.on_mouse(at(MouseEventKind::Down(MouseButton::Left), list.x + 4, y));
+        let View::Prs(v) = &app.view else { panic!() };
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.pr.number),
+            Some(201),
+            "a click on the selected one opens it"
         );
     }
 }

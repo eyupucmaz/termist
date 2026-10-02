@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use termist_core::config::{ColorDepth, PanePosition, Sound};
+use termist_core::github::GhState;
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
 pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
@@ -544,6 +545,17 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             let on = if on { "on, in the top right" } else { "off" };
                             (name, format!("‹ {on} ›{}", local(key)))
                         }
+                        SettingRow::PullRequests => {
+                            let on = if app.config.github.enabled {
+                                "on: through gh"
+                            } else {
+                                "off"
+                            };
+                            (
+                                "pull requests",
+                                format!("‹ {on} ›{}", local("github.enabled")),
+                            )
+                        }
                     };
                     Line::from(Span::styled(
                         format!(" {name:<13} {value}"),
@@ -666,6 +678,86 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::Repos { project, picker } => {
+            let name = app
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == *project)
+                .map_or("", |p| p.name.as_str());
+            // Why no account reads a repo when GitHub as a whole is the trouble.
+            let everywhere = app.prs.get(project).map_or(&GhState::Ok, |d| &d.state);
+            let rows = picker
+                .visible()
+                .map(|(_, r, on)| {
+                    let mark = if r.visible { "[x]" } else { "[ ]" };
+                    let count = r
+                        .open_count
+                        .map_or("—".to_string(), |n| format!("{n} open"));
+                    let account = match (&r.state, &r.account) {
+                        (GhState::NoAccess, _) => "no access".to_string(),
+                        (GhState::LoggedOut, Some(a)) => format!("{a} logged out"),
+                        (GhState::Failed(why), None) => crate::prs::markdown::cut(why, 22),
+                        (GhState::Ok, None) => match everywhere {
+                            GhState::Failed(why) => crate::prs::markdown::cut(why, 22),
+                            // Access not asked yet.
+                            GhState::Ok => "…".to_string(),
+                            other => crate::prs::inbox_view::short_trouble(other)
+                                .unwrap_or("…")
+                                .to_string(),
+                        },
+                        (other, None) => crate::prs::inbox_view::short_trouble(other)
+                            .unwrap_or("…")
+                            .to_string(),
+                        (_, Some(a)) if r.pinned => format!("{a}*"),
+                        (_, Some(a)) => a.clone(),
+                    };
+                    let text = format!(
+                        " {mark} {:<24} {count:>8}   {account}",
+                        crate::prs::markdown::cut(&r.name, 24)
+                    );
+                    Line::from(Span::styled(text, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: format!("repos in {name}"),
+                    width: 64,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
+        Overlay::RepoAccount { picker, .. } => {
+            let rows = picker
+                .visible()
+                .map(|(_, a, on)| {
+                    let text = match a {
+                        None => " auto: the account with the most access".to_string(),
+                        Some(login) => format!(" {login}"),
+                    };
+                    Line::from(Span::styled(text, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "read this repo as".into(),
+                    width: 48,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
     }
 }
 
@@ -693,6 +785,8 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Keys(_) => "j/k choose · Enter new key · Backspace no key · R default · Esc back",
         Overlay::KeyCapture(c) if c.conflict.is_some() => "Enter swap · Esc cancel",
         Overlay::KeyCapture(_) => "press a key · Esc cancel",
+        Overlay::Repos { .. } => "j/k choose · Space show/hide · a account · Esc close",
+        Overlay::RepoAccount { .. } => "j/k choose · Enter use · Esc back",
     }
 }
 
@@ -761,6 +855,23 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
                 "send the prefix to the session",
             ));
         }
+    }
+    lines.push(Line::default());
+    lines.push(heading("Pull requests (v)".into()));
+    for (key, what) in [
+        (
+            "Enter",
+            "open the pull request; in a conversation, fold a thread",
+        ),
+        ("/", "search titles, numbers and authors"),
+        ("f", "all · asked of you · yours"),
+        ("m", "repos: show or hide, the account each is read with"),
+        ("b", "open in the browser (a check's log on the checks tab)"),
+        ("Tab", "next section: overview, conversation, checks, files"),
+        ("n / N", "next / previous open thread"),
+        ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
     }
     lines.push(Line::default());
     lines.push(heading("Anywhere".into()));

@@ -217,6 +217,13 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         ansi: None,
     });
     write_frame(&mut writer, &ClientRequest::SetColors(app.agent_colors())).await?;
+    write_frame(
+        &mut writer,
+        &ClientRequest::SetGitHub {
+            enabled: app.config.github.enabled,
+        },
+    )
+    .await?;
     let _ = execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
     let mut mouse_on = set_mouse(false, app.config.mouse);
     if enhanced {
@@ -309,6 +316,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             };
             let actions = save_settings(&paths, &mut app, actions);
             let actions = copy_out(&mut clipboard, &mut stdout(), actions);
+            let actions = open_urls(&mut app, actions);
             mouse_on = set_mouse(mouse_on, app.config.mouse);
             let actions = alerts.give(&paths, &app, actions);
             if perform(actions, &mut writer, &listing_tx).await? {
@@ -434,6 +442,21 @@ fn copy_out(clipboard: &mut Clipboard, out: &mut impl Write, actions: Vec<Action
     rest
 }
 
+/// Opens the web pages among `actions` and returns the rest; a refusal goes to the footer.
+fn open_urls(app: &mut App, actions: Vec<Action>) -> Vec<Action> {
+    let (urls, rest): (Vec<_>, Vec<_>) = actions
+        .into_iter()
+        .partition(|a| matches!(a, Action::OpenUrl(_)));
+    for url in urls {
+        if let Action::OpenUrl(url) = url
+            && let Err(why) = termist_platform::browser::open(&url)
+        {
+            app.message = Some(why);
+        }
+    }
+    rest
+}
+
 /// Mouse capture reports every move; only buttons, left drags and the wheel are used.
 fn wanted(ev: &Event) -> bool {
     !matches!(
@@ -495,7 +518,7 @@ impl Alerts {
     fn give(&mut self, paths: &Paths, app: &App, actions: Vec<Action>) -> Vec<Action> {
         let (alerts, rest): (Vec<_>, Vec<_>) = actions
             .into_iter()
-            .partition(|a| matches!(a, Action::Alert(_) | Action::Preview(_)));
+            .partition(|a| matches!(a, Action::Alert(_) | Action::Preview(_) | Action::Notify(_)));
         for alert in alerts {
             let alert = match alert {
                 Action::Alert(alert) => alert,
@@ -504,6 +527,16 @@ impl Alerts {
                     sound(paths, chosen, move || {
                         let _ = bell.send(());
                     });
+                    continue;
+                }
+                Action::Notify(text) => {
+                    if app.config.notify.desktop && !app.window_focused {
+                        let (dialect, tmux) = self.dialect;
+                        let seq = notify::desktop_notification(dialect, tmux, "termist", &text);
+                        let _ = stdout()
+                            .write_all(seq.as_bytes())
+                            .and_then(|()| stdout().flush());
+                    }
                     continue;
                 }
                 _ => continue,
@@ -583,7 +616,12 @@ async fn perform(
             }
             Action::Quit => return Ok(true),
             // done by `save_settings`, `Alerts`, `copy_out`
-            Action::WriteConfig(_) | Action::Alert(_) | Action::Preview(_) | Action::Copy(_) => {}
+            Action::WriteConfig(_)
+            | Action::Alert(_)
+            | Action::Preview(_)
+            | Action::Copy(_)
+            | Action::OpenUrl(_)
+            | Action::Notify(_) => {}
         }
     }
     Ok(false)
@@ -806,5 +844,20 @@ mod tests {
                 .parse()
                 .unwrap();
         assert_eq!(local_settings(&t), ["keys", "scenes.pool", "theme"]);
+    }
+
+    #[test]
+    fn only_web_addresses_are_opened_and_a_refusal_is_said() {
+        let mut app = App::new();
+        let rest = open_urls(
+            &mut app,
+            vec![Action::OpenUrl("file:///etc/passwd".into()), Action::Quit],
+        );
+        assert_eq!(rest, vec![Action::Quit]);
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|m| m.contains("not a web address"))
+        );
     }
 }

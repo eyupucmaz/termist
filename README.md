@@ -140,6 +140,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | drag | select in the pane; letting go copies it, and a toast in the top right says so |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
+| `v` | the project's open pull requests (needs the GitHub CLI) |
 | `s` / `?` | settings / every key as it is bound now |
 | `q` | quit the TUI; the agents keep running |
 
@@ -158,6 +159,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `/` | find any session |
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
 | drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
+| `v` / `R` | the project's pull requests / read GitHub again |
 | `o` / `x` | open a project / close its tab (sessions keep running) |
 | `r` / `a` / `A` | rename / archive / show archived |
 | `d` | stop a session (asks first) |
@@ -168,6 +170,19 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 `termist kill` stops the daemon and every session.
 
 </details>
+
+### Pull requests
+
+`v` shows the open pull requests of the project: one repo, or every GitHub repo one level below a folder
+(`m` chooses which). Enter opens one: its description, the conversation with line comments, checks and
+files. termist reads GitHub through the [GitHub CLI](https://cli.github.com): install `gh` and run
+`gh auth login`. With several accounts logged in, each repo is read with the account that has the most
+access to it; `m`, then `a`, picks another.
+
+```toml
+[github]
+enabled = true
+```
 
 <details>
 <summary><b>Status dots</b></summary>

@@ -209,4 +209,117 @@ mod tests {
             assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
         }
     }
+
+    #[test]
+    fn the_github_messages_round_trip() {
+        use crate::github::*;
+        let pr = PrRef {
+            repo: RepoId(7),
+            number: 212,
+        };
+        let summary = PrSummary {
+            number: 212,
+            title: "Add a dealer filter".into(),
+            url: "https://github.com/acme/site/pull/212".into(),
+            author: "bob".into(),
+            draft: false,
+            state: PrState::Open,
+            created_at: "2026-10-01T10:00:00Z".into(),
+            updated_at: "2026-10-02T10:00:00Z".into(),
+            head: "feat/dealer".into(),
+            base: "main".into(),
+            additions: 184,
+            deletions: 32,
+            changed_files: 9,
+            mergeable: Mergeable::Unknown,
+            decision: Some(ReviewDecision::ReviewRequired),
+            requested: vec!["alice".into(), "@acme/web".into()],
+            requested_you: true,
+            verdicts: vec![("carol".into(), ReviewState::Approved)],
+            checks: Checks::Passing,
+            unseen: true,
+        };
+        let mut dec = FrameDecoder::default();
+        let requests = [
+            ClientRequest::SetGitHub { enabled: true },
+            ClientRequest::SetPrFocus {
+                project: Some(crate::ProjectId::new()),
+                pr: Some(pr),
+            },
+            ClientRequest::SetRepoAccount {
+                repo: RepoId(7),
+                account: None,
+            },
+            ClientRequest::MarkPrSeen {
+                pr,
+                updated_at: "2026-10-02T10:00:00Z".into(),
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let events = [
+            ServerEvent::Prs {
+                project: crate::ProjectId::new(),
+                state: GhState::RateLimited {
+                    reset_at: "2026-10-02T11:00:00Z".into(),
+                },
+                discovered: 2,
+                repos: vec![RepoPrs {
+                    repo: RepoId(7),
+                    name: "site".into(),
+                    slug: "acme/site".into(),
+                    state: GhState::Ok,
+                    viewer: Some("alice".into()),
+                    prs: vec![summary.clone()],
+                    total: 1,
+                    fetched_at: Some("2026-10-02T10:00:05Z".into()),
+                    failed_at: None,
+                }],
+            },
+            ServerEvent::PrDetail {
+                pr,
+                state: GhState::Ok,
+                detail: Some(Box::new(PrDetail {
+                    summary,
+                    body: "Closes #198.".into(),
+                    comments: vec![],
+                    reviews: vec![],
+                    threads: vec![Thread {
+                        id: "T1".into(),
+                        path: "src/a.rs".into(),
+                        line: Some(42),
+                        resolved: false,
+                        outdated: false,
+                        hunk: "@@ -1 +1 @@\n-a\n+b".into(),
+                        comments: vec![Comment {
+                            author: "carol".into(),
+                            body: "why?".into(),
+                            created_at: "2026-10-02T09:00:00Z".into(),
+                        }],
+                        more: 0,
+                    }],
+                    checks: vec![],
+                    files: vec![FileChange {
+                        path: "src/a.rs".into(),
+                        additions: 1,
+                        deletions: 1,
+                        change: 'M',
+                    }],
+                    more: More::default(),
+                })),
+            },
+            ServerEvent::ReviewRequested {
+                project: crate::ProjectId::new(),
+                pr,
+                repo: "site".into(),
+                title: "Add a dealer filter".into(),
+            },
+        ];
+        for ev in events {
+            dec.push(&encode_frame(&ev).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        }
+    }
 }

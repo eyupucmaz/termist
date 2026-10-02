@@ -1,0 +1,16 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 70, 12).backend()"
+---
+" termist pull requests   orbit-api ◆1✓1⇄1                       12:00 "
+"┌ orbit-api · 2 of 3 repos ⟳ 40s ago ────────────────────────────────┐"
+"│ all  ⇄ to review  mine                                             │"
+"│                                                                    │"
+"│ site                                                             3 │"
+"│▌• #212  Add a dealer filter to search                    ◇ ✓    2h │"
+"│   #209  Fix image lazy loading                           ✗ ✗    1d │"
+"│   #201  WIP: new header                                  draft  5d │"
+"│ admin-api                                                        1 │"
+"│   #140  Paginate /vehicles                               ✓ ✓ ⚠  6h │"
+"└────────────────────────────────────────────────────────────────────┘"
+"pull requests · Enter open · / search · f ⇄ to review · m repos · b br"

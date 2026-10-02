@@ -1,0 +1,18 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 80, 14).backend()"
+---
+" termist pull requests   orbit-api ◆1✓1⇄1                                 12:00 "
+"┌ orbit-api · 2 of 3 repos ⟳ 40s ago ──────────────────────────────────────────┐"
+"│ all  ⇄ to review  mine                                                       │"
+"│                                                                              │"
+"│ site                                                                       3 │"
+"│▌• #212┌ repos in orbit-api ──────────────────────────────────────────┐    2h │"
+"│   #209│ [x] admin-api                  1 open   work*                │    1d │"
+"│   #201│ [ ] discord                         —   no access            │ft  5d │"
+"│ admin-└──────────────────────────────────────────────────────────────┘     1 │"
+"│   #140  Paginate /vehicles                                         ✓ ✓ ⚠  6h │"
+"│                                                                              │"
+"│                                                                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"j/k choose · Space show/hide · a account · Esc close                            "

@@ -6,6 +6,7 @@ use crate::overlay::{
     self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
+use crate::prs::{self, PrAction, PrLayout, PrView, ProjectPrs};
 use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
@@ -16,10 +17,12 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
+use termist_core::github::{GhState, PrDetail, PrRef, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -54,6 +57,18 @@ pub enum Mode {
     ConfirmArchive(SessionId),
 }
 
+/// What the body shows: the grid of cards, the archived cards, or pull requests.
+// One View lives in the App; boxing the PR view would only add a pointer to every key.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum View {
+    Grid,
+    /// `A`: the project's archived cards instead of its live ones.
+    Archive,
+    /// `v`: the project's pull requests.
+    Prs(PrView),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Send(ClientRequest),
@@ -68,6 +83,10 @@ pub enum Action {
     Preview(Sound),
     /// Text dragged out of the pane, for the clipboard.
     Copy(String),
+    /// A web page for the browser (a pull request, a check's log).
+    OpenUrl(String),
+    /// A desktop notification without a sound, when the terminal is not in front.
+    Notify(String),
     Quit,
 }
 
@@ -101,8 +120,8 @@ pub struct App {
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
     pub card_scroll: usize,
-    /// `A`: the grid shows the project's archived cards instead of its live ones.
-    pub archive_view: bool,
+    /// The grid, the archive, or the pull requests.
+    pub view: View,
     pub message: Option<String>,
     /// Set by the first `State` from the daemon; until then the body says "Connecting…".
     pub connected: bool,
@@ -164,6 +183,18 @@ pub struct App {
     pub screen: ratatui::layout::Rect,
     /// The terminal window is in front (focus reports; assumed without them).
     pub window_focused: bool,
+    /// Each project's pull requests, as the daemon last sent them.
+    pub prs: HashMap<ProjectId, ProjectPrs>,
+    /// Each project's repos and the logged-in accounts, for the repos window.
+    pub repo_lists: HashMap<ProjectId, (Vec<String>, Vec<RepoInfo>)>,
+    /// Pull requests read whole: how the last read went, and the last good one.
+    pub pr_details: HashMap<PrRef, (GhState, Option<PrDetail>)>,
+    /// Where the last frame put the PR view's rows and threads.
+    pub pr_layout: RefCell<PrLayout>,
+    /// Tests fix the clock; ages are counted from it.
+    pub frozen_now: Option<i64>,
+    /// What the daemon was last told this client looks at.
+    pr_focus: (Option<ProjectId>, Option<PrRef>),
     rng: u64,
 }
 
@@ -212,7 +243,7 @@ impl App {
             cards_per_row: 1,
             card_rows: 1,
             card_scroll: 0,
-            archive_view: false,
+            view: View::Grid,
             message: None,
             connected: false,
             harnesses: Harness::ALL
@@ -250,6 +281,12 @@ impl App {
             minute: 0,
             sysstat: Default::default(),
             window_focused: true,
+            prs: HashMap::new(),
+            repo_lists: HashMap::new(),
+            pr_details: HashMap::new(),
+            pr_layout: RefCell::default(),
+            frozen_now: None,
+            pr_focus: (None, None),
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -397,7 +434,7 @@ impl App {
             None => {
                 self.connected
                     && self.project_sessions().is_empty()
-                    && !self.archive_view
+                    && self.view == View::Grid
                     && self.overlays.is_empty()
                     && fits(self.scene, 2 + 3, 0)
             }
@@ -425,7 +462,7 @@ impl App {
         self.state
             .sessions
             .iter()
-            .filter(|s| Some(s.project) == self.project && s.archived == self.archive_view)
+            .filter(|s| Some(s.project) == self.project && s.archived == self.archive_view())
             .collect()
     }
 
@@ -499,7 +536,7 @@ impl App {
                 let idle = matches!(self.showing, Some(s) if s.kind == ShowKind::Idle);
                 // Archived elsewhere while focused here: back to the grid.
                 if info.archived
-                    && !self.archive_view
+                    && !self.archive_view()
                     && self.selected == Some(id)
                     && matches!(
                         self.mode,
@@ -542,8 +579,8 @@ impl App {
                 if starts_waiting && idle {
                     self.showing = None;
                     self.last_input = Instant::now();
-                    let shown =
-                        !self.archive_view && self.visible_sessions().iter().any(|s| s.id == id);
+                    let shown = self.view == View::Grid
+                        && self.visible_sessions().iter().any(|s| s.id == id);
                     if matches!(self.mode, Mode::Grid) && shown {
                         self.select(id);
                         self.repair_selection();
@@ -617,9 +654,62 @@ impl App {
                 self.recent_models.insert(harness, recent);
                 self.model_catalogs.insert(harness, catalog);
             }
+            ServerEvent::Prs {
+                project,
+                state,
+                discovered,
+                repos,
+            } => {
+                self.prs.insert(
+                    project,
+                    ProjectPrs {
+                        state,
+                        discovered,
+                        repos,
+                    },
+                );
+            }
+            ServerEvent::Repos {
+                project,
+                accounts,
+                repos,
+            } => {
+                for o in &mut self.overlays {
+                    if let Overlay::Repos { project: p, picker } = o
+                        && *p == project
+                    {
+                        picker.set_items(repos.clone(), overlay::repo_label);
+                    }
+                }
+                self.repo_lists.insert(project, (accounts, repos));
+            }
+            ServerEvent::PrDetail { pr, state, detail } => {
+                self.pr_details.insert(pr, (state, detail.map(|d| *d)));
+            }
+            ServerEvent::ReviewRequested {
+                project,
+                pr,
+                repo,
+                title,
+            } => {
+                if self.config.github.enabled {
+                    if self.config.notify.toasts {
+                        self.toasts.push(Toast {
+                            text: format!("⇄ #{} · {repo} wants your review", pr.number),
+                            kind: ToastKind::Review { project, pr },
+                            until: Instant::now() + toast::AGENT_FOR,
+                        });
+                    }
+                    actions.push(Action::Notify(format!(
+                        "{repo} #{} wants your review: {title}",
+                        pr.number
+                    )));
+                }
+            }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -645,6 +735,7 @@ impl App {
         if !self.overlays.is_empty() {
             actions.extend(self.overlay_key(key));
             actions.extend(self.sync_attachment());
+            actions.extend(self.sync_prs());
             return actions;
         }
         if self.scrolling && matches!(self.mode, Mode::Grid | Mode::Focus) {
@@ -682,7 +773,11 @@ impl App {
                 }
                 return vec![];
             }
-            Mode::Grid if self.archive_view => {
+            Mode::Grid if matches!(self.view, View::Prs(_)) => {
+                self.message = None;
+                actions.extend(self.prs_key(key));
+            }
+            Mode::Grid if self.archive_view() => {
                 self.message = None;
                 actions.extend(self.archive_key(key));
             }
@@ -721,6 +816,7 @@ impl App {
             }
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -753,6 +849,15 @@ impl App {
     /// full-screen one that did not gets arrow keys (it keeps no history); otherwise the
     /// view moves through the session's history.
     pub fn on_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        if matches!(self.view, View::Prs(_)) && self.overlays.is_empty() && self.showing.is_none() {
+            let on_toast = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+                && self.toasts.hit(self.screen, ev.column, ev.row).is_some();
+            if !on_toast {
+                let mut actions = self.prs_mouse(ev);
+                actions.extend(self.sync_prs());
+                return actions;
+            }
+        }
         let up = match ev.kind {
             MouseEventKind::ScrollUp => true,
             MouseEventKind::ScrollDown => false,
@@ -763,20 +868,23 @@ impl App {
                 {
                     self.toast_down = true;
                     // Under an overlay a click only dismisses the toast.
-                    let Some(ToastKind::Agent { session, .. }) =
-                        self.toasts.remove(i).map(|t| t.kind)
-                    else {
-                        return vec![];
-                    };
+                    let kind = self.toasts.remove(i).map(|t| t.kind);
                     if !self.overlays.is_empty() {
                         return vec![];
                     }
-                    // It lands in the grid: the next key goes to no other card.
-                    let mut actions = self.stop_scrolling();
-                    self.mode = Mode::Grid;
-                    actions.extend(self.reveal(session));
-                    actions.extend(self.sync_attachment());
-                    return actions;
+                    return match kind {
+                        Some(ToastKind::Agent { session, .. }) => {
+                            // It lands in the grid: the next key goes to no other card.
+                            let mut actions = self.stop_scrolling();
+                            self.mode = Mode::Grid;
+                            actions.extend(self.reveal(session));
+                            actions.extend(self.sync_attachment());
+                            actions.extend(self.sync_prs());
+                            actions
+                        }
+                        Some(ToastKind::Review { project, pr }) => self.reveal_pr(project, pr),
+                        _ => vec![],
+                    };
                 }
                 self.toast_down = false;
                 if self.takes_mouse(ev) {
@@ -959,6 +1067,7 @@ impl App {
             }));
         }
         actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
         actions
     }
 
@@ -1001,6 +1110,8 @@ impl App {
             Some(Overlay::Settings(_)) => self.settings_key(key),
             Some(Overlay::Keys(_)) => self.keys_key(key),
             Some(Overlay::KeyCapture(_)) => self.capture_key(key),
+            Some(Overlay::Repos { .. }) => self.repos_key(key),
+            Some(Overlay::RepoAccount { .. }) => self.repo_account_key(key),
             None => vec![],
         }
     }
@@ -1261,6 +1372,97 @@ impl App {
         if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
             q.launch.model = model;
             q.launch.effort = effort;
+        }
+    }
+
+    fn open_repos(&mut self) -> Vec<Action> {
+        let Some(project) = self.project else {
+            return vec![];
+        };
+        if !self.config.github.enabled {
+            self.message = Some("pull requests are off".into());
+            return vec![];
+        }
+        let repos = self
+            .repo_lists
+            .get(&project)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_default();
+        self.overlays.push(Overlay::Repos {
+            project,
+            picker: ListPicker::new(repos, overlay::repo_label, false),
+        });
+        vec![Action::Send(ClientRequest::ListRepos { project })]
+    }
+
+    fn repos_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Repos { project, picker }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let project = *project;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlays.pop();
+            }
+            KeyCode::Char(' ') => {
+                let Some(i) = picker.selected_index() else {
+                    return vec![];
+                };
+                let mut items = picker.items().to_vec();
+                items[i].visible = !items[i].visible;
+                let (repo, visible) = (items[i].id, items[i].visible);
+                picker.set_items(items, overlay::repo_label);
+                return vec![Action::Send(ClientRequest::SetRepoVisible {
+                    repo,
+                    visible,
+                })];
+            }
+            KeyCode::Char('a') => {
+                let Some(repo) = picker.selected().map(|r| r.id) else {
+                    return vec![];
+                };
+                let accounts = self
+                    .repo_lists
+                    .get(&project)
+                    .map(|(a, _)| a.clone())
+                    .unwrap_or_default();
+                let mut items = vec![None];
+                items.extend(accounts.into_iter().map(Some));
+                self.overlays.push(Overlay::RepoAccount {
+                    repo,
+                    picker: ListPicker::new(
+                        items,
+                        |a: &Option<String>| a.clone().unwrap_or_default(),
+                        false,
+                    ),
+                });
+            }
+            _ => {
+                picker.key(key);
+            }
+        }
+        vec![]
+    }
+
+    fn repo_account_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::RepoAccount { repo, picker }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let repo = *repo;
+        match picker.key(key) {
+            Pick::Chosen => {
+                let account = picker.selected().cloned().flatten();
+                self.overlays.pop();
+                vec![Action::Send(ClientRequest::SetRepoAccount {
+                    repo,
+                    account,
+                })]
+            }
+            Pick::Ignored if key.code == KeyCode::Esc => {
+                self.overlays.pop();
+                vec![]
+            }
+            _ => vec![],
         }
     }
 
@@ -1577,7 +1779,7 @@ impl App {
             return vec![];
         };
         let project = s.project;
-        self.archive_view = false;
+        self.view = View::Grid;
         if self.open_projects().any(|p| p.id == project) {
             self.select(id);
             return vec![];
@@ -1587,6 +1789,76 @@ impl App {
             select: Some(id),
         });
         vec![Action::Send(ClientRequest::OpenProject { project })]
+    }
+
+    /// Opens pull request `pr` of `project` in the PR view.
+    fn reveal_pr(&mut self, project: ProjectId, pr: PrRef) -> Vec<Action> {
+        if !self.open_projects().any(|p| p.id == project) {
+            return vec![];
+        }
+        // Out of scroll-back first: the pane it scrolled may be left behind.
+        let mut actions = self.stop_scrolling();
+        self.go_to_project(project);
+        self.mode = Mode::Grid;
+        let mut view = PrView::for_project(Some(project));
+        view.selected = Some(pr);
+        let summary = self
+            .prs
+            .get(&project)
+            .and_then(|d| d.repos.iter().find(|r| r.repo == pr.repo))
+            .and_then(|r| r.prs.iter().find(|p| p.number == pr.number))
+            .cloned();
+        if let Some(s) = summary {
+            actions.push(Action::Send(ClientRequest::MarkPrSeen {
+                pr,
+                updated_at: s.updated_at.clone(),
+            }));
+            view.detail = Some(prs::Detail::new(pr, s));
+        }
+        self.view = View::Prs(view);
+        actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
+        actions
+    }
+
+    /// The wheel moves through the inbox or scrolls the detail; a click selects a row,
+    /// a click on the selected row opens it.
+    fn prs_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        match ev.kind {
+            MouseEventKind::ScrollDown => self.prs_key(press(KeyCode::Down)),
+            MouseEventKind::ScrollUp => self.prs_key(press(KeyCode::Up)),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let layout = self.pr_layout.borrow().clone();
+                let View::Prs(view) = &mut self.view else {
+                    return vec![];
+                };
+                let inside = ev.column >= layout.list.x
+                    && ev.column < layout.list.right()
+                    && ev.row >= layout.list.y
+                    && ev.row < layout.list.bottom();
+                if view.detail.is_some() || !inside {
+                    return vec![];
+                }
+                let index = layout.first + (ev.row - layout.list.y) as usize;
+                let empty = ProjectPrs::default();
+                let data = self
+                    .project
+                    .and_then(|p| self.prs.get(&p))
+                    .unwrap_or(&empty);
+                let Some(pr) = prs::rows(data, view).get(index).and_then(|r| r.pr_ref()) else {
+                    return vec![];
+                };
+                if view.selected == Some(pr) {
+                    return self.prs_key(press(KeyCode::Enter));
+                }
+                view.selected = Some(pr);
+                let list = prs::rows(data, view);
+                view.repair(&list);
+                vec![]
+            }
+            _ => vec![],
+        }
     }
 
     fn move_by(&mut self, delta: isize) {
@@ -1602,12 +1874,104 @@ impl App {
         self.selected = Some(ids[next]);
     }
 
+    /// Seconds since 1970, for the ages of pull requests.
+    pub fn now_secs(&self) -> i64 {
+        self.frozen_now
+            .unwrap_or_else(|| (termist_core::now_ms() / 1000) as i64)
+    }
+
+    fn toggle_prs(&mut self) {
+        self.mode = Mode::Grid;
+        self.view = match self.view {
+            View::Prs(_) => View::Grid,
+            _ => View::Prs(PrView::for_project(self.project)),
+        };
+    }
+
+    /// Keeps the PR view on the current project's data, and tells the daemon what is
+    /// looked at.
+    fn sync_prs(&mut self) -> Vec<Action> {
+        let project = self.project;
+        let focus = match &mut self.view {
+            View::Prs(view) => {
+                if view.project != project {
+                    *view = PrView::for_project(project);
+                }
+                let empty = ProjectPrs::default();
+                let data = project.and_then(|p| self.prs.get(&p)).unwrap_or(&empty);
+                let list = prs::rows(data, view);
+                view.repair(&list);
+                (project, view.detail.as_ref().map(|d| d.pr))
+            }
+            _ => (None, None),
+        };
+        if focus == self.pr_focus || !self.config.github.enabled {
+            return vec![];
+        }
+        self.pr_focus = focus;
+        vec![Action::Send(ClientRequest::SetPrFocus {
+            project: focus.0,
+            pr: focus.1,
+        })]
+    }
+
+    /// A key in the PR view. The grid's keys for tabs, help, settings, refresh and
+    /// leaving work here too, unless the search takes the keys.
+    fn prs_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let typing = matches!(&self.view, View::Prs(v) if v.typing);
+        if !typing {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                self.mode = Mode::ConfirmQuit;
+                return vec![];
+            }
+            if let Some(
+                action @ (KeyAction::PullRequests
+                | KeyAction::RefreshGitHub
+                | KeyAction::NextTab
+                | KeyAction::PrevTab
+                | KeyAction::Tab(_)
+                | KeyAction::Help
+                | KeyAction::Settings
+                | KeyAction::Quit),
+            ) = self.keymap.action(Context::Grid, &key)
+            {
+                return self.act(action);
+            }
+        }
+        let View::Prs(view) = &mut self.view else {
+            return vec![];
+        };
+        let empty = ProjectPrs::default();
+        let data = self
+            .project
+            .and_then(|p| self.prs.get(&p))
+            .unwrap_or(&empty);
+        let layout = self.pr_layout.borrow().clone();
+        match view.key(key, data, &layout) {
+            None => vec![],
+            Some(PrAction::Close) => {
+                self.view = View::Grid;
+                vec![]
+            }
+            Some(PrAction::Opened(pr, updated_at)) => {
+                vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
+            }
+            Some(PrAction::Repos) => self.open_repos(),
+            Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
+        }
+    }
+
+    /// The body shows the project's archived cards.
+    pub fn archive_view(&self) -> bool {
+        self.view == View::Archive
+    }
+
     fn set_archive_view(&mut self, on: bool) {
         if on {
             // The archive is of this tab: a tab still on its way must not replace it.
             self.project_pending = None;
         }
-        self.archive_view = on;
+        self.view = if on { View::Archive } else { View::Grid };
         self.selected = None;
         self.card_scroll = 0;
         self.repair_selection();
@@ -1663,7 +2027,15 @@ impl App {
                     self.mode = Mode::ConfirmArchive(id);
                 }
             }
-            KeyAction::ArchiveView => self.set_archive_view(!self.archive_view),
+            KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
+            KeyAction::PullRequests => self.toggle_prs(),
+            KeyAction::RefreshGitHub => {
+                if let Some(project) = self.project
+                    && self.config.github.enabled
+                {
+                    return vec![Action::Send(ClientRequest::RefreshPrs { project })];
+                }
+            }
             KeyAction::Palette => self.open_palette(),
             KeyAction::HalfPageDown => self.half_page(1),
             KeyAction::HalfPageUp => self.half_page(-1),
@@ -1793,6 +2165,7 @@ impl App {
             SettingRow::StatusRam => "status.ram",
             SettingRow::StatusBattery => "status.battery",
             SettingRow::StatusClock => "status.clock",
+            SettingRow::PullRequests => "github.enabled",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -1826,6 +2199,15 @@ impl App {
                 return vec![
                     Action::WriteConfig(ConfigEdit::Set { key, value }),
                     Action::Preview(chosen),
+                ];
+            }
+            SettingRow::PullRequests => {
+                self.config.github.enabled = !self.config.github.enabled;
+                let value = self.config.github.enabled;
+                quiet(self);
+                return vec![
+                    Action::WriteConfig(ConfigEdit::SetBool { key, value }),
+                    Action::Send(ClientRequest::SetGitHub { enabled: value }),
                 ];
             }
             SettingRow::Desktop
@@ -2104,7 +2486,7 @@ impl App {
         let Some(id) = self.selected else {
             return vec![];
         };
-        self.archive_view = false;
+        self.view = View::Grid;
         let mut actions = vec![Action::Send(ClientRequest::UnarchiveSession {
             session: id,
         })];
@@ -2193,10 +2575,10 @@ impl App {
     /// the archive view keeps its own selection.
     fn arrived(&mut self, id: SessionId) {
         match self.mode {
-            Mode::Grid if self.archive_view => {}
+            Mode::Grid if self.archive_view() => {}
             Mode::Grid | Mode::Focus => {
                 self.select(id);
-                self.archive_view = false;
+                self.view = View::Grid;
                 self.mode = Mode::Focus;
             }
             _ => self.select(id),
@@ -2545,7 +2927,7 @@ mod tests {
         app.on_key(k(K::Char('A')));
         stopped.status = AgentStatus::Fresh;
         app.on_event(ServerEvent::SessionUpdated(stopped));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
         assert_eq!((app.selected, app.mode), (Some(s[1].id), Mode::Grid));
     }
 
@@ -3767,7 +4149,7 @@ mod tests {
         let at = waiting_toast(&mut app, &s);
         app.set_archive_view(true);
         click(&mut app, at);
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         assert_eq!(app.selected, Some(s[2].id));
     }
 
@@ -4329,7 +4711,7 @@ mod tests {
         app.on_key(k(K::Char('A')));
         opened(&mut app, "/orbit");
         assert_eq!(app.project, Some(s[0].project));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
     }
 
     #[test]
@@ -4561,7 +4943,7 @@ mod tests {
             AgentStatus::Disconnected,
         )));
         app.on_key(k(K::Char('A')));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
         let shown: Vec<SessionId> = app.project_sessions().iter().map(|x| x.id).collect();
         assert_eq!(shown, vec![s[1].id]);
         assert_eq!(app.selected, Some(s[1].id));
@@ -4577,7 +4959,7 @@ mod tests {
                 }
             ]
         );
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         let mut back = s[1].clone();
         back.status = AgentStatus::Disconnected;
         app.on_event(ServerEvent::SessionUpdated(back.clone()));
@@ -4598,10 +4980,10 @@ mod tests {
         }
         let ctrl_shift_a = KeyEvent::new(K::Char('A'), M::CONTROL | M::SHIFT);
         app.on_key(ctrl_shift_a);
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         app.on_key(k(K::Char('A')));
         app.on_key(ctrl_shift_a);
-        assert!(app.archive_view, "and it does not leave the archive view");
+        assert!(app.archive_view(), "and it does not leave the archive view");
     }
 
     #[test]
@@ -4633,7 +5015,7 @@ mod tests {
         assert_eq!(app.mode, Mode::ConfirmKill(s[1].id));
         app.on_key(k(K::Esc));
         app.on_key(k(K::Esc));
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         assert_eq!(app.selected, Some(s[0].id));
     }
 
@@ -5331,7 +5713,7 @@ mod tests {
             since: Instant::now(),
             kind: ShowKind::Idle,
         });
-        app.archive_view = true;
+        app.view = View::Archive;
         update(&mut app, &s[0], AgentStatus::NeedsFeedback);
         assert!(app.showing.is_none());
         assert_ne!(
@@ -5361,6 +5743,26 @@ mod tests {
     }
 
     #[test]
+    fn the_pull_requests_setting_tells_the_daemon() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::PullRequests)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(!app.config.github.enabled);
+        assert!(actions.contains(&Action::WriteConfig(ConfigEdit::SetBool {
+            key: "github.enabled",
+            value: false
+        })));
+        assert!(sent(&actions).contains(&&ClientRequest::SetGitHub { enabled: false }));
+    }
+
+    #[test]
     fn the_status_rows_turn_each_part_off_and_save_it() {
         let (mut app, _) = app();
         app.on_key(k(K::Char('s')));
@@ -5384,5 +5786,398 @@ mod tests {
             );
         }
         assert!(!app.config.status.any());
+    }
+
+    use crate::prs::fixtures::{project_prs, repo, summary};
+
+    fn with_prs(app: &mut App, project: ProjectId) {
+        let data = project_prs(vec![repo(
+            1,
+            "site",
+            vec![
+                summary(212, "Add a dealer filter", "bob"),
+                summary(209, "Fix lazy images", "alice"),
+            ],
+        )]);
+        app.on_event(ServerEvent::Prs {
+            project,
+            state: GhState::Ok,
+            discovered: data.discovered,
+            repos: data.repos,
+        });
+    }
+
+    fn focus(actions: &[Action]) -> Vec<(Option<ProjectId>, Option<u32>)> {
+        sent(actions)
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::SetPrFocus { project, pr } => Some((*project, pr.map(|p| p.number))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn v_opens_the_pull_requests_and_tells_the_daemon() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        let actions = app.on_key(k(K::Char('v')));
+        assert!(matches!(app.view, View::Prs(_)));
+        assert_eq!(focus(&actions), [(Some(api), None)]);
+        let actions = app.on_key(k(K::Char('v')));
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(focus(&actions), [(None, None)]);
+    }
+
+    #[test]
+    fn enter_opens_a_pull_request_and_marks_it_seen() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Enter));
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::MarkPrSeen { pr, .. } if pr.number == 212
+        )));
+        assert_eq!(focus(&actions), [(Some(api), Some(212))]);
+        let actions = app.on_key(k(K::Esc));
+        assert_eq!(focus(&actions), [(Some(api), None)]);
+    }
+
+    #[test]
+    fn another_tab_starts_the_view_afresh() {
+        let (mut app, s) = app();
+        let web = s[3].project;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char(']')));
+        assert_eq!(focus(&actions), [(Some(web), None)]);
+        assert!(matches!(&app.view, View::Prs(v) if v.project == Some(web)));
+    }
+
+    #[test]
+    fn with_github_off_the_daemon_is_not_told() {
+        let (mut app, _) = app();
+        app.config.github.enabled = false;
+        let actions = app.on_key(k(K::Char('v')));
+        assert!(focus(&actions).is_empty());
+        assert!(matches!(app.view, View::Prs(_)), "the view says why");
+    }
+
+    #[test]
+    fn shift_r_reads_github_again() {
+        let (mut app, s) = app();
+        let actions = app.on_key(KeyEvent::new(K::Char('R'), M::SHIFT));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::RefreshPrs {
+                project: s[0].project
+            }]
+        );
+    }
+
+    #[test]
+    fn details_from_the_daemon_are_kept() {
+        let (mut app, _) = app();
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        };
+        app.on_event(ServerEvent::PrDetail {
+            pr,
+            state: GhState::Failed("HTTP 502".into()),
+            detail: None,
+        });
+        assert_eq!(app.pr_details[&pr].0, GhState::Failed("HTTP 502".into()));
+    }
+
+    #[test]
+    fn turning_github_on_in_the_settings_tells_the_daemon_what_is_looked_at() {
+        let (mut app, s) = app();
+        app.config.github.enabled = false;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::PullRequests)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(app.config.github.enabled);
+        assert_eq!(focus(&actions), [(Some(s[0].project), None)]);
+    }
+
+    #[test]
+    fn a_toast_click_out_of_the_pull_requests_tells_the_daemon() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        let at = waiting_toast(&mut app, &s);
+        let actions = click(&mut app, at);
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(focus(&actions), [(None, None)]);
+    }
+
+    #[test]
+    fn the_search_takes_every_key_in_the_pull_requests() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('/')));
+        let mut actions = vec![];
+        for c in ['v', '1', 'q', ']'] {
+            actions.extend(app.on_key(k(K::Char(c))));
+        }
+        assert!(matches!(&app.view, View::Prs(v) if v.query == "v1q]" && v.typing));
+        assert_eq!(app.project, Some(s[0].project));
+        assert_eq!(app.mode, Mode::Grid);
+        assert!(sent(&actions).is_empty(), "{actions:?}");
+    }
+
+    fn repos_event(project: ProjectId) -> ServerEvent {
+        use termist_core::github::{RepoId, RepoInfo};
+        let info = |id: i64, name: &str, visible: bool, count: Option<u32>| RepoInfo {
+            id: RepoId(id),
+            name: name.into(),
+            slug: format!("acme/{name}"),
+            visible,
+            account: Some("work".into()),
+            pinned: false,
+            open_count: count,
+            state: GhState::Ok,
+        };
+        ServerEvent::Repos {
+            project,
+            accounts: vec!["work".into(), "me".into()],
+            repos: vec![
+                info(1, "admin", true, Some(2)),
+                info(2, "site", false, Some(4)),
+            ],
+        }
+    }
+
+    #[test]
+    fn m_opens_the_repos_and_space_shows_or_hides_one() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('m')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+        assert!(sent(&actions).contains(&&ClientRequest::ListRepos { project: api }));
+        app.on_event(repos_event(api));
+        let actions = app.on_key(k(K::Char(' ')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetRepoVisible {
+                repo: termist_core::github::RepoId(1),
+                visible: false
+            }]
+        );
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert!(!picker.items()[0].visible, "shown at once");
+    }
+
+    #[test]
+    fn a_chooses_the_account_a_repo_is_read_with() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(api));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('a')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::RepoAccount { .. })
+        ));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('j')));
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetRepoAccount {
+                repo: termist_core::github::RepoId(2),
+                account: Some("me".into())
+            }]
+        );
+        assert!(
+            matches!(app.overlays.last(), Some(Overlay::Repos { .. })),
+            "back to the repos"
+        );
+    }
+
+    #[test]
+    fn b_opens_the_selected_pull_request_in_the_browser() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('b')));
+        assert!(actions.contains(&Action::OpenUrl(
+            "https://github.com/acme/site/pull/212".into()
+        )));
+    }
+
+    #[test]
+    fn a_review_request_shows_a_toast_and_a_quiet_notification() {
+        let (mut app, s) = app();
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 215,
+        };
+        let actions = app.on_event(ServerEvent::ReviewRequested {
+            project: s[0].project,
+            pr,
+            repo: "site".into(),
+            title: "Bulk edit".into(),
+        });
+        assert_eq!(
+            app.toasts
+                .items()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
+            ["⇄ #215 · site wants your review"]
+        );
+        assert!(actions.contains(&Action::Notify(
+            "site #215 wants your review: Bulk edit".into()
+        )));
+        assert!(alerts(&actions).is_empty(), "no sound");
+    }
+
+    #[test]
+    fn clicking_the_review_toast_opens_the_pull_request() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.screen = Rect::new(0, 0, 100, 40);
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 209,
+        };
+        app.on_event(ServerEvent::ReviewRequested {
+            project: api,
+            pr,
+            repo: "site".into(),
+            title: "Fix lazy images".into(),
+        });
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        let View::Prs(v) = &app.view else {
+            panic!("the PR view opens")
+        };
+        assert_eq!(v.detail.as_ref().map(|d| d.pr), Some(pr));
+        assert!(
+            sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkPrSeen { .. }))
+        );
+    }
+
+    #[test]
+    fn the_review_toast_ends_scroll_back_first() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        app.screen = Rect::new(0, 0, 100, 40);
+        history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        assert!(app.scrolling);
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 209,
+        };
+        app.on_event(ServerEvent::ReviewRequested {
+            project: api,
+            pr,
+            repo: "site".into(),
+            title: "Fix lazy images".into(),
+        });
+        let r = app.toasts.rects(app.screen)[0];
+        use ratatui::crossterm::event::MouseButton::Left;
+        let actions = mouse(&mut app, MouseEventKind::Down(Left), r.x + 1, r.y + 1);
+        assert!(!app.scrolling);
+        assert_eq!(scrolls(&actions), vec![Scroll::Bottom]);
+        assert!(matches!(&app.view, View::Prs(v) if v.selected == Some(pr)));
+    }
+
+    #[test]
+    fn the_repos_window_says_so_when_pull_requests_are_off() {
+        let (mut app, _) = app();
+        app.config.github.enabled = false;
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('m')));
+        assert!(actions.is_empty());
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.message.as_deref(), Some("pull requests are off"));
+    }
+
+    #[test]
+    fn repos_of_another_project_leave_the_open_window_alone() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(api));
+        app.on_event(repos_event(ProjectId::new()));
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert_eq!(picker.items().len(), 2);
+        app.on_event(ServerEvent::Repos {
+            project: ProjectId::new(),
+            accounts: vec![],
+            repos: vec![],
+        });
+        let Some(Overlay::Repos { picker, .. }) = app.overlays.last() else {
+            panic!()
+        };
+        assert_eq!(
+            picker.items().len(),
+            2,
+            "the other project's list is not shown"
+        );
+    }
+
+    #[test]
+    fn space_and_a_on_an_empty_repos_list_do_nothing() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        for c in [' ', 'a'] {
+            let actions = app.on_key(k(K::Char(c)));
+            assert!(sent(&actions).is_empty(), "{actions:?}");
+            assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+        }
+        assert_eq!(app.overlays.len(), 1);
+    }
+
+    #[test]
+    fn esc_in_the_account_list_returns_to_the_repos() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(s[0].project));
+        app.on_key(k(K::Char('a')));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::RepoAccount { .. })
+        ));
+        let actions = app.on_key(k(K::Esc));
+        assert!(sent(&actions).is_empty());
+        assert!(matches!(app.overlays.last(), Some(Overlay::Repos { .. })));
+    }
+
+    #[test]
+    fn ctrl_q_closes_the_account_list_and_the_repos_together() {
+        let (mut app, s) = app();
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('m')));
+        app.on_event(repos_event(s[0].project));
+        app.on_key(k(K::Char('a')));
+        assert_eq!(app.overlays.len(), 2);
+        app.on_key(ctrl('q'));
+        assert!(app.overlays.is_empty());
     }
 }

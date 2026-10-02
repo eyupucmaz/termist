@@ -2,6 +2,7 @@
 pub mod codec;
 pub mod config;
 pub mod env;
+pub mod github;
 pub mod ids;
 pub mod model;
 pub mod protocol;

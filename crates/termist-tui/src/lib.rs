@@ -6,6 +6,7 @@ pub mod keys;
 pub mod list_picker;
 pub mod overlay;
 pub mod overlay_view;
+pub mod prs;
 pub mod run;
 pub mod scene_view;
 pub mod selection;

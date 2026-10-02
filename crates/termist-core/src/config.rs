@@ -184,6 +184,18 @@ impl Default for AgentsConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHubConfig {
+    /// Read pull requests through the `gh` CLI.
+    pub enabled: bool,
+}
+
+impl Default for GitHubConfig {
+    fn default() -> Self {
+        GitHubConfig { enabled: true }
+    }
+}
+
 /// Key → action overrides, as written: the TUI knows the key syntax and the actions,
 /// and checks them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +221,7 @@ pub struct Config {
     pub status: StatusConfig,
     pub worktrees: WorktreesConfig,
     pub agents: AgentsConfig,
+    pub github: GitHubConfig,
     pub keys: KeysConfig,
 }
 
@@ -232,6 +245,7 @@ impl Default for Config {
             status: StatusConfig::default(),
             worktrees: WorktreesConfig::default(),
             agents: AgentsConfig::default(),
+            github: GitHubConfig::default(),
             keys: KeysConfig::default(),
         }
     }
@@ -333,6 +347,7 @@ impl Reader<'_> {
             status: self.status(&mut t),
             worktrees: self.worktrees(&mut t),
             agents: self.agents(&mut t),
+            github: self.github(&mut t),
             keys: self.keys(&mut t),
         };
         self.unknown("", t);
@@ -453,6 +468,18 @@ impl Reader<'_> {
         };
         self.unknown("agents", a);
         agents
+    }
+
+    fn github(&mut self, t: &mut Table) -> GitHubConfig {
+        let d = GitHubConfig::default();
+        let Some(mut g) = self.table(t, "", "github") else {
+            return d;
+        };
+        let github = GitHubConfig {
+            enabled: self.bool(&mut g, "github", "enabled").unwrap_or(d.enabled),
+        };
+        self.unknown("github", g);
+        github
     }
 
     fn keys(&mut self, t: &mut Table) -> KeysConfig {
@@ -588,6 +615,19 @@ mod tests {
     }
 
     #[test]
+    fn the_github_section_turns_pull_requests_off() {
+        let (c, problems) = parse("[github]\nenabled = false\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!c.github.enabled);
+        let (_, problems) = parse("[github]\nenabled = \"no\"\nhost = \"x\"\n");
+        let paths: Vec<_> = problems
+            .iter()
+            .map(|p| p.split(':').next().unwrap())
+            .collect();
+        assert_eq!(paths, ["github.enabled", "github.host"]);
+    }
+
+    #[test]
     fn toasts_are_on_unless_turned_off() {
         let (c, problems) = parse("");
         assert!(c.notify.toasts);
@@ -654,6 +694,9 @@ location = "sibling"
 [agents]
 default = "claude"
 new_worktree_by_default = false
+
+[github]
+enabled = true                  # pull requests through the gh CLI (`v`)
 
 [keys.grid]
 # "p" = "quick_prompt"
