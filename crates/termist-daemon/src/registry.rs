@@ -474,7 +474,14 @@ impl Registry {
             }
             ClientRequest::ListModels { harness } => {
                 let recent = self.store.recent_models(harness);
-                self.send(client, ServerEvent::Models { harness, recent });
+                self.send(
+                    client,
+                    ServerEvent::Models {
+                        harness,
+                        recent,
+                        catalog: vec![],
+                    },
+                );
             }
             ClientRequest::RescanHarnesses => self.rescan(std::time::Instant::now()),
             ClientRequest::SetColors(colors) => {

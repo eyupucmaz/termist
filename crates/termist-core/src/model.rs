@@ -49,6 +49,17 @@ pub struct LaunchOptions {
     pub effort: Option<String>,
 }
 
+/// A model an agent CLI offers, for the quick prompt's list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// What goes to the CLI's model flag.
+    pub id: String,
+    /// What the list shows.
+    pub label: String,
+    /// The effort levels this model takes; empty: the harness's own list.
+    pub efforts: Vec<String>,
+}
+
 /// Whether the daemon found a harness's CLI when it started.
 /// The colours an agent is told about when it asks (OSC 10, 11 and 4): its default
 /// foreground and background and, when a theme sets them, the 16 ANSI colours.

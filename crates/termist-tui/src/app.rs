@@ -595,7 +595,9 @@ impl App {
                 }
                 self.prompt_history = history;
             }
-            ServerEvent::Models { harness, recent } => {
+            ServerEvent::Models {
+                harness, recent, ..
+            } => {
                 for o in &mut self.overlays {
                     if let Overlay::Model(m) = o
                         && m.harness == harness
@@ -2956,6 +2958,7 @@ mod tests {
         app.on_event(ServerEvent::Models {
             harness: Harness::Codex,
             recent: vec!["gpt-5".into()],
+            catalog: vec![],
         });
         for key in [K::Char('j'), K::Char('l'), K::Char('l'), K::Enter] {
             app.on_key(k(key));
@@ -3030,6 +3033,7 @@ mod tests {
         app.on_event(ServerEvent::Models {
             harness: Harness::Claude,
             recent: vec!["opus".into(), "sonnet".into()],
+            catalog: vec![],
         });
         for key in [
             K::Char('j'),

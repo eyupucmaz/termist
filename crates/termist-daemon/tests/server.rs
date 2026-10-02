@@ -1534,7 +1534,8 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
         next_event(&mut c, |e| matches!(e, ServerEvent::Models { .. })).await,
         ServerEvent::Models {
             harness: Harness::Claude,
-            recent: vec!["opus".into()]
+            recent: vec!["opus".into()],
+            catalog: vec![],
         }
     );
     c.send(&ClientRequest::SetLastLaunch(launch.clone()))
