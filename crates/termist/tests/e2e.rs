@@ -711,7 +711,7 @@ async fn quick_prompt_and_follow_up_through_the_real_tui() {
     tui.wait_for("Alt+Enter newline", mark);
     tui.keys(b"fix the login redirect");
     // Ctrl+O, "type a model…", effort three steps right (high), Enter
-    tui.keys(b"\x0fjlll\r");
+    tui.keys(b"\x0f\x1b[B\x1b[C\x1b[C\x1b[C\r");
     tui.keys(b"my model\r");
     let mark = tui.mark();
     tui.keys(b"\r");

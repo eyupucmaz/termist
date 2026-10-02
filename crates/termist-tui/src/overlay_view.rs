@@ -266,13 +266,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 })
                 .collect();
             let mut extra = vec![];
-            if !m.harness.efforts().is_empty() {
+            let efforts = m.efforts();
+            if !efforts.is_empty() {
                 let mut spans = vec![Span::raw(" effort ")];
-                let levels = std::iter::once("default").chain(m.harness.efforts().iter().copied());
+                let levels = std::iter::once("default".to_string()).chain(efforts);
                 for (i, level) in levels.enumerate() {
                     spans.push(Span::styled(
                         format!(" {level} "),
-                        highlighted(Style::default(), i == m.effort),
+                        highlighted(Style::default(), i == m.effort_index()),
                     ));
                 }
                 extra = vec![Line::default(), Line::from(spans)];
@@ -283,8 +284,8 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 body,
                 ListBox {
                     title: format!("model · {}", m.harness.id()),
-                    width: 56,
-                    query: None,
+                    width: 64,
+                    query: m.models.query().map(str::to_string),
                     rows,
                     highlight: m.models.highlight(),
                     extra,
@@ -675,10 +676,10 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::QuickPrompt(_) => {
             "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"
         }
-        Overlay::Model(m) if m.harness.efforts().is_empty() => {
-            "j/k model · Enter choose · Esc back"
+        Overlay::Model(m) if m.efforts().is_empty() => {
+            "type to filter · ↑↓ model · Enter choose · Esc back"
         }
-        Overlay::Model(_) => "j/k model · h/l effort · Enter choose · Esc back",
+        Overlay::Model(_) => "type to filter · ↑↓ model · ←→ effort · Enter choose · Esc back",
         Overlay::ModelName(_) => "Enter use this model · Esc back",
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
         Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",

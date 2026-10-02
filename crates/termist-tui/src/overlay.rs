@@ -6,7 +6,9 @@ use crate::keys::{self, Action as KeyAction, Context, KeySpec};
 use crate::list_picker::ListPicker;
 use crate::text_input::TextInput;
 use std::path::PathBuf;
-use termist_core::{Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo, SessionId};
+use termist_core::{
+    Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId, ProjectInfo, SessionId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -272,93 +274,166 @@ impl QuickPrompt {
 pub enum ModelChoice {
     /// No model flag: the CLI decides.
     Default,
-    Named(String),
+    Named(ModelInfo),
     /// Opens a text box for any model name.
     Type,
 }
 
 impl ModelChoice {
+    /// A model known only by its id: a recent one, or one typed.
+    pub fn named(id: &str) -> ModelChoice {
+        ModelChoice::Named(ModelInfo {
+            id: id.into(),
+            label: id.into(),
+            efforts: vec![],
+        })
+    }
+
     pub fn label(&self) -> String {
         match self {
             ModelChoice::Default => "CLI default".into(),
-            ModelChoice::Named(m) => m.clone(),
+            ModelChoice::Named(m) => m.label.clone(),
             ModelChoice::Type => "type a model…".into(),
         }
     }
 
     pub fn model(&self) -> Option<String> {
         match self {
-            ModelChoice::Named(m) => Some(m.clone()),
+            ModelChoice::Named(m) => Some(m.id.clone()),
             ModelChoice::Default | ModelChoice::Type => None,
         }
     }
+
+    /// "CLI default" and "type a model…" show whatever is typed.
+    pub fn is_pinned(&self) -> bool {
+        !matches!(self, ModelChoice::Named(_))
+    }
+
+    /// The same entry across lists: a model by its id, whatever its label.
+    fn key(&self) -> Option<String> {
+        match self {
+            ModelChoice::Default => Some(String::new()),
+            ModelChoice::Named(m) => Some(m.id.clone()),
+            ModelChoice::Type => None,
+        }
+    }
 }
+
+/// Effort levels from least to most, to step down to the nearest one a model takes.
+const EFFORT_ORDER: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelPicker {
     pub harness: Harness,
     pub models: ListPicker<ModelChoice>,
-    /// 0 is the CLI's default, then `harness.efforts()` in order.
-    pub effort: usize,
+    /// The effort asked for; `None` is the CLI's default. A model that does not take it
+    /// gets the nearest level below.
+    wanted_effort: Option<String>,
 }
 
 impl ModelPicker {
-    pub fn new(launch: &LaunchOptions, recent: Vec<String>) -> ModelPicker {
-        let efforts = launch.harness.efforts();
-        let effort = launch
-            .effort
-            .as_deref()
-            .and_then(|e| efforts.iter().position(|x| *x == e))
-            .map_or(0, |i| i + 1);
+    pub fn new(launch: &LaunchOptions, recent: Vec<String>, catalog: &[ModelInfo]) -> ModelPicker {
         let mut picker = ModelPicker {
             harness: launch.harness,
-            models: ListPicker::new(vec![], ModelChoice::label, false),
-            effort,
+            models: ListPicker::new(vec![], ModelChoice::label, true)
+                .pinned(ModelChoice::is_pinned),
+            wanted_effort: launch.effort.clone(),
         };
-        picker.set_recent(recent, launch.model.as_deref());
+        picker.set_lists(recent, catalog, launch.model.as_deref());
         if let Some(current) = &launch.model {
             let at = picker
                 .models
                 .items()
                 .iter()
-                .position(|m| *m == ModelChoice::Named(current.clone()));
+                .position(|m| m.model().as_deref() == Some(current.as_str()));
             picker.models.select_index(at.unwrap_or(0));
         }
         picker
     }
 
-    /// The list is: CLI default, the current model (unless it is a recent one), the
-    /// recent models, then "type a model…". The highlighted entry stays highlighted.
-    pub fn set_recent(&mut self, recent: Vec<String>, current: Option<&str>) {
-        let keep = self.models.selected().cloned();
+    /// CLI default, the current model (unless listed below), the recent models, the
+    /// CLI's own list, then "type a model…"; a model shows once, with the CLI's label.
+    /// The highlighted entry stays highlighted.
+    pub fn set_lists(&mut self, recent: Vec<String>, catalog: &[ModelInfo], current: Option<&str>) {
+        let keep = self.models.selected().map(ModelChoice::key);
+        let info = |id: &str| {
+            catalog
+                .iter()
+                .find(|m| m.id == id)
+                .cloned()
+                .map_or_else(|| ModelChoice::named(id), ModelChoice::Named)
+        };
         let mut items = vec![ModelChoice::Default];
-        if let Some(c) = current.filter(|c| !recent.iter().any(|r| r == c)) {
-            items.push(ModelChoice::Named(c.to_string()));
+        let listed =
+            |id: &str| recent.iter().any(|r| r == id) || catalog.iter().any(|m| m.id == id);
+        if let Some(c) = current.filter(|c| !listed(c)) {
+            items.push(ModelChoice::named(c));
         }
-        items.extend(recent.into_iter().map(ModelChoice::Named));
+        let mut seen: Vec<String> = Vec::new();
+        for id in recent
+            .iter()
+            .map(String::as_str)
+            .chain(catalog.iter().map(|m| m.id.as_str()))
+        {
+            if !seen.iter().any(|s| s == id) {
+                seen.push(id.to_string());
+                items.push(info(id));
+            }
+        }
         items.push(ModelChoice::Type);
         self.models.set_items(items, ModelChoice::label);
-        if let Some(i) = keep.and_then(|k| self.models.items().iter().position(|m| *m == k)) {
+        if let Some(i) = keep.and_then(|k| self.models.items().iter().position(|m| m.key() == k)) {
             self.models.select_index(i);
         }
     }
 
-    pub fn step_effort(&mut self, delta: isize) {
-        let last = self.harness.efforts().len() as isize;
-        self.effort = (self.effort as isize + delta).clamp(0, last) as usize;
+    /// The effort levels of the highlighted model, or the harness's own.
+    pub fn efforts(&self) -> Vec<String> {
+        match self.models.selected() {
+            Some(ModelChoice::Named(m)) if !m.efforts.is_empty() => m.efforts.clone(),
+            _ => self
+                .harness
+                .efforts()
+                .iter()
+                .map(|e| e.to_string())
+                .collect(),
+        }
     }
 
     pub fn effort(&self) -> Option<String> {
-        self.effort
-            .checked_sub(1)
-            .and_then(|i| self.harness.efforts().get(i))
-            .map(|e| e.to_string())
+        let wanted = self.wanted_effort.as_deref()?;
+        let levels = self.efforts();
+        if levels.iter().any(|l| l == wanted) {
+            return Some(wanted.to_string());
+        }
+        let rank = |l: &str| EFFORT_ORDER.iter().position(|x| *x == l);
+        let top = rank(wanted)?;
+        levels
+            .into_iter()
+            .filter(|l| rank(l).is_some_and(|r| r < top))
+            .max_by_key(|l| rank(l))
+    }
+
+    /// 0 for the CLI's default, then 1… for `efforts()` in order.
+    pub fn effort_index(&self) -> usize {
+        let levels = self.efforts();
+        self.effort()
+            .and_then(|e| levels.iter().position(|l| *l == e))
+            .map_or(0, |i| i + 1)
+    }
+
+    pub fn step_effort(&mut self, delta: isize) {
+        let levels = self.efforts();
+        let at = (self.effort_index() as isize + delta).clamp(0, levels.len() as isize) as usize;
+        self.wanted_effort = at.checked_sub(1).map(|i| levels[i].clone());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use termist_core::ModelInfo;
 
     fn launch(harness: Harness, model: Option<&str>, effort: Option<&str>) -> LaunchOptions {
         LaunchOptions {
@@ -372,46 +447,111 @@ mod tests {
         m.models.items().iter().map(ModelChoice::label).collect()
     }
 
+    fn info(id: &str, label: &str, efforts: &[&str]) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            label: label.into(),
+            efforts: efforts.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    fn codex_catalog() -> Vec<ModelInfo> {
+        vec![
+            info(
+                "gpt-6-astra",
+                "GPT-6-Astra",
+                &["low", "medium", "high", "xhigh", "max", "ultra"],
+            ),
+            info("gpt-5.5", "GPT-5.5", &["low", "medium", "high", "xhigh"]),
+        ]
+    }
+
     #[test]
-    fn the_model_list_is_default_then_recent_then_type_your_own() {
+    fn the_list_is_default_current_recent_catalog_then_type_your_own() {
         let m = ModelPicker::new(
-            &launch(Harness::Claude, Some("opus"), Some("high")),
-            vec!["sonnet".into(), "opus".into()],
+            &launch(Harness::Codex, Some("my-model"), Some("high")),
+            vec!["gpt-5.5".into(), "old-model".into()],
+            &codex_catalog(),
         );
         assert_eq!(
             labels(&m),
-            ["CLI default", "sonnet", "opus", "type a model…"]
+            [
+                "CLI default",
+                "my-model",
+                "GPT-5.5",
+                "old-model",
+                "GPT-6-Astra",
+                "type a model…"
+            ]
         );
-        assert_eq!(
-            m.models.selected(),
-            Some(&ModelChoice::Named("opus".into()))
-        );
+        assert_eq!(m.models.selected(), Some(&ModelChoice::named("my-model")));
         assert_eq!(m.effort().as_deref(), Some("high"));
-        let typed = ModelPicker::new(&launch(Harness::Codex, Some("my-model"), None), vec![]);
-        assert_eq!(labels(&typed), ["CLI default", "my-model", "type a model…"]);
-        assert_eq!(typed.effort(), None);
     }
 
     #[test]
-    fn recent_models_arriving_later_keep_the_highlight() {
-        let mut m = ModelPicker::new(&launch(Harness::Claude, None, None), vec![]);
-        m.models.select_index(1); // "type a model…"
-        m.set_recent(vec!["opus".into()], None);
-        assert_eq!(m.models.selected(), Some(&ModelChoice::Type));
+    fn the_catalog_arriving_later_keeps_the_highlight() {
+        let mut m = ModelPicker::new(
+            &launch(Harness::Codex, None, None),
+            vec!["gpt-5.5".into()],
+            &[],
+        );
+        m.models.select_index(1);
+        m.set_lists(vec!["gpt-5.5".into()], &codex_catalog(), None);
+        assert_eq!(
+            m.models.selected().map(ModelChoice::label).as_deref(),
+            Some("GPT-5.5"),
+            "the same model, now with its name"
+        );
     }
 
     #[test]
-    fn effort_steps_stop_at_both_ends_and_opencode_has_none() {
-        let mut m = ModelPicker::new(&launch(Harness::Codex, None, None), vec![]);
-        m.step_effort(-1);
-        assert_eq!(m.effort(), None);
+    fn filtering_keeps_default_and_type_your_own() {
+        let mut m = ModelPicker::new(
+            &launch(Harness::Codex, None, None),
+            vec![],
+            &codex_catalog(),
+        );
+        for c in "astra".chars() {
+            m.models.key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let visible: Vec<String> = m.models.visible().map(|(_, c, _)| c.label()).collect();
+        assert_eq!(visible, ["CLI default", "GPT-6-Astra", "type a model…"]);
+        for c in "zzz".chars() {
+            m.models.key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(m.models.visible_len(), 2);
+    }
+
+    #[test]
+    fn efforts_follow_the_model_and_step_down_when_it_has_less() {
+        let mut m = ModelPicker::new(
+            &launch(Harness::Codex, None, None),
+            vec![],
+            &codex_catalog(),
+        );
+        m.models.key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(m.efforts().len(), 6, "gpt-6-astra");
         for _ in 0..9 {
             m.step_effort(1);
         }
-        assert_eq!(m.effort().as_deref(), Some("high"));
-        let mut o = ModelPicker::new(&launch(Harness::OpenCode, None, None), vec![]);
+        assert_eq!(m.effort().as_deref(), Some("ultra"));
+        m.models.key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            m.effort().as_deref(),
+            Some("xhigh"),
+            "gpt-5.5 tops out at xhigh"
+        );
+        assert_eq!(m.effort_index(), 4);
+        m.step_effort(-9);
+        assert_eq!(m.effort(), None);
+    }
+
+    #[test]
+    fn opencode_has_no_effort() {
+        let mut o = ModelPicker::new(&launch(Harness::OpenCode, None, None), vec![], &[]);
         o.step_effort(1);
         assert_eq!(o.effort(), None);
+        assert!(o.efforts().is_empty());
     }
 
     #[test]

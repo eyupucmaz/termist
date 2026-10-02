@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound, THEMES};
 use termist_core::{
-    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ProjectId, ProjectInfo,
-    ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot, attention_order,
-    next_in_attention,
+    AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
+    ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
+    attention_order, next_in_attention,
 };
 use termist_core::{Scroll, TermColors};
 use termist_scenes::{Scene, TimeOfDay};
@@ -117,6 +117,7 @@ pub struct App {
     prompt_draft: Option<String>,
     /// Recently used models per harness, as the daemon last sent them.
     recent_models: HashMap<Harness, Vec<String>>,
+    pub model_catalogs: HashMap<Harness, Vec<ModelInfo>>,
     focus_next_created: bool,
     resume_pending: Option<SessionId>,
     /// A project asked to be opened (or a folder added); switched to when it arrives.
@@ -222,6 +223,7 @@ impl App {
             prompt_history: Vec::new(),
             prompt_draft: None,
             recent_models: HashMap::new(),
+            model_catalogs: HashMap::new(),
             focus_next_created: false,
             resume_pending: None,
             project_pending: None,
@@ -596,16 +598,19 @@ impl App {
                 self.prompt_history = history;
             }
             ServerEvent::Models {
-                harness, recent, ..
+                harness,
+                recent,
+                catalog,
             } => {
                 for o in &mut self.overlays {
                     if let Overlay::Model(m) = o
                         && m.harness == harness
                     {
-                        m.set_recent(recent.clone(), None);
+                        m.set_lists(recent.clone(), &catalog, None);
                     }
                 }
                 self.recent_models.insert(harness, recent);
+                self.model_catalogs.insert(harness, catalog);
             }
             ServerEvent::Hello { .. } | ServerEvent::Ack => {}
         }
@@ -1107,8 +1112,13 @@ impl App {
                     .get(&launch.harness)
                     .cloned()
                     .unwrap_or_default();
+                let catalog = self
+                    .model_catalogs
+                    .get(&launch.harness)
+                    .cloned()
+                    .unwrap_or_default();
                 self.overlays
-                    .push(Overlay::Model(ModelPicker::new(&launch, recent)));
+                    .push(Overlay::Model(ModelPicker::new(&launch, recent, &catalog)));
                 return vec![Action::Send(ClientRequest::ListModels {
                     harness: launch.harness,
                 })];
@@ -1179,11 +1189,11 @@ impl App {
             return vec![];
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc => {
                 self.overlays.pop();
             }
-            KeyCode::Left | KeyCode::Char('h') => m.step_effort(-1),
-            KeyCode::Right | KeyCode::Char('l') => m.step_effort(1),
+            KeyCode::Left => m.step_effort(-1),
+            KeyCode::Right => m.step_effort(1),
             _ => {
                 if m.models.key(key) == Pick::Chosen {
                     match m.models.selected().cloned() {
@@ -2910,7 +2920,7 @@ mod tests {
             vec![ctrl('o'), k(K::Esc)],
             vec![
                 ctrl('o'),
-                k(K::Char('j')),
+                k(K::Down),
                 k(K::Enter),
                 k(K::Char('x')),
                 k(K::Esc),
@@ -2946,6 +2956,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_catalog_fills_the_model_list() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('p')));
+        app.on_key(ctrl('o'));
+        app.on_event(ServerEvent::Models {
+            harness: Harness::Claude,
+            recent: vec![],
+            catalog: ["opus", "sonnet"]
+                .map(|id| ModelInfo {
+                    id: id.into(),
+                    label: id.into(),
+                    efforts: vec![],
+                })
+                .to_vec(),
+        });
+        for c in "son".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        app.on_key(k(K::Down));
+        app.on_key(k(K::Enter));
+        assert_eq!(quick_prompt(&app).launch.model.as_deref(), Some("sonnet"));
+    }
+
     // The daemon keeps the launch line but does not send the state again; the next
     // quick prompt must not open on the old one (and send that back).
     #[test]
@@ -2960,7 +2994,7 @@ mod tests {
             recent: vec!["gpt-5".into()],
             catalog: vec![],
         });
-        for key in [K::Char('j'), K::Char('l'), K::Char('l'), K::Enter] {
+        for key in [K::Down, K::Right, K::Right, K::Enter] {
             app.on_key(k(key));
         }
         let used = quick_prompt(&app).launch.clone();
@@ -3035,14 +3069,7 @@ mod tests {
             recent: vec!["opus".into(), "sonnet".into()],
             catalog: vec![],
         });
-        for key in [
-            K::Char('j'),
-            K::Char('j'),
-            K::Char('l'),
-            K::Char('l'),
-            K::Right,
-            K::Enter,
-        ] {
+        for key in [K::Down, K::Down, K::Right, K::Right, K::Right, K::Enter] {
             app.on_key(k(key));
         }
         assert_eq!(
@@ -3050,14 +3077,7 @@ mod tests {
             launch(Harness::Claude, Some("sonnet"), Some("high"))
         );
         app.on_key(ctrl('o'));
-        for key in [
-            K::Char('k'),
-            K::Char('k'),
-            K::Char('h'),
-            K::Char('h'),
-            K::Char('h'),
-            K::Enter,
-        ] {
+        for key in [K::Up, K::Up, K::Left, K::Left, K::Left, K::Enter] {
             app.on_key(k(key));
         }
         assert_eq!(
@@ -3071,8 +3091,8 @@ mod tests {
         let (mut app, _) = app();
         app.on_key(k(K::Char('p')));
         app.on_key(ctrl('o'));
-        app.on_key(k(K::Char('l')));
-        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Right));
+        app.on_key(k(K::Down));
         app.on_key(k(K::Enter));
         assert!(matches!(app.overlays.last(), Some(Overlay::ModelName(_))));
         app.on_key(k(K::Enter));
