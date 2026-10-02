@@ -30,6 +30,9 @@ use termist_core::{ClientRequest, ProjectId, ProjectInfo, ServerEvent};
 const DETAILS: usize = 50;
 /// Below this many points left in the hour, an account is read slowly.
 const RATE_FLOOR: u32 = 300;
+/// A folder with more repos than this shows only its first ones at first; the repos
+/// window shows the others. Every shown repo spends the hourly budget.
+const SHOWN_AT_FIRST: usize = 10;
 
 /// A repo to read: its id, owner and name.
 pub type Slug = (RepoId, String, String);
@@ -727,12 +730,18 @@ impl GitHub {
                 self.auth = Auth::Failed(state);
                 fx.extend(self.snapshot(To::All, projects));
             }
-            Done::Discovered { project, repos } => {
+            Done::Discovered { project, mut repos } => {
                 self.discovering.remove(&project);
                 self.discovered.insert(project);
+                repos.sort_by(|a, b| a.path.cmp(&b.path));
+                let many = repos.len() > SHOWN_AT_FIRST;
                 let mut found = HashSet::new();
-                for local in repos {
-                    let stored =
+                for (i, local) in repos.into_iter().enumerate() {
+                    let new = !self
+                        .repos
+                        .iter()
+                        .any(|r| r.stored.project == project && r.stored.path == local.path);
+                    let mut stored =
                         match store.upsert_repo(project, &local.path, &local.owner, &local.repo) {
                             Ok(stored) => stored,
                             Err(e) => {
@@ -740,6 +749,13 @@ impl GitHub {
                                 continue;
                             }
                         };
+                    // Only a repo seen for the first time: the user's choice stays.
+                    if new && many && i >= SHOWN_AT_FIRST {
+                        match store.set_repo_visible(stored.id, false) {
+                            Ok(()) => stored.visible = false,
+                            Err(e) => tracing::warn!(error = %e, "could not hide a GitHub repo"),
+                        }
+                    }
                     found.insert(stored.id);
                     match self.repos.iter_mut().find(|r| r.stored.id == stored.id) {
                         Some(r) => {
@@ -1148,6 +1164,50 @@ mod tests {
             2,
             "a repo not found again stays stored"
         );
+    }
+
+    #[test]
+    fn a_folder_of_many_repos_shows_its_first_ten() {
+        let mut w = world(&["code"]);
+        w.ready(vec![account("work", true)]);
+        let names: Vec<String> = (0..12).map(|i| format!("r{i:02}")).collect();
+        // Out of order: the first ten are taken by path.
+        let found: Vec<(&str, &str, &str)> = names
+            .iter()
+            .rev()
+            .map(|n| (n.as_str(), "acme", n.as_str()))
+            .collect();
+        let fx = w.found(0, &found);
+        let visible: Vec<bool> = listed(&fx).iter().map(|r| r.2).collect();
+        let mut want = vec![true; 12];
+        want[10] = false;
+        want[11] = false;
+        assert_eq!(visible, want);
+        assert_eq!(shown(&fx).unwrap().1, 12, "all twelve are found");
+        assert_eq!(
+            w.store
+                .repos()
+                .unwrap()
+                .iter()
+                .filter(|r| r.visible)
+                .count(),
+            10
+        );
+        // The user's choice stays when the folder is looked through again.
+        w.request(ClientRequest::SetRepoVisible {
+            repo: w.id("r11"),
+            visible: true,
+        });
+        w.request(ClientRequest::SetRepoVisible {
+            repo: w.id("r00"),
+            visible: false,
+        });
+        let fx = w.found(0, &found);
+        let visible: Vec<bool> = listed(&fx).iter().map(|r| r.2).collect();
+        let mut want = vec![true; 12];
+        want[0] = false;
+        want[10] = false;
+        assert_eq!(visible, want);
     }
 
     #[test]
