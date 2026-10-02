@@ -54,6 +54,14 @@ pub enum Mode {
     ConfirmArchive(SessionId),
 }
 
+/// What the body shows: the grid of cards, the archived cards, or (Görev 16) pull requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum View {
+    Grid,
+    /// `A`: the project's archived cards instead of its live ones.
+    Archive,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Send(ClientRequest),
@@ -101,8 +109,8 @@ pub struct App {
     /// Rows of cards that fit on screen, and the first one shown.
     pub card_rows: usize,
     pub card_scroll: usize,
-    /// `A`: the grid shows the project's archived cards instead of its live ones.
-    pub archive_view: bool,
+    /// The grid, the archive, or the pull requests.
+    pub view: View,
     pub message: Option<String>,
     /// Set by the first `State` from the daemon; until then the body says "Connecting…".
     pub connected: bool,
@@ -212,7 +220,7 @@ impl App {
             cards_per_row: 1,
             card_rows: 1,
             card_scroll: 0,
-            archive_view: false,
+            view: View::Grid,
             message: None,
             connected: false,
             harnesses: Harness::ALL
@@ -397,7 +405,7 @@ impl App {
             None => {
                 self.connected
                     && self.project_sessions().is_empty()
-                    && !self.archive_view
+                    && self.view == View::Grid
                     && self.overlays.is_empty()
                     && fits(self.scene, 2 + 3, 0)
             }
@@ -425,7 +433,7 @@ impl App {
         self.state
             .sessions
             .iter()
-            .filter(|s| Some(s.project) == self.project && s.archived == self.archive_view)
+            .filter(|s| Some(s.project) == self.project && s.archived == self.archive_view())
             .collect()
     }
 
@@ -499,7 +507,7 @@ impl App {
                 let idle = matches!(self.showing, Some(s) if s.kind == ShowKind::Idle);
                 // Archived elsewhere while focused here: back to the grid.
                 if info.archived
-                    && !self.archive_view
+                    && !self.archive_view()
                     && self.selected == Some(id)
                     && matches!(
                         self.mode,
@@ -543,7 +551,7 @@ impl App {
                     self.showing = None;
                     self.last_input = Instant::now();
                     let shown =
-                        !self.archive_view && self.visible_sessions().iter().any(|s| s.id == id);
+                        !self.archive_view() && self.visible_sessions().iter().any(|s| s.id == id);
                     if matches!(self.mode, Mode::Grid) && shown {
                         self.select(id);
                         self.repair_selection();
@@ -687,7 +695,7 @@ impl App {
                 }
                 return vec![];
             }
-            Mode::Grid if self.archive_view => {
+            Mode::Grid if self.archive_view() => {
                 self.message = None;
                 actions.extend(self.archive_key(key));
             }
@@ -1582,7 +1590,7 @@ impl App {
             return vec![];
         };
         let project = s.project;
-        self.archive_view = false;
+        self.view = View::Grid;
         if self.open_projects().any(|p| p.id == project) {
             self.select(id);
             return vec![];
@@ -1607,12 +1615,17 @@ impl App {
         self.selected = Some(ids[next]);
     }
 
+    /// The body shows the project's archived cards.
+    pub fn archive_view(&self) -> bool {
+        self.view == View::Archive
+    }
+
     fn set_archive_view(&mut self, on: bool) {
         if on {
             // The archive is of this tab: a tab still on its way must not replace it.
             self.project_pending = None;
         }
-        self.archive_view = on;
+        self.view = if on { View::Archive } else { View::Grid };
         self.selected = None;
         self.card_scroll = 0;
         self.repair_selection();
@@ -1668,7 +1681,7 @@ impl App {
                     self.mode = Mode::ConfirmArchive(id);
                 }
             }
-            KeyAction::ArchiveView => self.set_archive_view(!self.archive_view),
+            KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
             KeyAction::Palette => self.open_palette(),
             KeyAction::HalfPageDown => self.half_page(1),
             KeyAction::HalfPageUp => self.half_page(-1),
@@ -2119,7 +2132,7 @@ impl App {
         let Some(id) = self.selected else {
             return vec![];
         };
-        self.archive_view = false;
+        self.view = View::Grid;
         let mut actions = vec![Action::Send(ClientRequest::UnarchiveSession {
             session: id,
         })];
@@ -2208,10 +2221,10 @@ impl App {
     /// the archive view keeps its own selection.
     fn arrived(&mut self, id: SessionId) {
         match self.mode {
-            Mode::Grid if self.archive_view => {}
+            Mode::Grid if self.archive_view() => {}
             Mode::Grid | Mode::Focus => {
                 self.select(id);
-                self.archive_view = false;
+                self.view = View::Grid;
                 self.mode = Mode::Focus;
             }
             _ => self.select(id),
@@ -2560,7 +2573,7 @@ mod tests {
         app.on_key(k(K::Char('A')));
         stopped.status = AgentStatus::Fresh;
         app.on_event(ServerEvent::SessionUpdated(stopped));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
         assert_eq!((app.selected, app.mode), (Some(s[1].id), Mode::Grid));
     }
 
@@ -3782,7 +3795,7 @@ mod tests {
         let at = waiting_toast(&mut app, &s);
         app.set_archive_view(true);
         click(&mut app, at);
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         assert_eq!(app.selected, Some(s[2].id));
     }
 
@@ -4344,7 +4357,7 @@ mod tests {
         app.on_key(k(K::Char('A')));
         opened(&mut app, "/orbit");
         assert_eq!(app.project, Some(s[0].project));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
     }
 
     #[test]
@@ -4576,7 +4589,7 @@ mod tests {
             AgentStatus::Disconnected,
         )));
         app.on_key(k(K::Char('A')));
-        assert!(app.archive_view);
+        assert!(app.archive_view());
         let shown: Vec<SessionId> = app.project_sessions().iter().map(|x| x.id).collect();
         assert_eq!(shown, vec![s[1].id]);
         assert_eq!(app.selected, Some(s[1].id));
@@ -4592,7 +4605,7 @@ mod tests {
                 }
             ]
         );
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         let mut back = s[1].clone();
         back.status = AgentStatus::Disconnected;
         app.on_event(ServerEvent::SessionUpdated(back.clone()));
@@ -4613,10 +4626,10 @@ mod tests {
         }
         let ctrl_shift_a = KeyEvent::new(K::Char('A'), M::CONTROL | M::SHIFT);
         app.on_key(ctrl_shift_a);
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         app.on_key(k(K::Char('A')));
         app.on_key(ctrl_shift_a);
-        assert!(app.archive_view, "and it does not leave the archive view");
+        assert!(app.archive_view(), "and it does not leave the archive view");
     }
 
     #[test]
@@ -4648,7 +4661,7 @@ mod tests {
         assert_eq!(app.mode, Mode::ConfirmKill(s[1].id));
         app.on_key(k(K::Esc));
         app.on_key(k(K::Esc));
-        assert!(!app.archive_view);
+        assert!(!app.archive_view());
         assert_eq!(app.selected, Some(s[0].id));
     }
 
@@ -5346,7 +5359,7 @@ mod tests {
             since: Instant::now(),
             kind: ShowKind::Idle,
         });
-        app.archive_view = true;
+        app.view = View::Archive;
         update(&mut app, &s[0], AgentStatus::NeedsFeedback);
         assert!(app.showing.is_none());
         assert_ne!(

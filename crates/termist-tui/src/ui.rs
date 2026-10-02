@@ -215,7 +215,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     }
     draw_header(f, app, areas.header);
     let sessions = app.project_sessions();
-    if sessions.is_empty() && app.connected && !app.archive_view {
+    if sessions.is_empty() && app.connected && !app.archive_view() {
         let hint = empty_hint(app);
         draw_scene(
             f,
@@ -289,7 +289,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " termist ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    if app.archive_view {
+    if app.archive_view() {
         spans.push(Span::styled(
             "archive ",
             app.theme.archive.add_modifier(Modifier::BOLD),
@@ -542,7 +542,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             (text, t.warn)
         }
         (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
-        (_, Mode::Grid) if app.archive_view => (archive_hint(&app.keymap), t.dim),
+        (_, Mode::Grid) if app.archive_view() => (archive_hint(&app.keymap), t.dim),
         (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
         (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
         (_, Mode::FocusPrefix) => (prefix_hint(&app.keymap), t.focus),
