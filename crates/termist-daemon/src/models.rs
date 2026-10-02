@@ -77,16 +77,21 @@ pub fn run(program: &str, args: &[&str], limit: Duration) -> Option<String> {
         .ok()?;
     let mut stdout = child.stdout.take()?;
     // Read while it runs, so a long list cannot fill the pipe and stall it.
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = String::new();
         let _ = stdout.read_to_string(&mut out);
-        out
+        let _ = tx.send(out);
     });
     let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = reader.join().ok()?;
+                // Something the CLI started may keep the pipe open after it exits, so the
+                // output is waited for only until the deadline.
+                let out = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .ok()?;
                 return status.success().then_some(out);
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
@@ -204,6 +209,21 @@ mod tests {
         let hangs = script(tmp.path(), "sleep 30");
         let started = Instant::now();
         assert_eq!(run(&hangs, &[], Duration::from_millis(300)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_exits_but_leaves_its_output_open_is_not_waited_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The background `sleep` inherits stdout and keeps the pipe open.
+        let lingers = script(tmp.path(), "sleep 30 &\necho done");
+        let started = Instant::now();
+        assert_eq!(run(&lingers, &[], Duration::from_millis(300)), None);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
