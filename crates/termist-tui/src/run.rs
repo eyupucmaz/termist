@@ -18,8 +18,10 @@ use std::io::Write;
 use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
-use termist_core::config::{ColorDepth, Problem, Sound};
+use termist_core::config::{ColorDepth, Problem, Sound, StatusConfig};
 use termist_core::{ClientRequest, ServerEvent, TermColors};
 use termist_platform::clipboard::{self, Clipboard};
 use termist_platform::config_file;
@@ -27,6 +29,7 @@ use termist_platform::framed::write_frame;
 use termist_platform::host_colors;
 use termist_platform::ipc::SendHalf;
 use termist_platform::notify;
+use termist_platform::sysstat::{Sampler, SysStat};
 use termist_platform::{Client, Paths};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -236,17 +239,23 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let (bell_tx, mut bell_rx) = unbounded_channel::<()>();
     let mut alerts = Alerts::from_env(bell_tx);
     let mut clipboard = Clipboard::open();
-    app.hour = termist_platform::clock::local_hour();
-    let mut hour_read = Instant::now();
+    let (stat_tx, mut stat_rx) = unbounded_channel::<SysStat>();
+    let status_wanted = Arc::new(AtomicU8::new(status_mask(&app.config.status)));
+    let focused = Arc::new(AtomicBool::new(true));
+    let mut sampler_started = false;
     app.start_splash(Instant::now());
     let result: anyhow::Result<()> = async {
         loop {
             // Here, not only on a timer: steady output (a busy agent's screen) would keep
             // any timer from ever firing, and the splash from ever ending.
             let now = Instant::now();
-            if now.duration_since(hour_read) >= Duration::from_secs(60) {
-                app.hour = termist_platform::clock::local_hour();
-                hour_read = now;
+            (app.hour, app.minute) = termist_platform::clock::local_time();
+            let mask = status_mask(&app.config.status);
+            status_wanted.store(mask, Ordering::Relaxed);
+            focused.store(app.window_focused, Ordering::Relaxed);
+            if mask != 0 && !sampler_started {
+                spawn_sampler(status_wanted.clone(), focused.clone(), stat_tx.clone());
+                sampler_started = true;
             }
             app.tick(now);
             let size = terminal.size()?;
@@ -287,6 +296,10 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 _ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now).into()), if wake.is_some() => vec![],
                 Some(()) = bell_rx.recv() => {
                     ring_bell();
+                    vec![]
+                }
+                Some(stat) = stat_rx.recv() => {
+                    app.sysstat = stat;
                     vec![]
                 }
             };
@@ -340,6 +353,63 @@ fn set_panic_hook(enhanced: bool) {
         undo_terminal_modes(enhanced);
         previous(info);
     }));
+}
+
+const CPU: u8 = 1;
+const RAM: u8 = 2;
+const BATTERY: u8 = 4;
+const CLOCK: u8 = 8;
+/// The battery changes slowly.
+const BATTERY_EVERY: Duration = Duration::from_secs(30);
+
+fn status_mask(cfg: &StatusConfig) -> u8 {
+    [
+        (cfg.cpu, CPU),
+        (cfg.ram, RAM),
+        (cfg.battery, BATTERY),
+        (cfg.clock, CLOCK),
+    ]
+    .into_iter()
+    .filter(|(on, _)| *on)
+    .fold(0, |m, (_, bit)| m | bit)
+}
+
+/// How often the status line is read: less when nobody is looking.
+fn interval(focused: bool) -> Duration {
+    Duration::from_secs(if focused { 2 } else { 10 })
+}
+
+/// Reads the machine on a thread of its own and sends each reading; every reading also
+/// wakes the loop, which moves the clock on. With every part off it only sleeps.
+fn spawn_sampler(mask: Arc<AtomicU8>, focused: Arc<AtomicBool>, out: UnboundedSender<SysStat>) {
+    std::thread::spawn(move || {
+        let mut sampler = Sampler::new();
+        let mut battery_read: Option<Instant> = None;
+        let mut last = SysStat::default();
+        loop {
+            std::thread::sleep(interval(focused.load(Ordering::Relaxed)));
+            let mask = mask.load(Ordering::Relaxed);
+            if mask == 0 {
+                continue;
+            }
+            let (cpu, ram) = if mask & (CPU | RAM) != 0 {
+                sampler.cpu_ram()
+            } else {
+                (None, None)
+            };
+            last.cpu = cpu.filter(|_| mask & CPU != 0);
+            last.ram = ram.filter(|_| mask & RAM != 0);
+            if mask & BATTERY == 0 {
+                last.battery = None;
+            } else if battery_read.is_none_or(|t| t.elapsed() >= BATTERY_EVERY) {
+                last.battery = sampler.battery();
+                battery_read = Some(Instant::now());
+            }
+            if out.send(last).is_err() {
+                return;
+            }
+        }
+    });
 }
 
 /// Puts the text copied among `actions` on the clipboard and returns the rest: on the
@@ -520,6 +590,27 @@ mod tests {
     use super::*;
     use termist_platform::framed::FramedReader;
     use termist_platform::ipc;
+
+    #[test]
+    fn the_sampler_reads_only_what_is_on() {
+        let cfg = StatusConfig {
+            cpu: true,
+            ram: false,
+            battery: true,
+            clock: false,
+        };
+        assert_eq!(status_mask(&cfg), CPU | BATTERY);
+        assert_eq!(
+            status_mask(&StatusConfig::default()),
+            CPU | RAM | BATTERY | CLOCK
+        );
+    }
+
+    #[test]
+    fn a_window_in_the_background_is_read_less_often() {
+        assert_eq!(interval(true), Duration::from_secs(2));
+        assert_eq!(interval(false), Duration::from_secs(10));
+    }
 
     #[test]
     fn the_input_thread_keeps_left_drags_and_drops_moves() {
