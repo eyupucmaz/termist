@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use termist_core::config::{ColorDepth, PanePosition, Sound};
+use termist_core::config::{ColorDepth, DiffLayout, PanePosition, Sound};
 use termist_core::github::GhState;
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
@@ -544,6 +544,16 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             };
                             let on = if on { "on, in the top right" } else { "off" };
                             (name, format!("‹ {on} ›{}", local(key)))
+                        }
+                        SettingRow::DiffLayout => {
+                            let layout = match app.config.diff.layout {
+                                DiffLayout::Unified => "unified",
+                                DiffLayout::Split => "split: old and new side by side",
+                            };
+                            (
+                                "diff layout",
+                                format!("‹ {layout} ›{}", local("diff.layout")),
+                            )
                         }
                         SettingRow::PullRequests => {
                             let on = if app.config.github.enabled {

@@ -77,6 +77,13 @@ pub struct Theme {
     pub archive: Style,
     pub selection: Style,
     pub tab_active: Style,
+    /// A diff's added and deleted lines, and the words that changed in them: tints of
+    /// the "ready" and error colours over the background, or the colours themselves
+    /// on a theme that paints no background.
+    pub diff_add: Style,
+    pub diff_del: Style,
+    pub diff_add_word: Style,
+    pub diff_del_word: Style,
     status: [Color; 8],
     /// Pane cells in the agent's default colours.
     pub pane_fg: Color,
@@ -304,6 +311,22 @@ impl Spec {
             }
             style
         };
+        let tint = |p: Paint, percent: u16| match (p, self.bg) {
+            (Paint::Rgb(c), Some(bg)) => Some(fit(mix(c, bg, percent), depth)),
+            _ => None,
+        };
+        let line = |p: Paint| match tint(p, 18) {
+            Some(bg) => Style::default().bg(bg),
+            None => Style::default().fg(color(p)),
+        };
+        let word = |p: Paint| match tint(p, 38) {
+            Some(bg) => Style::default().bg(bg),
+            None => Style::default()
+                .fg(color(p))
+                .add_modifier(Modifier::REVERSED),
+        };
+        let ready = self.status[status_index(AgentStatus::Finished)];
+        let error = self.error.fg.unwrap_or(Paint::Named(Color::Red));
         let pane_fg = self.fg.map_or(Color::Reset, |c| fit(c, depth));
         let pane_bg = self.bg.map_or(Color::Reset, |c| fit(c, depth));
         let base = match (self.fg, self.bg) {
@@ -331,6 +354,10 @@ impl Spec {
             archive: style(self.archive),
             selection: style(self.selection),
             tab_active: style(self.tab_active),
+            diff_add: line(ready),
+            diff_del: line(error),
+            diff_add_word: word(ready),
+            diff_del_word: word(error),
             status: self.status.map(color),
             pane_fg,
             pane_bg,
@@ -392,6 +419,12 @@ fn hex(s: &str) -> Option<Rgb> {
     let h = s.strip_prefix('#').filter(|h| h.len() == 6)?;
     let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
     Some((byte(0)?, byte(2)?, byte(4)?))
+}
+
+/// `percent` of `c` over `bg`.
+fn mix(c: Rgb, bg: Rgb, percent: u16) -> Rgb {
+    let m = |a: u8, b: u8| (b as i32 + (a as i32 - b as i32) * percent as i32 / 100) as u8;
+    (m(c.0, bg.0), m(c.1, bg.1), m(c.2, bg.2))
 }
 
 /// `rgb` as this terminal can draw it: itself with 24-bit colour, else the nearest
@@ -562,6 +595,19 @@ impl Themes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_lines_are_tints_of_ready_and_error_or_their_colours() {
+        let t = Theme::named("uskudar", ColorDepth::TrueColor);
+        // ready #5fcf8a and error #ff7a6b over #0f1d2e.
+        assert_eq!(t.diff_add, Style::default().bg(Color::Rgb(29, 61, 62)));
+        assert_eq!(t.diff_del, Style::default().bg(Color::Rgb(58, 45, 56)));
+        assert_eq!(t.diff_add_word.bg, Some(Color::Rgb(45, 96, 80)));
+        let t = Theme::terminal();
+        assert_eq!(t.diff_add, Style::default().fg(Color::Green));
+        assert_eq!(t.diff_del, Style::default().fg(Color::Red));
+        assert!(t.diff_del_word.add_modifier.contains(Modifier::REVERSED));
+    }
 
     fn spec(id: &str) -> Spec {
         let source = BUILTIN.iter().find(|(i, _)| *i == id).unwrap().1;

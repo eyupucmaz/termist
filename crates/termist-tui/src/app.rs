@@ -2168,6 +2168,7 @@ impl App {
             SettingRow::StatusBattery => "status.battery",
             SettingRow::StatusClock => "status.clock",
             SettingRow::PullRequests => "github.enabled",
+            SettingRow::DiffLayout => "diff.layout",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -2202,6 +2203,12 @@ impl App {
                     Action::WriteConfig(ConfigEdit::Set { key, value }),
                     Action::Preview(chosen),
                 ];
+            }
+            SettingRow::DiffLayout => {
+                self.config.diff.layout = self.config.diff.layout.other();
+                quiet(self);
+                let value = self.config.diff.layout.id().to_string();
+                return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
             }
             SettingRow::PullRequests => {
                 self.config.github.enabled = !self.config.github.enabled;
@@ -5742,6 +5749,31 @@ mod tests {
             key: "notify.toasts",
             value: false,
         })));
+    }
+
+    #[test]
+    fn the_diff_layout_setting_flips_and_saves() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::DiffLayout)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert_eq!(
+            app.config.diff.layout,
+            termist_core::config::DiffLayout::Split
+        );
+        assert_eq!(
+            actions,
+            [Action::WriteConfig(ConfigEdit::Set {
+                key: "diff.layout",
+                value: "split".into()
+            })]
+        );
     }
 
     #[test]

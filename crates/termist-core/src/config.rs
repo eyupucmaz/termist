@@ -184,6 +184,37 @@ impl Default for AgentsConfig {
     }
 }
 
+/// How a pull request's diff is drawn: one column, or old and new side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffLayout {
+    #[default]
+    Unified,
+    Split,
+}
+
+impl DiffLayout {
+    pub const ALL: [DiffLayout; 2] = [DiffLayout::Unified, DiffLayout::Split];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            DiffLayout::Unified => "unified",
+            DiffLayout::Split => "split",
+        }
+    }
+
+    pub fn other(self) -> DiffLayout {
+        match self {
+            DiffLayout::Unified => DiffLayout::Split,
+            DiffLayout::Split => DiffLayout::Unified,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiffConfig {
+    pub layout: DiffLayout,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubConfig {
     /// Read pull requests through the `gh` CLI.
@@ -222,6 +253,7 @@ pub struct Config {
     pub worktrees: WorktreesConfig,
     pub agents: AgentsConfig,
     pub github: GitHubConfig,
+    pub diff: DiffConfig,
     pub keys: KeysConfig,
 }
 
@@ -246,6 +278,7 @@ impl Default for Config {
             worktrees: WorktreesConfig::default(),
             agents: AgentsConfig::default(),
             github: GitHubConfig::default(),
+            diff: DiffConfig::default(),
             keys: KeysConfig::default(),
         }
     }
@@ -348,6 +381,7 @@ impl Reader<'_> {
             worktrees: self.worktrees(&mut t),
             agents: self.agents(&mut t),
             github: self.github(&mut t),
+            diff: self.diff(&mut t),
             keys: self.keys(&mut t),
         };
         self.unknown("", t);
@@ -480,6 +514,20 @@ impl Reader<'_> {
         };
         self.unknown("github", g);
         github
+    }
+
+    fn diff(&mut self, t: &mut Table) -> DiffConfig {
+        let d = DiffConfig::default();
+        let Some(mut s) = self.table(t, "", "diff") else {
+            return d;
+        };
+        let diff = DiffConfig {
+            layout: self
+                .choice(&mut s, "diff", "layout", &DiffLayout::ALL, DiffLayout::id)
+                .unwrap_or(d.layout),
+        };
+        self.unknown("diff", s);
+        diff
     }
 
     fn keys(&mut self, t: &mut Table) -> KeysConfig {
@@ -615,6 +663,19 @@ mod tests {
     }
 
     #[test]
+    fn the_diff_section_picks_the_layout() {
+        let (c, problems) = parse("[diff]\nlayout = \"split\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(c.diff.layout, DiffLayout::Split);
+        let (c, problems) = parse("[diff]\nlayout = \"wide\"\n");
+        assert_eq!(c.diff.layout, DiffLayout::Unified);
+        assert!(
+            problems[0].starts_with("diff.layout: unknown value"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn the_github_section_turns_pull_requests_off() {
         let (c, problems) = parse("[github]\nenabled = false\n");
         assert!(problems.is_empty(), "{problems:?}");
@@ -697,6 +758,9 @@ new_worktree_by_default = false
 
 [github]
 enabled = true                  # pull requests through the gh CLI (`v`)
+
+[diff]
+layout = "unified"              # unified | split: a pull request's diff (`s` there)
 
 [keys.grid]
 # "p" = "quick_prompt"
