@@ -22,13 +22,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use termist_core::github::{
-    GhState, PrDetail, PrDiff, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, rfc3339,
+    GhState, PrDetail, PrDiff, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, Viewed, rfc3339,
 };
 use termist_core::status::now_ms;
 use termist_core::{ClientRequest, ProjectId, ProjectInfo, ServerEvent};
 
 /// Pull requests kept whole, to open one again at once.
 const DETAILS: usize = 50;
+/// Diffs kept, one per pull request: the newest head's.
+const DIFFS: usize = 10;
 /// Below this many points left in the hour, an account is read slowly.
 const RATE_FLOOR: u32 = 300;
 /// A folder with more repos than this shows only its first ones at first; the repos
@@ -240,6 +242,25 @@ enum Auth {
 struct Focus {
     project: Option<ProjectId>,
     pr: Option<PrRef>,
+    /// The diff of `pr`.
+    diff: bool,
+}
+
+/// A failure in a few words, for a message after "couldn't …".
+fn said(state: &GhState) -> String {
+    match state {
+        GhState::Ok => "it did not happen".into(),
+        GhState::NoGh => "gh is not installed".into(),
+        GhState::LoggedOut => "gh is not logged in".into(),
+        GhState::NoAccess => "no access".into(),
+        GhState::RateLimited { .. } => "GitHub rate limit".into(),
+        GhState::Failed(why) => why.clone(),
+    }
+}
+
+/// The last part of a path, as a message names a file.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub struct GitHub {
@@ -261,6 +282,12 @@ pub struct GitHub {
     detail_beats: HashMap<PrRef, Beat>,
     /// Newest last.
     details: Vec<(PrRef, PrDetail)>,
+    /// One diff per pull request, newest last.
+    diffs: Vec<(PrRef, PrDiff)>,
+    /// Diffs being read.
+    diff_flying: HashSet<PrRef>,
+    /// The head whose diff could not be read: not tried again until a refresh.
+    diff_failed: HashMap<PrRef, String>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
@@ -291,6 +318,9 @@ impl GitHub {
             beats: HashMap::new(),
             detail_beats: HashMap::new(),
             details: vec![],
+            diffs: vec![],
+            diff_flying: HashSet::new(),
+            diff_failed: HashMap::new(),
             slow_until: HashMap::new(),
             seen,
         }
@@ -465,12 +495,12 @@ impl GitHub {
             }
             return fx;
         }
-        if let ClientRequest::SetPrFocus { project, pr, .. } = req {
+        if let ClientRequest::SetPrFocus { project, pr, diff } = req {
             // Only a client that is still known: a late request after `gone` is ignored.
             let Some(focus) = self.clients.get_mut(&client) else {
                 return fx;
             };
-            let before = std::mem::replace(focus, Focus { project, pr });
+            let before = std::mem::replace(focus, Focus { project, pr, diff });
             if let Some(p) = project
                 && before.project != Some(p)
             {
@@ -495,6 +525,20 @@ impl GitHub {
                     );
                 }
                 self.detail_beats.entry(pr).or_default().hurry(now);
+            }
+            if let Some(pr) = pr
+                && diff
+                && (before.pr != Some(pr) || !before.diff)
+                && let Some(d) = self.cached_diff(pr)
+            {
+                fx.send(
+                    To::One(client),
+                    ServerEvent::PrDiff {
+                        pr,
+                        state: GhState::Ok,
+                        diff: Some(Box::new(d.clone())),
+                    },
+                );
             }
             return fx;
         }
@@ -558,11 +602,54 @@ impl GitHub {
                 }
                 self.look_again(project, now);
                 self.hurry_project(project, now);
-                let open: Vec<PrRef> = self.clients.values().filter_map(|f| f.pr).collect();
-                for pr in open {
+                let open: Vec<(PrRef, bool)> = self
+                    .clients
+                    .values()
+                    .filter_map(|f| Some((f.pr?, f.diff)))
+                    .collect();
+                for (pr, diff) in open {
                     if let Some(beat) = self.detail_beats.get_mut(&pr) {
                         beat.hurry(now);
                     }
+                    if diff {
+                        // Read again even at the same head.
+                        self.diff_failed.remove(&pr);
+                        self.diffs.retain(|(p, _)| *p != pr);
+                    }
+                }
+            }
+            ClientRequest::SetFileViewed { pr, path, viewed } => {
+                let job = (|| {
+                    let (gh, accounts) = self.ready()?;
+                    let id = self
+                        .cached(pr)
+                        .map(|d| d.id.clone())
+                        .filter(|id| !id.is_empty())?;
+                    let login = self.repo(pr.repo)?.account()?;
+                    let account = accounts.into_iter().find(|a| a.login == login)?;
+                    Some(Job::MarkViewed {
+                        gh,
+                        pr,
+                        account,
+                        id,
+                        path: path.clone(),
+                        viewed,
+                        client,
+                    })
+                })();
+                match job {
+                    Some(job) => fx.jobs.push(job),
+                    None => fx.send(
+                        To::One(client),
+                        ServerEvent::PrWriteFailed {
+                            pr,
+                            message: format!(
+                                "couldn't mark {} {} · not loaded yet",
+                                file_name(&path),
+                                if viewed { "viewed" } else { "unviewed" }
+                            ),
+                        },
+                    ),
                 }
             }
             ClientRequest::MarkPrSeen { pr, updated_at } => {
@@ -662,6 +749,77 @@ impl GitHub {
         self.details.iter().find(|(p, _)| *p == pr).map(|(_, d)| d)
     }
 
+    fn cached_diff(&self, pr: PrRef) -> Option<&PrDiff> {
+        self.diffs.iter().find(|(p, _)| *p == pr).map(|(_, d)| d)
+    }
+
+    fn cache_diff(&mut self, pr: PrRef, diff: PrDiff) {
+        self.diffs.retain(|(p, _)| *p != pr);
+        self.diffs.push((pr, diff));
+        if self.diffs.len() > DIFFS {
+            self.diffs.remove(0);
+        }
+    }
+
+    /// `event` to every client looking at the diff of `pr`.
+    fn to_diff_watchers(&self, pr: PrRef, event: ServerEvent, fx: &mut Effects) {
+        for (client, focus) in &self.clients {
+            if focus.pr == Some(pr) && focus.diff {
+                fx.send(To::One(*client), event.clone());
+            }
+        }
+    }
+
+    /// The diffs looked at whose head is known and not read yet.
+    fn diff_jobs(&mut self, gh: &GhHandle, accounts: &[Account]) -> Vec<Job> {
+        let wanted: HashSet<PrRef> = self
+            .clients
+            .values()
+            .filter(|f| f.diff)
+            .filter_map(|f| f.pr)
+            .collect();
+        let mut jobs = Vec::new();
+        for pr in wanted {
+            // The head comes with the detail: no detail, no diff yet.
+            let Some(detail) = self.cached(pr) else {
+                continue;
+            };
+            let head = &detail.head_oid;
+            let read = self.cached_diff(pr).is_some_and(|d| d.head_oid == *head);
+            if read || self.diff_flying.contains(&pr) || self.diff_failed.get(&pr) == Some(head) {
+                continue;
+            }
+            let Some(r) = self.repo(pr.repo) else {
+                continue;
+            };
+            let Some(account) = r
+                .account()
+                .and_then(|login| accounts.iter().find(|a| a.login == login))
+            else {
+                continue;
+            };
+            jobs.push(Job::Diff {
+                gh: gh.clone(),
+                pr,
+                account: account.clone(),
+                want: files::Want {
+                    owner: r.stored.owner.clone(),
+                    name: r.stored.name.clone(),
+                    number: pr.number,
+                    url: detail.summary.url.clone(),
+                    changed: detail.summary.changed_files,
+                    head_oid: head.clone(),
+                },
+            });
+        }
+        for job in &jobs {
+            if let Job::Diff { pr, .. } = job {
+                self.diff_flying.insert(*pr);
+            }
+        }
+        jobs
+    }
+
     fn cache(&mut self, pr: PrRef, detail: PrDetail) {
         self.details.retain(|(p, _)| *p != pr);
         self.details.push((pr, detail));
@@ -718,6 +876,7 @@ impl GitHub {
             self.detail_beats.entry(pr).or_default().start();
             fx.jobs.push(job);
         }
+        fx.jobs.extend(self.diff_jobs(gh, accounts));
         fx
     }
 
@@ -980,7 +1139,87 @@ impl GitHub {
                     }
                 }
             }
-            Done::Diff { .. } | Done::Marked { .. } => {}
+            Done::Diff {
+                pr,
+                head_oid,
+                reply,
+            } => {
+                self.diff_flying.remove(&pr);
+                let state = match reply {
+                    Ok(diff) => {
+                        self.diff_failed.remove(&pr);
+                        self.cache_diff(pr, diff);
+                        GhState::Ok
+                    }
+                    Err(state) => {
+                        self.diff_failed.insert(pr, head_oid);
+                        state
+                    }
+                };
+                let event = ServerEvent::PrDiff {
+                    pr,
+                    state,
+                    diff: self.cached_diff(pr).cloned().map(Box::new),
+                };
+                self.to_diff_watchers(pr, event, &mut fx);
+            }
+            Done::Marked {
+                pr,
+                path,
+                viewed,
+                client,
+                reply,
+            } => match reply {
+                Ok(()) => {
+                    let now = if viewed {
+                        Viewed::Viewed
+                    } else {
+                        Viewed::Unviewed
+                    };
+                    for (_, d) in self.diffs.iter_mut().filter(|(p, _)| *p == pr) {
+                        for f in d.files.iter_mut().filter(|f| f.path == path) {
+                            f.viewed = now;
+                        }
+                    }
+                    for (_, d) in self.details.iter_mut().filter(|(p, _)| *p == pr) {
+                        for f in d.files.iter_mut().filter(|f| f.path == path) {
+                            f.viewed = now;
+                        }
+                    }
+                    if let Some(d) = self.cached_diff(pr) {
+                        let event = ServerEvent::PrDiff {
+                            pr,
+                            state: GhState::Ok,
+                            diff: Some(Box::new(d.clone())),
+                        };
+                        self.to_diff_watchers(pr, event, &mut fx);
+                    }
+                    if let Some(d) = self.cached(pr) {
+                        let event = ServerEvent::PrDetail {
+                            pr,
+                            state: GhState::Ok,
+                            detail: Some(Box::new(d.clone())),
+                        };
+                        for (c, focus) in &self.clients {
+                            if focus.pr == Some(pr) {
+                                fx.send(To::One(*c), event.clone());
+                            }
+                        }
+                    }
+                }
+                Err(state) => fx.send(
+                    To::One(client),
+                    ServerEvent::PrWriteFailed {
+                        pr,
+                        message: format!(
+                            "couldn't mark {} {} · {}",
+                            file_name(&path),
+                            if viewed { "viewed" } else { "unviewed" },
+                            said(&state)
+                        ),
+                    },
+                ),
+            },
         }
         fx
     }
@@ -1999,6 +2238,290 @@ mod tests {
             ),
             "{:?}",
             fx.events
+        );
+    }
+
+    /// Pull request 212 of acme/site, at head `head`, with one file.
+    fn detail_at(head: &str) -> PrDetail {
+        PrDetail {
+            summary: super::query::summary(
+                &serde_json::json!({"number": 212, "title": "x",
+                    "url": "https://github.com/acme/site/pull/212", "changedFiles": 1}),
+                "alice",
+            )
+            .unwrap(),
+            id: "PR_212".into(),
+            head_oid: head.into(),
+            body: String::new(),
+            comments: vec![],
+            reviews: vec![],
+            threads: vec![],
+            checks: vec![],
+            files: vec![termist_core::github::FileChange {
+                path: "src/a.rs".into(),
+                additions: 1,
+                deletions: 0,
+                change: 'M',
+                viewed: Viewed::Unviewed,
+            }],
+            more: Default::default(),
+        }
+    }
+
+    fn diff_at(head: &str) -> PrDiff {
+        PrDiff {
+            head_oid: head.into(),
+            files: vec![termist_core::github::DiffFile {
+                path: "src/a.rs".into(),
+                previous: None,
+                change: 'M',
+                additions: 1,
+                deletions: 0,
+                viewed: Viewed::Unviewed,
+                patch: termist_core::github::Patch::Text("@@ -1 +1 @@\n-a\n+b".into()),
+                url: String::new(),
+            }],
+            more: 0,
+        }
+    }
+
+    /// The heads of the diff jobs among `fx`.
+    fn diff_jobs(fx: &Effects) -> Vec<String> {
+        fx.jobs
+            .iter()
+            .filter_map(|j| match j {
+                Job::Diff { want, .. } => Some(want.head_oid.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Two projects, pull request 212 of site looked at, its diff too if `diff`.
+    fn looking(diff: bool) -> (World, PrRef) {
+        let mut w = two_projects();
+        let pr = PrRef {
+            repo: w.id("site"),
+            number: 212,
+        };
+        w.request(ClientRequest::SetPrFocus {
+            project: Some(w.projects[0].id),
+            pr: Some(pr),
+            diff,
+        });
+        (w, pr)
+    }
+
+    #[test]
+    fn the_diff_is_read_once_its_head_is_known() {
+        let (mut w, pr) = looking(true);
+        let fx = w.tick();
+        assert!(diff_jobs(&fx).is_empty(), "the head comes with the detail");
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        let fx = w.tick();
+        assert_eq!(diff_jobs(&fx), ["h1"]);
+        let Some(Job::Diff { want, account, .. }) =
+            fx.jobs.iter().find(|j| matches!(j, Job::Diff { .. }))
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (want.owner.as_str(), want.name.as_str(), want.changed),
+            ("acme", "site", 1)
+        );
+        assert_eq!(account.login, "work");
+        assert!(diff_jobs(&w.tick()).is_empty(), "one at a time");
+        let fx = w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        assert!(matches!(
+            &fx.events[..],
+            [(To::One(c), ServerEvent::PrDiff { state: GhState::Ok, diff: Some(_), .. })] if *c == w.client
+        ));
+        w.now += Duration::from_secs(25);
+        assert!(diff_jobs(&w.tick()).is_empty(), "read at this head");
+    }
+
+    #[test]
+    fn a_new_head_reads_the_diff_again() {
+        let (mut w, pr) = looking(true);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.tick();
+        w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h2")),
+        });
+        assert_eq!(diff_jobs(&w.tick()), ["h2"]);
+    }
+
+    #[test]
+    fn a_failed_diff_keeps_the_last_one_and_waits_for_a_refresh() {
+        let (mut w, pr) = looking(true);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.tick();
+        w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h2")),
+        });
+        w.tick();
+        let fx = w.done(Done::Diff {
+            pr,
+            head_oid: "h2".into(),
+            reply: Err(GhState::Failed("HTTP 502".into())),
+        });
+        assert!(matches!(
+            &fx.events[..],
+            [(_, ServerEvent::PrDiff { state: GhState::Failed(_), diff: Some(d), .. })] if d.head_oid == "h1"
+        ));
+        assert!(diff_jobs(&w.tick()).is_empty(), "not again at this head");
+        w.request(ClientRequest::RefreshPrs {
+            project: w.projects[0].id,
+        });
+        assert_eq!(diff_jobs(&w.tick()), ["h2"]);
+    }
+
+    #[test]
+    fn the_detail_alone_reads_no_diff() {
+        let (mut w, pr) = looking(false);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        assert!(diff_jobs(&w.tick()).is_empty());
+    }
+
+    #[test]
+    fn a_client_that_comes_to_the_diff_gets_the_one_read() {
+        let (mut w, pr) = looking(true);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.tick();
+        w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        let other = ClientId(2);
+        w.join(other);
+        let fx = w.gh.request(
+            other,
+            ClientRequest::SetPrFocus {
+                project: None,
+                pr: Some(pr),
+                diff: true,
+            },
+            &w.store,
+            &w.projects,
+            w.now,
+        );
+        assert!(
+            fx.events
+                .iter()
+                .any(|(to, e)| *to == To::One(other) && matches!(e, ServerEvent::PrDiff { .. }))
+        );
+    }
+
+    #[test]
+    fn marking_a_file_viewed_writes_through_the_reader_and_sends_both_views() {
+        let (mut w, pr) = looking(true);
+        let ask = ClientRequest::SetFileViewed {
+            pr,
+            path: "src/a.rs".into(),
+            viewed: true,
+        };
+        let fx = w.request(ask.clone());
+        assert!(matches!(
+            &fx.events[..],
+            [(To::One(_), ServerEvent::PrWriteFailed { message, .. })] if message == "couldn't mark a.rs viewed · not loaded yet"
+        ));
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.tick();
+        w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        let fx = w.request(ask);
+        let Some(Job::MarkViewed {
+            id,
+            account,
+            client,
+            ..
+        }) = fx.jobs.first()
+        else {
+            panic!("{:?}", fx.jobs)
+        };
+        assert_eq!(
+            (id.as_str(), account.login.as_str(), *client),
+            ("PR_212", "work", w.client)
+        );
+        let fx = w.done(Done::Marked {
+            pr,
+            path: "src/a.rs".into(),
+            viewed: true,
+            client: w.client,
+            reply: Ok(()),
+        });
+        let diff = fx.events.iter().find_map(|(_, e)| match e {
+            ServerEvent::PrDiff { diff: Some(d), .. } => Some(d.files[0].viewed),
+            _ => None,
+        });
+        let detail = fx.events.iter().find_map(|(_, e)| match e {
+            ServerEvent::PrDetail {
+                detail: Some(d), ..
+            } => Some(d.files[0].viewed),
+            _ => None,
+        });
+        assert_eq!((diff, detail), (Some(Viewed::Viewed), Some(Viewed::Viewed)));
+    }
+
+    #[test]
+    fn a_refused_mark_is_told_to_the_client_that_asked() {
+        let (mut w, pr) = looking(true);
+        w.join(ClientId(2));
+        let fx = w.done(Done::Marked {
+            pr,
+            path: "src/search/DealerFilter.tsx".into(),
+            viewed: false,
+            client: w.client,
+            reply: Err(GhState::Failed(
+                "Resource not accessible by integration".into(),
+            )),
+        });
+        assert_eq!(
+            fx.events,
+            [(
+                To::One(w.client),
+                ServerEvent::PrWriteFailed {
+                    pr,
+                    message: "couldn't mark DealerFilter.tsx unviewed · Resource not accessible by integration".into(),
+                }
+            )]
         );
     }
 }
