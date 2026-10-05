@@ -599,11 +599,17 @@ fn draw_toasts(f: &mut Frame, app: &App) {
                     Span::raw(chars.collect::<String>()),
                 ])
             }
-            crate::toast::ToastKind::Copied | crate::toast::ToastKind::Review { .. } => {
+            crate::toast::ToastKind::Copied
+            | crate::toast::ToastKind::Review { .. }
+            | crate::toast::ToastKind::Failed => {
                 let mut chars = text.chars();
                 let mark: String = chars.next().into_iter().collect();
+                let style = match toast.kind {
+                    crate::toast::ToastKind::Failed => t.error,
+                    _ => t.accent,
+                };
                 Line::from(vec![
-                    Span::styled(mark, t.accent),
+                    Span::styled(mark, style),
                     Span::raw(chars.collect::<String>()),
                 ])
             }

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
-use termist_core::github::{GhState, PrDetail, PrRef, RepoInfo};
+use termist_core::github::{GhState, PrDetail, PrDiff, PrRef, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -189,12 +189,14 @@ pub struct App {
     pub repo_lists: HashMap<ProjectId, (Vec<String>, Vec<RepoInfo>)>,
     /// Pull requests read whole: how the last read went, and the last good one.
     pub pr_details: HashMap<PrRef, (GhState, Option<PrDetail>)>,
+    /// Each pull request's diff as last read, and how the newest read went.
+    pub pr_diffs: HashMap<PrRef, (GhState, Option<PrDiff>)>,
     /// Where the last frame put the PR view's rows and threads.
     pub pr_layout: RefCell<PrLayout>,
     /// Tests fix the clock; ages are counted from it.
     pub frozen_now: Option<i64>,
     /// What the daemon was last told this client looks at.
-    pr_focus: (Option<ProjectId>, Option<PrRef>),
+    pr_focus: (Option<ProjectId>, Option<PrRef>, bool),
     rng: u64,
 }
 
@@ -284,9 +286,10 @@ impl App {
             prs: HashMap::new(),
             repo_lists: HashMap::new(),
             pr_details: HashMap::new(),
+            pr_diffs: HashMap::new(),
             pr_layout: RefCell::default(),
             frozen_now: None,
-            pr_focus: (None, None),
+            pr_focus: (None, None, false),
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -686,7 +689,29 @@ impl App {
             ServerEvent::PrDetail { pr, state, detail } => {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
-            ServerEvent::PrDiff { .. } | ServerEvent::PrWriteFailed { .. } => {}
+            ServerEvent::PrDiff { pr, state, diff } => {
+                let diff = diff.map(|d| *d);
+                if let (View::Prs(view), Some(diff)) = (&mut self.view, &diff)
+                    && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
+                    && let Some(open) = &mut d.diff
+                {
+                    open.settle(diff);
+                }
+                self.pr_diffs.insert(pr, (state, diff));
+            }
+            ServerEvent::PrWriteFailed { pr, message } => {
+                if let View::Prs(view) = &mut self.view
+                    && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
+                    && let Some(open) = &mut d.diff
+                {
+                    open.pending.clear();
+                }
+                self.toasts.push(Toast {
+                    text: format!("✗ {message}"),
+                    kind: ToastKind::Failed,
+                    until: Instant::now() + toast::AGENT_FOR,
+                });
+            }
             ServerEvent::ReviewRequested {
                 project,
                 pr,
@@ -1902,9 +1927,14 @@ impl App {
                 let data = project.and_then(|p| self.prs.get(&p)).unwrap_or(&empty);
                 let list = prs::rows(data, view);
                 view.repair(&list);
-                (project, view.detail.as_ref().map(|d| d.pr))
+                let detail = view.detail.as_ref();
+                (
+                    project,
+                    detail.map(|d| d.pr),
+                    detail.is_some_and(|d| d.diff.is_some()),
+                )
             }
-            _ => (None, None),
+            _ => (None, None, false),
         };
         if focus == self.pr_focus || !self.config.github.enabled {
             return vec![];
@@ -1913,31 +1943,39 @@ impl App {
         vec![Action::Send(ClientRequest::SetPrFocus {
             project: focus.0,
             pr: focus.1,
-            diff: false,
+            diff: focus.2,
         })]
     }
 
     /// A key in the PR view. The grid's keys for tabs, help, settings, refresh and
     /// leaving work here too, unless the search takes the keys.
     fn prs_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let typing = matches!(&self.view, View::Prs(v) if v.typing);
+        let diff = match &self.view {
+            View::Prs(v) => v.detail.as_ref().and_then(|d| d.diff.as_ref()),
+            _ => None,
+        };
+        let typing =
+            matches!(&self.view, View::Prs(v) if v.typing) || diff.is_some_and(|d| d.typing);
+        // In the diff `s` turns it unified or split; the settings stay a key away.
+        let settings = diff.is_none();
         if !typing {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 self.mode = Mode::ConfirmQuit;
                 return vec![];
             }
-            if let Some(
-                action @ (KeyAction::PullRequests
-                | KeyAction::RefreshGitHub
-                | KeyAction::NextTab
-                | KeyAction::PrevTab
-                | KeyAction::Tab(_)
-                | KeyAction::Help
-                | KeyAction::Settings
-                | KeyAction::Quit),
-            ) = self.keymap.action(Context::Grid, &key)
-            {
-                return self.act(action);
+            match self.keymap.action(Context::Grid, &key) {
+                Some(KeyAction::Settings) if !settings => {}
+                Some(
+                    action @ (KeyAction::PullRequests
+                    | KeyAction::RefreshGitHub
+                    | KeyAction::NextTab
+                    | KeyAction::PrevTab
+                    | KeyAction::Tab(_)
+                    | KeyAction::Help
+                    | KeyAction::Settings
+                    | KeyAction::Quit),
+                ) => return self.act(action),
+                _ => {}
             }
         }
         let View::Prs(view) = &mut self.view else {
@@ -1948,8 +1986,13 @@ impl App {
             .project
             .and_then(|p| self.prs.get(&p))
             .unwrap_or(&empty);
+        let diff = view
+            .detail
+            .as_ref()
+            .and_then(|d| self.pr_diffs.get(&d.pr))
+            .and_then(|(_, d)| d.as_ref());
         let layout = self.pr_layout.borrow().clone();
-        match view.key(key, data, &layout) {
+        match view.key(key, data, diff, &layout) {
             None => vec![],
             Some(PrAction::Close) => {
                 self.view = View::Grid;
@@ -5924,6 +5967,160 @@ mod tests {
                 project: s[0].project
             }]
         );
+    }
+
+    /// The diff flags of the focuses among `actions`.
+    fn diff_focus(actions: &[Action]) -> Vec<bool> {
+        sent(actions)
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::SetPrFocus { diff, .. } => Some(*diff),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pr_212() -> PrRef {
+        PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        }
+    }
+
+    /// Two files of 212: `src/a.rs` already viewed, `src/b.rs` not.
+    fn diff_of_212() -> PrDiff {
+        use crate::prs::diff::tree::tests::file;
+        let mut files = vec![file("src/a.rs"), file("src/b.rs")];
+        files[0].viewed = termist_core::github::Viewed::Viewed;
+        PrDiff {
+            head_oid: "h1".into(),
+            files,
+            more: 0,
+        }
+    }
+
+    /// The open diff of the PR view.
+    fn open_diff(app: &App) -> Option<&crate::prs::diff::DiffView> {
+        match &app.view {
+            View::Prs(v) => v.detail.as_ref()?.diff.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn d_opens_the_diff_and_esc_comes_back_to_the_files() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('d')));
+        assert_eq!(diff_focus(&actions), [true], "from the inbox, at once");
+        assert!(
+            sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkPrSeen { .. }))
+        );
+        let actions = app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        assert!(diff_focus(&actions).is_empty());
+        assert_eq!(
+            open_diff(&app).and_then(|d| d.file.as_deref()),
+            Some("src/b.rs"),
+            "the first file not viewed"
+        );
+        let actions = app.on_key(k(K::Esc));
+        assert_eq!(diff_focus(&actions), [false]);
+        let View::Prs(v) = &app.view else { panic!() };
+        let d = v.detail.as_ref().unwrap();
+        assert_eq!(
+            (d.tab, d.file.as_deref()),
+            (crate::prs::Tab::Files, Some("src/b.rs"))
+        );
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(diff_focus(&actions), [true]);
+        assert_eq!(
+            open_diff(&app).and_then(|d| d.file.as_deref()),
+            Some("src/b.rs"),
+            "Enter on the Files tab opens its file; the diff read is used at once"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_asks_github_and_a_refusal_undoes_it() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        let actions = app.on_key(ctrl('r'));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetFileViewed {
+                pr: pr_212(),
+                path: "src/b.rs".into(),
+                viewed: true
+            }]
+        );
+        assert!(!open_diff(&app).unwrap().pending.is_empty());
+        app.on_event(ServerEvent::PrWriteFailed {
+            pr: pr_212(),
+            message: "couldn't mark b.rs viewed · no access".into(),
+        });
+        assert!(open_diff(&app).unwrap().pending.is_empty());
+        assert_eq!(
+            app.toasts.items().next().map(|t| t.text.as_str()),
+            Some("✗ couldn't mark b.rs viewed · no access")
+        );
+    }
+
+    #[test]
+    fn s_in_the_diff_flips_the_layout_and_saves_it() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        let actions = app.on_key(k(K::Char('s')));
+        assert_eq!(
+            app.config.diff.layout,
+            termist_core::config::DiffLayout::Split
+        );
+        assert_eq!(
+            actions,
+            [Action::WriteConfig(ConfigEdit::Set {
+                key: "diff.layout",
+                value: "split".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn the_diff_search_takes_every_letter() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_key(k(K::Char('/')));
+        for c in "qv]s?".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        assert_eq!(open_diff(&app).map(|d| d.query.as_str()), Some("qv]s?"));
+        assert!(app.overlays.is_empty() && app.mode == Mode::Grid);
     }
 
     #[test]

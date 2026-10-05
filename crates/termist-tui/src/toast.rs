@@ -25,6 +25,8 @@ pub enum ToastKind {
         project: termist_core::ProjectId,
         pr: termist_core::github::PrRef,
     },
+    /// Something asked of GitHub did not happen.
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
