@@ -91,9 +91,11 @@ pub enum SettingRow {
     StatusClock,
     /// Pull requests through gh.
     PullRequests,
+    /// A pull request's diff: unified or split.
+    DiffLayout,
 }
 
-pub const SETTING_ROWS: [SettingRow; 18] = [
+pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
@@ -112,6 +114,7 @@ pub const SETTING_ROWS: [SettingRow; 18] = [
     SettingRow::StatusBattery,
     SettingRow::StatusClock,
     SettingRow::PullRequests,
+    SettingRow::DiffLayout,
 ];
 
 /// What a captured key will be.

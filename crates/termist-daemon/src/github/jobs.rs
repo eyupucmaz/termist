@@ -1,6 +1,6 @@
 //! What each job does: the gh calls, on a blocking thread.
 use super::gh::{self, GhHandle};
-use super::{Done, Job, Slug, accounts, query, repos};
+use super::{Done, Job, Slug, accounts, files, query, repos};
 use std::sync::Arc;
 use termist_core::github::GhState;
 
@@ -86,6 +86,31 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             )
             .and_then(|v| query::parse_detail(&v)),
         },
+        Job::Diff {
+            gh,
+            pr,
+            account,
+            want,
+        } => Done::Diff {
+            pr,
+            reply: files::fetch(&*gh.0, &account.token, &want),
+            head_oid: want.head_oid,
+        },
+        Job::MarkViewed {
+            gh,
+            pr,
+            account,
+            id,
+            path,
+            viewed,
+            client,
+        } => Done::Marked {
+            pr,
+            reply: files::mark(&*gh.0, &account.token, &id, &path, viewed),
+            path,
+            viewed,
+            client,
+        },
     }
 }
 
@@ -119,6 +144,24 @@ pub fn failed(job: &Job) -> Done {
         },
         Job::Detail { pr, .. } => Done::Detail {
             pr: *pr,
+            reply: Err(why()),
+        },
+        Job::Diff { pr, want, .. } => Done::Diff {
+            pr: *pr,
+            head_oid: want.head_oid.clone(),
+            reply: Err(why()),
+        },
+        Job::MarkViewed {
+            pr,
+            path,
+            viewed,
+            client,
+            ..
+        } => Done::Marked {
+            pr: *pr,
+            path: path.clone(),
+            viewed: *viewed,
+            client: *client,
             reply: Err(why()),
         },
     }
@@ -328,6 +371,106 @@ mod tests {
                 name: "site".into(),
             }),
             Done::Detail { pr: p, reply: Err(_) } if p == pr
+        ));
+    }
+
+    fn want() -> files::Want {
+        files::Want {
+            owner: "acme".into(),
+            name: "site".into(),
+            number: 212,
+            url: "https://github.com/acme/site/pull/212".into(),
+            changed: 3,
+            head_oid: "h1".into(),
+        }
+    }
+
+    #[test]
+    fn a_diff_job_reads_files_and_viewed_states_as_its_account() {
+        use super::super::files::tests::{PAGE, VIEWED};
+        let fake = FakeGh::new(|c| {
+            if c.args.contains(&"graphql".to_string()) {
+                ok(VIEWED)
+            } else {
+                ok(PAGE)
+            }
+        });
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let done = run(
+            Job::Diff {
+                gh: GhHandle(fake.clone()),
+                pr,
+                account: account("alice", true),
+                want: want(),
+            },
+            &(Arc::new(|| None) as Locate),
+        );
+        let Done::Diff {
+            pr: p,
+            head_oid,
+            reply: Ok(d),
+        } = done
+        else {
+            panic!()
+        };
+        assert_eq!((p, head_oid.as_str(), d.files.len()), (pr, "h1", 3));
+        assert!(
+            fake.calls()
+                .iter()
+                .all(|c| c.token.as_deref() == Some("tok-alice"))
+        );
+    }
+
+    #[test]
+    fn a_mark_job_answers_the_client_that_asked() {
+        let fake =
+            FakeGh::new(|_| ok(r#"{"data":{"markFileAsViewed":{"clientMutationId":null}}}"#));
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let client = crate::session::ClientId(4);
+        let done = run(
+            Job::MarkViewed {
+                gh: GhHandle(fake.clone()),
+                pr,
+                account: account("alice", true),
+                id: "PR_1".into(),
+                path: "src/a.rs".into(),
+                viewed: true,
+                client,
+            },
+            &(Arc::new(|| None) as Locate),
+        );
+        assert!(matches!(
+            done,
+            Done::Marked { client: c, viewed: true, reply: Ok(()), ref path, .. }
+                if c == client && path == "src/a.rs"
+        ));
+        assert!(fake.calls()[0].query().contains("markFileAsViewed"));
+        let Done::Marked { reply, .. } = failed(&Job::MarkViewed {
+            gh: GhHandle(fake),
+            pr,
+            account: account("alice", true),
+            id: "PR_1".into(),
+            path: "src/a.rs".into(),
+            viewed: true,
+            client,
+        }) else {
+            panic!()
+        };
+        assert!(reply.is_err());
+        assert!(matches!(
+            failed(&Job::Diff {
+                gh: GhHandle(FakeGh::new(|_| ok(""))),
+                pr,
+                account: account("alice", true),
+                want: want(),
+            }),
+            Done::Diff { reply: Err(_), ref head_oid, .. } if head_oid == "h1"
         ));
     }
 

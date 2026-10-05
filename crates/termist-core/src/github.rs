@@ -157,6 +157,23 @@ pub struct Review {
     pub submitted_at: String,
 }
 
+/// Which side of the diff a thread's line is on: the old file's or the new one's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    Left,
+    #[default]
+    Right,
+}
+
+/// Whether you marked a file viewed on GitHub; `Dismissed`: it changed since.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Viewed {
+    #[default]
+    Unviewed,
+    Viewed,
+    Dismissed,
+}
+
 /// Comments on a line of the diff.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
@@ -164,6 +181,7 @@ pub struct Thread {
     pub path: String,
     /// The line now, else the line it was written on.
     pub line: Option<u32>,
+    pub side: Side,
     pub resolved: bool,
     pub outdated: bool,
     /// The diff around the line, from the first comment.
@@ -190,6 +208,7 @@ pub struct FileChange {
     pub deletions: u32,
     /// `A`, `M`, `D`, `R` or `C`.
     pub change: char,
+    pub viewed: Viewed,
 }
 
 /// How many of each did not come (over the query's limits).
@@ -205,6 +224,10 @@ pub struct More {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrDetail {
     pub summary: PrSummary,
+    /// GitHub's node id of the pull request, for the changes termist writes.
+    pub id: String,
+    /// The head commit: a new one means a new diff.
+    pub head_oid: String,
     pub body: String,
     pub comments: Vec<Comment>,
     pub reviews: Vec<Review>,
@@ -212,6 +235,42 @@ pub struct PrDetail {
     pub checks: Vec<Check>,
     pub files: Vec<FileChange>,
     pub more: More,
+}
+
+/// What a file's diff is when GitHub sent no patch for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Patch {
+    Text(String),
+    Binary,
+    /// Over GitHub's limit for one file, or over termist's for the whole diff.
+    TooLarge,
+    /// Moved without a change.
+    Renamed,
+}
+
+/// One file of a pull request's diff.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    pub path: String,
+    /// Where a renamed or copied file came from.
+    pub previous: Option<String>,
+    /// `A`, `M`, `D`, `R` or `C`, as in `FileChange`.
+    pub change: char,
+    pub additions: u32,
+    pub deletions: u32,
+    pub viewed: Viewed,
+    pub patch: Patch,
+    /// The file on GitHub's "Files changed" page.
+    pub url: String,
+}
+
+/// A pull request's diff at one head commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrDiff {
+    pub head_oid: String,
+    pub files: Vec<DiffFile>,
+    /// Changed files beyond those read.
+    pub more: u32,
 }
 
 /// Seconds since 1970 of `2026-10-02T15:33:44Z`; `None` for any other shape.

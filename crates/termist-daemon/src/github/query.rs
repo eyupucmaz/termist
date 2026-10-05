@@ -4,7 +4,7 @@ use super::accounts::Permission;
 use serde_json::Value;
 use termist_core::github::{
     Check, CheckState, Checks, Comment, FileChange, GhState, Mergeable, More, PrDetail, PrState,
-    PrSummary, Review, ReviewDecision, ReviewState, Thread,
+    PrSummary, Review, ReviewDecision, ReviewState, Side, Thread, Viewed,
 };
 
 /// Open PRs read per repo; a repo with more shows `+N more`.
@@ -36,7 +36,7 @@ pub struct InboxReply {
 }
 
 /// A GraphQL string: JSON's quoting is GraphQL's.
-fn quoted(s: &str) -> String {
+pub fn quoted(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 
@@ -276,14 +276,15 @@ pub fn detail(owner: &str, name: &str, number: u32) -> String {
   repository(owner: {owner}, name: {name}) {{
     pullRequest(number: {number}) {{
       ...PrFields
+      id headRefOid
       body
       comments(first: 100) {{ totalCount nodes {{ author {{ login }} body createdAt }} }}
       reviews(first: 50) {{ totalCount nodes {{ author {{ login }} state body submittedAt }} }}
       reviewThreads(first: 100) {{ totalCount nodes {{
-        id isResolved isOutdated path line originalLine
+        id isResolved isOutdated path line originalLine diffSide
         comments(first: 50) {{ totalCount nodes {{ author {{ login }} body createdAt diffHunk }} }}
       }} }}
-      files(first: 100) {{ totalCount nodes {{ path additions deletions changeType }} }}
+      files(first: 100) {{ totalCount nodes {{ path additions deletions changeType viewerViewedState }} }}
       checks: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ totalCount nodes {{
         __typename
         ... on CheckRun {{ name status conclusion detailsUrl startedAt completedAt
@@ -299,6 +300,15 @@ pub fn detail(owner: &str, name: &str, number: u32) -> String {
     )
 }
 
+/// `viewerViewedState`; anything else is not viewed.
+pub fn viewed(v: &Value) -> Viewed {
+    match v.as_str() {
+        Some("VIEWED") => Viewed::Viewed,
+        Some("DISMISSED") => Viewed::Dismissed,
+        _ => Viewed::Unviewed,
+    }
+}
+
 pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
     let data = &v["data"];
     let viewer = data["viewer"]["login"].as_str().unwrap_or_default();
@@ -311,6 +321,8 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
     let contexts = &p["checks"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
     Ok(PrDetail {
         summary,
+        id: text(&p["id"]),
+        head_oid: text(&p["headRefOid"]),
         body: text(&p["body"]),
         comments: nodes(&p["comments"]).map(comment).collect(),
         reviews: nodes(&p["reviews"])
@@ -331,6 +343,10 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
                     .as_u64()
                     .or_else(|| t["originalLine"].as_u64())
                     .map(|n| n as u32),
+                side: match t["diffSide"].as_str() {
+                    Some("LEFT") => Side::Left,
+                    _ => Side::Right,
+                },
                 resolved: t["isResolved"].as_bool().unwrap_or(false),
                 outdated: t["isOutdated"].as_bool().unwrap_or(false),
                 hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
@@ -351,6 +367,7 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
                     Some("COPIED") => 'C',
                     _ => 'M',
                 },
+                viewed: viewed(&f["viewerViewedState"]),
             })
             .collect(),
         more: More {
@@ -466,6 +483,7 @@ pub mod tests {
         "number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212",
         "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z",
         "headRefName":"feat/dealer","baseRefName":"main","additions":184,"deletions":32,"changedFiles":9,
+        "id":"PR_kwDOAcme212","headRefOid":"b4d4d37695dfcb6005acbbc67a9c47a096fbea63",
         "mergeable":"MERGEABLE","reviewDecision":"APPROVED","author":{"login":"bob"},
         "reviewRequests":{"nodes":[]},
         "latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","author":{"login":"carol"}}]},
@@ -477,17 +495,17 @@ pub mod tests {
           {"author":{"login":"carol"},"state":"APPROVED","body":"Looks good, one nit below.","submittedAt":"2026-10-02T09:00:00Z"},
           {"author":{"login":"carol"},"state":"COMMENTED","body":"","submittedAt":"2026-10-02T08:59:00Z"}]},
         "reviewThreads":{"totalCount":2,"nodes":[
-          {"id":"T1","isResolved":false,"isOutdated":false,"path":"src/search/DealerFilter.tsx","line":42,"originalLine":40,
+          {"id":"T1","isResolved":false,"isOutdated":false,"path":"src/search/DealerFilter.tsx","line":42,"originalLine":40,"diffSide":"RIGHT",
            "comments":{"totalCount":2,"nodes":[
              {"author":{"login":"carol"},"body":"This refetches on every mount.","createdAt":"2026-10-02T08:58:00Z",
               "diffHunk":"@@ -38,3 +38,5 @@\n   const dealers = useDealers();\n   const [sel, setSel] = useState<string>();\n+  useEffect(() => fetchAll(), []);"},
              {"author":{"login":"bob"},"body":"Good catch, will fix.","createdAt":"2026-10-02T09:30:00Z","diffHunk":"x"}]}},
-          {"id":"T2","isResolved":true,"isOutdated":true,"path":"src/api/client.ts","line":null,"originalLine":10,
+          {"id":"T2","isResolved":true,"isOutdated":true,"path":"src/api/client.ts","line":null,"originalLine":10,"diffSide":"LEFT",
            "comments":{"totalCount":3,"nodes":[
              {"author":null,"body":"old","createdAt":"2026-10-01T12:00:00Z","diffHunk":"@@ -10 +10 @@\n-a\n+b"}]}}]},
         "files":{"totalCount":101,"nodes":[
-          {"path":"src/search/DealerFilter.tsx","additions":120,"deletions":2,"changeType":"ADDED"},
-          {"path":"src/old.ts","additions":0,"deletions":30,"changeType":"DELETED"},
+          {"path":"src/search/DealerFilter.tsx","additions":120,"deletions":2,"changeType":"ADDED","viewerViewedState":"VIEWED"},
+          {"path":"src/old.ts","additions":0,"deletions":30,"changeType":"DELETED","viewerViewedState":"DISMISSED"},
           {"path":"src/api/client.ts","additions":4,"deletions":0,"changeType":"MODIFIED"},
           {"path":"src/b.ts","additions":0,"deletions":0,"changeType":"RENAMED"}]},
         "checks":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"totalCount":4,"nodes":[
@@ -509,7 +527,10 @@ pub mod tests {
         assert!(q.contains(r#"repository(owner: "acme", name: "site")"#));
         assert!(q.contains("pullRequest(number: 212)"));
         for part in [
+            "id headRefOid",
             "reviewThreads(first: 100)",
+            "diffSide",
+            "viewerViewedState",
             "diffHunk",
             "files(first: 100)",
             "checks: commits(last: 1)",
@@ -524,6 +545,8 @@ pub mod tests {
     fn the_detail_answer_becomes_a_pull_request() {
         let d = parse_detail(&json(DETAIL)).unwrap();
         assert_eq!(d.summary.number, 212);
+        assert_eq!(d.id, "PR_kwDOAcme212");
+        assert_eq!(d.head_oid, "b4d4d37695dfcb6005acbbc67a9c47a096fbea63");
         assert_eq!(d.summary.checks, Checks::Pending);
         assert_eq!(d.body, "Adds a dealer dropdown.\n\nCloses #198.");
         assert_eq!(d.comments.len(), 1);
@@ -543,9 +566,20 @@ pub mod tests {
             (Some(10), true, true, 2)
         );
         assert_eq!(t2.comments[0].author, "ghost");
+        assert_eq!((t1.side, t2.side), (Side::Right, Side::Left));
 
         let changes: String = d.files.iter().map(|f| f.change).collect();
         assert_eq!(changes, "ADMR");
+        let viewed: Vec<Viewed> = d.files.iter().map(|f| f.viewed).collect();
+        assert_eq!(
+            viewed,
+            [
+                Viewed::Viewed,
+                Viewed::Dismissed,
+                Viewed::Unviewed,
+                Viewed::Unviewed
+            ]
+        );
         assert_eq!(d.more.files, 97);
 
         let checks: Vec<_> = d

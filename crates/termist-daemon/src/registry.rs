@@ -575,7 +575,8 @@ impl Registry {
             | ClientRequest::SetRepoVisible { .. }
             | ClientRequest::SetRepoAccount { .. }
             | ClientRequest::RefreshPrs { .. }
-            | ClientRequest::MarkPrSeen { .. }) => {
+            | ClientRequest::MarkPrSeen { .. }
+            | ClientRequest::SetFileViewed { .. }) => {
                 let fx = self.github.request(
                     client,
                     req,

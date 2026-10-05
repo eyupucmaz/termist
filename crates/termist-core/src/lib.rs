@@ -1,6 +1,7 @@
 //! Pure domain model and wire protocol for termist.
 pub mod codec;
 pub mod config;
+pub mod diff;
 pub mod env;
 pub mod github;
 pub mod ids;

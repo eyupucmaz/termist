@@ -2,6 +2,7 @@
 //! whole (the detail). This module keeps its state and keys; `inbox_view` and
 //! `detail_view` draw it.
 pub mod detail_view;
+pub mod diff;
 pub mod inbox_view;
 pub mod markdown;
 pub mod timeline;
@@ -9,6 +10,7 @@ pub mod timeline;
 use crate::app::App;
 use crate::list_picker::matches;
 use crate::theme::Theme;
+use diff::{DiffAction, DiffArea, DiffView};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -17,7 +19,9 @@ use ratatui::text::Span;
 use std::collections::HashSet;
 use termist_core::AgentStatus;
 use termist_core::ProjectId;
-use termist_core::github::{Checks, GhState, Mergeable, PrRef, PrSummary, RepoPrs, ReviewDecision};
+use termist_core::github::{
+    Checks, GhState, Mergeable, PrDiff, PrRef, PrSummary, RepoPrs, ReviewDecision,
+};
 
 /// A project's pull requests as the daemon last sent them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +111,10 @@ pub struct Detail {
     pub toggled: HashSet<String>,
     /// The highlighted check.
     pub check: usize,
+    /// The highlighted file of the Files tab, by path.
+    pub file: Option<String>,
+    /// Mercek: the diff, over the pull request.
+    pub diff: Option<DiffView>,
 }
 
 impl Detail {
@@ -118,7 +126,18 @@ impl Detail {
             scroll: 0,
             toggled: HashSet::new(),
             check: 0,
+            file: None,
+            diff: None,
         }
+    }
+
+    /// Opens the diff on `file`; one already read settles it at once.
+    fn open_diff(&mut self, file: Option<String>, diff: Option<&PrDiff>) {
+        let mut view = DiffView::new(file);
+        if let Some(diff) = diff {
+            view.settle(diff);
+        }
+        self.diff = Some(view);
     }
 }
 
@@ -149,6 +168,15 @@ pub struct PrLayout {
     pub threads: Vec<ThreadAnchor>,
     /// The checks' links, in the order shown.
     pub checks: Vec<Option<String>>,
+    /// The Files tab's paths, in the order shown.
+    pub files: Vec<String>,
+    pub diff: DiffArea,
+    /// The detail's tab names on screen (their columns) and their row.
+    pub tabs: Vec<(Tab, u16, u16)>,
+    pub tab_row: u16,
+    /// The detail's body on screen and the line shown at its top.
+    pub body: Rect,
+    pub scroll: usize,
 }
 
 /// A thread's first line in the conversation.
@@ -169,6 +197,14 @@ pub enum PrAction {
     Opened(PrRef, String),
     Browser(String),
     Repos,
+    /// Mark a file of the diff viewed on GitHub, or not.
+    Viewed {
+        pr: PrRef,
+        path: String,
+        viewed: bool,
+    },
+    /// The diff the other way: unified or split.
+    FlipLayout,
 }
 
 /// A line of the inbox list.
@@ -279,9 +315,16 @@ impl PrView {
         Some((repo, repo.prs.iter().find(|p| p.number == s.number)?))
     }
 
-    pub fn key(&mut self, key: KeyEvent, data: &ProjectPrs, layout: &PrLayout) -> Option<PrAction> {
+    /// A key; `diff` is the open pull request's diff, if one was read.
+    pub fn key(
+        &mut self,
+        key: KeyEvent,
+        data: &ProjectPrs,
+        diff: Option<&PrDiff>,
+        layout: &PrLayout,
+    ) -> Option<PrAction> {
         if self.detail.is_some() {
-            self.detail_key(key, layout)
+            self.detail_key(key, diff, layout)
         } else {
             self.inbox_key(key, data)
         }
@@ -318,13 +361,18 @@ impl PrView {
             KeyCode::PageUp => self.step(&list, -10),
             KeyCode::Home | KeyCode::Char('g') => self.step(&list, isize::MIN),
             KeyCode::End | KeyCode::Char('G') => self.step(&list, isize::MAX),
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('d') if !ctrl => {
                 let (repo, pr) = self.selection(data)?;
                 let pr_ref = PrRef {
                     repo: repo.repo,
                     number: pr.number,
                 };
-                self.detail = Some(Detail::new(pr_ref, pr.clone()));
+                let mut detail = Detail::new(pr_ref, pr.clone());
+                if key.code == KeyCode::Char('d') {
+                    // The diff comes with the focus that asks for it.
+                    detail.open_diff(None, None);
+                }
+                self.detail = Some(detail);
                 return Some(PrAction::Opened(pr_ref, pr.updated_at.clone()));
             }
             KeyCode::Char('/') => self.typing = true,
@@ -350,13 +398,92 @@ impl PrView {
         None
     }
 
-    fn detail_key(&mut self, key: KeyEvent, layout: &PrLayout) -> Option<PrAction> {
+    /// A click on the open pull request: a tab name, a thread to fold, a check, a
+    /// file (the selected one opens its diff), or a place in the diff.
+    pub fn click(&mut self, x: u16, y: u16, diff: Option<&PrDiff>, layout: &PrLayout) {
+        let Some(d) = self.detail.as_mut() else {
+            return;
+        };
+        if let Some(open) = &mut d.diff {
+            open.click(x, y, diff, &layout.diff);
+            return;
+        }
+        if y == layout.tab_row
+            && let Some((tab, ..)) = layout.tabs.iter().find(|(_, a, b)| (*a..*b).contains(&x))
+        {
+            d.tab = *tab;
+            d.scroll = 0;
+            return;
+        }
+        if !layout.body.contains(ratatui::layout::Position::new(x, y)) {
+            return;
+        }
+        let line = layout.scroll + (y - layout.body.y) as usize;
+        match d.tab {
+            Tab::Conversation => {
+                if let Some(a) = layout.threads.iter().find(|a| a.line == line)
+                    && !d.toggled.remove(&a.id)
+                {
+                    d.toggled.insert(a.id.clone());
+                }
+            }
+            Tab::Checks if line < layout.checks.len() => d.check = line,
+            Tab::Files => {
+                if let Some(path) = layout.files.get(line) {
+                    if d.file.as_ref() == Some(path) {
+                        d.open_diff(Some(path.clone()), diff);
+                    } else {
+                        d.file = Some(path.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn detail_key(
+        &mut self,
+        key: KeyEvent,
+        diff: Option<&PrDiff>,
+        layout: &PrLayout,
+    ) -> Option<PrAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (layout.page / 2).max(1);
         let page = layout.page.max(1);
         let d = self.detail.as_mut()?;
+        if let Some(view) = &mut d.diff {
+            return match view.key(key, d.pr, diff, &layout.diff)? {
+                DiffAction::Back(path) => {
+                    d.diff = None;
+                    d.tab = Tab::Files;
+                    if path.is_some() {
+                        d.file = path;
+                    }
+                    None
+                }
+                DiffAction::Pr(action) => Some(action),
+            };
+        }
         let checks = d.tab == Tab::Checks;
+        let files = d.tab == Tab::Files;
+        let file_at = d
+            .file
+            .as_ref()
+            .and_then(|f| layout.files.iter().position(|x| x == f));
         match key.code {
+            KeyCode::Char('d') if !ctrl => d.open_diff(None, diff),
+            KeyCode::Enter if files => {
+                let file = d.file.clone().or_else(|| layout.files.first().cloned());
+                d.open_diff(file, diff);
+            }
+            KeyCode::Char('j') | KeyCode::Down if files => {
+                let next = file_at.map_or(0, |i| (i + 1).min(layout.files.len().saturating_sub(1)));
+                d.file = layout.files.get(next).cloned();
+            }
+            KeyCode::Char('k') | KeyCode::Up if files => {
+                let next = file_at.map_or(0, |i| i.saturating_sub(1));
+                d.file = layout.files.get(next).cloned();
+            }
             KeyCode::Esc => {
                 self.detail = None;
             }
@@ -422,7 +549,10 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
     // thread anchors for the keys and the mouse.
     *app.pr_layout.borrow_mut() = PrLayout::default();
     match &view.detail {
-        Some(detail) => detail_view::draw(f, app, detail, area),
+        Some(detail) => match &detail.diff {
+            Some(open) => diff::view::draw(f, app, detail.pr, open, area),
+            None => detail_view::draw(f, app, detail, area),
+        },
         None => inbox_view::draw(f, app, view, area),
     }
 }
@@ -435,8 +565,28 @@ pub fn hint(app: &App, view: &PrView) -> String {
         return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
     }
     if let Some(d) = &view.detail {
+        if let Some(open) = &d.diff {
+            if open.typing {
+                return "type to search the paths · ↑/↓ choose · Enter keep · Esc clear".into();
+            }
+            let other = match app.config.diff.layout {
+                termist_core::config::DiffLayout::Unified => "split",
+                termist_core::config::DiffLayout::Split => "unified",
+            };
+            return format!(
+                "#{} · Tab panel · J/K file · {{/}} hunk · n/N thread · ^R viewed · s {other} · / search · b browser · Esc back",
+                d.pr.number
+            );
+        }
+        if d.tab == Tab::Files {
+            return format!(
+                "#{} · Tab section · j/k file · Enter diff · b browser · {} refresh · Esc list",
+                d.pr.number,
+                key(Action::RefreshGitHub)
+            );
+        }
         return format!(
-            "#{} · Tab section · j/k scroll · n/N next open thread · Enter fold · b browser · {} refresh · Esc list",
+            "#{} · Tab section · j/k scroll · n/N next open thread · Enter fold · d diff · b browser · {} refresh · Esc list",
             d.pr.number,
             key(Action::RefreshGitHub)
         );
@@ -534,6 +684,8 @@ pub mod fixtures {
         };
         PrDetail {
             summary,
+            id: "PR_212".into(),
+            head_oid: "h1".into(),
             body: "Adds a dealer dropdown to the search page.\n\nCloses #198.".into(),
             comments: vec![c("bob", "Screenshots attached ![before](https://x.io/b.png)", "2026-10-02T09:00:00Z")],
             reviews: vec![
@@ -555,6 +707,7 @@ pub mod fixtures {
                     id: "T1".into(),
                     path: "src/search/DealerFilter.tsx".into(),
                     line: Some(42),
+                    side: Side::Right,
                     resolved: false,
                     outdated: false,
                     hunk: "@@ -38,3 +40,5 @@\n  const dealers = useDealers();\n  const [sel, setSel] = useState<string>();\n+ useEffect(() => fetchAll(), []);".into(),
@@ -568,6 +721,7 @@ pub mod fixtures {
                     id: "T2".into(),
                     path: "src/api/client.ts".into(),
                     line: Some(10),
+                    side: Side::Right,
                     resolved: true,
                     outdated: false,
                     hunk: "@@ -10 +10 @@\n-a\n+b".into(),
@@ -607,12 +761,14 @@ pub mod fixtures {
                     additions: 120,
                     deletions: 2,
                     change: 'A',
+                    viewed: Viewed::Viewed,
                 },
                 FileChange {
                     path: "src/api/client.ts".into(),
                     additions: 4,
                     deletions: 0,
                     change: 'M',
+                    viewed: Viewed::Unviewed,
                 },
             ],
             more: More::default(),
@@ -713,7 +869,7 @@ mod tests {
             Some(209),
             "the one now in its place"
         );
-        v.key(k(K::Char('j')), &d, &PrLayout::default());
+        v.key(k(K::Char('j')), &d, None, &PrLayout::default());
         assert_eq!(v.selected.map(|p| p.number), Some(201));
         d.repos[0].prs.retain(|p| p.number != 201);
         v.repair(&rows(&d, &v));
@@ -730,7 +886,7 @@ mod tests {
         let mut v = PrView::default();
         v.repair(&rows(&d, &v));
         let layout = PrLayout::default();
-        let opened = v.key(k(K::Enter), &d, &layout);
+        let opened = v.key(k(K::Enter), &d, None, &layout);
         let pr = PrRef {
             repo: termist_core::github::RepoId(1),
             number: 212,
@@ -740,24 +896,24 @@ mod tests {
             Some(PrAction::Opened(pr, "2026-10-02T10:00:00Z".into()))
         );
         assert_eq!(v.detail.as_ref().map(|d| d.pr), Some(pr));
-        v.key(k(K::Tab), &d, &layout);
+        v.key(k(K::Tab), &d, None, &layout);
         assert_eq!(v.detail.as_ref().unwrap().tab, Tab::Conversation);
-        assert_eq!(v.key(k(K::Esc), &d, &layout), None);
+        assert_eq!(v.key(k(K::Esc), &d, None, &layout), None);
         assert!(v.detail.is_none());
-        assert_eq!(v.key(k(K::Esc), &d, &layout), Some(PrAction::Close));
+        assert_eq!(v.key(k(K::Esc), &d, None, &layout), Some(PrAction::Close));
     }
 
     #[test]
     fn typing_searches_and_esc_clears() {
         let d = data();
         let mut v = PrView::default();
-        v.key(k(K::Char('/')), &d, &PrLayout::default());
+        v.key(k(K::Char('/')), &d, None, &PrLayout::default());
         for c in "lazy".chars() {
-            v.key(k(K::Char(c)), &d, &PrLayout::default());
+            v.key(k(K::Char(c)), &d, None, &PrLayout::default());
         }
         assert_eq!(v.query, "lazy");
         assert_eq!(v.selected.map(|p| p.number), Some(209));
-        v.key(k(K::Esc), &d, &PrLayout::default());
+        v.key(k(K::Esc), &d, None, &PrLayout::default());
         assert!(!v.typing && v.query.is_empty());
     }
 
@@ -766,7 +922,7 @@ mod tests {
         let d = data();
         let mut v = PrView::default();
         v.repair(&rows(&d, &v));
-        v.key(k(K::Enter), &d, &PrLayout::default());
+        v.key(k(K::Enter), &d, None, &PrLayout::default());
         let layout = PrLayout {
             end: 100,
             page: 10,
@@ -789,21 +945,21 @@ mod tests {
             ],
             ..PrLayout::default()
         };
-        v.key(k(K::Char('n')), &d, &layout);
+        v.key(k(K::Char('n')), &d, None, &layout);
         assert_eq!(v.detail.as_ref().unwrap().scroll, 4);
-        v.key(k(K::Char('n')), &d, &layout);
+        v.key(k(K::Char('n')), &d, None, &layout);
         assert_eq!(
             v.detail.as_ref().unwrap().scroll,
             20,
             "resolved threads are passed"
         );
-        v.key(k(K::Char('N')), &d, &layout);
+        v.key(k(K::Char('N')), &d, None, &layout);
         assert_eq!(v.detail.as_ref().unwrap().scroll, 4);
-        v.key(k(K::Enter), &d, &layout);
+        v.key(k(K::Enter), &d, None, &layout);
         assert!(v.detail.as_ref().unwrap().toggled.contains("T1"));
-        v.key(k(K::Enter), &d, &layout);
+        v.key(k(K::Enter), &d, None, &layout);
         assert!(v.detail.as_ref().unwrap().toggled.is_empty());
-        let b = v.key(k(K::Char('b')), &d, &layout);
+        let b = v.key(k(K::Char('b')), &d, None, &layout);
         assert_eq!(
             b,
             Some(PrAction::Browser(

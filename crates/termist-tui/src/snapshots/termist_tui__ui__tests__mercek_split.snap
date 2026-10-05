@@ -1,0 +1,22 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 150, 18).backend()"
+---
+" termist pull requests   orbit-api ◆1✓1⇄1                                                                                                       12:00 "
+" #212 Add a dealer filter to search                                                                                                split · 3/4 viewed "
+"┌ files ────────────────────────────┐┌ src/search/DealerFilter.tsx  A  +3 −1 ────────────────────────────────────────────────────────────────────────┐"
+"│ ▾ public/                         ││ @@ -38,4 +38,6 @@ export function DealerFilter                                                                │"
+"│   ✓ A logo.png                    ││ 38     const dealers = useDealers();                  │ 38     const dealers = useDealers();                  │"
+"│ ▾ src/                            ││ 39     const [sel, setSel] = useState<string>();      │ 39     const [sel, setSel] = useState<string>();      │"
+"│   ▾ api/                          ││ 40 -   const label = 'All';                           │ 40 +   const label = sel ?? 'All';                    │"
+"│     ✓ M client.ts                1││                                                       │ 41 +   useEffect(() => fetchAll(), []);               │"
+"│   ▾ search/                       ││                                                       │ 42 +     return label;                                │"
+"│       A DealerFilter.tsx         1││ ┃ ▸ carol +1 · open · This refetches on every mount, can we memoize?                                          │"
+"│ ✓ M README.md                     ││ 41     return (                                       │ 43     return (                                       │"
+"│                                   ││                                                                                                               │"
+"│                                   ││                                                                                                               │"
+"│                                   ││                                                                                                               │"
+"│                                   ││                                                                                                               │"
+"│                                   ││                                                                                                               │"
+"└───────────────────────────────────┘└───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"#212 · Tab panel · J/K file · {/} hunk · n/N thread · ^R viewed · s unified · / search · b browser · Esc back                                         "

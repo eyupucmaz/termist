@@ -14,7 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use termist_core::config::{ColorDepth, PanePosition, Sound};
+use termist_core::config::{ColorDepth, DiffLayout, PanePosition, Sound};
 use termist_core::github::GhState;
 
 /// A box of `width` × `height` centred in `body`, clamped to it.
@@ -545,6 +545,16 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                             let on = if on { "on, in the top right" } else { "off" };
                             (name, format!("‹ {on} ›{}", local(key)))
                         }
+                        SettingRow::DiffLayout => {
+                            let layout = match app.config.diff.layout {
+                                DiffLayout::Unified => "unified",
+                                DiffLayout::Split => "split: old and new side by side",
+                            };
+                            (
+                                "diff layout",
+                                format!("‹ {layout} ›{}", local("diff.layout")),
+                            )
+                        }
                         SettingRow::PullRequests => {
                             let on = if app.config.github.enabled {
                                 "on: through gh"
@@ -869,7 +879,38 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("b", "open in the browser (a check's log on the checks tab)"),
         ("Tab", "next section: overview, conversation, checks, files"),
         ("n / N", "next / previous open thread"),
+        ("d", "the files and their diff"),
         ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("A pull request's diff (d)".into()));
+    for (key, what) in [
+        ("Tab", "the file tree or the diff"),
+        ("J / K", "next / previous file"),
+        ("{ / }", "previous / next hunk"),
+        ("n / N", "next / previous thread"),
+        ("Enter", "open a file, fold a folder or a thread"),
+        (
+            "C-r",
+            "mark the file viewed on GitHub, or not; then the next one",
+        ),
+        ("s", "unified or split"),
+        ("← →", "move long lines sideways"),
+        ("/", "search the paths"),
+        ("b", "the file on GitHub"),
+        ("Esc", "back to the pull request"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("Mouse".into()));
+    for (key, what) in [
+        ("click", "a project tab, a card, a panel, a file, a thread"),
+        ("click again", "the selected card or pull request: open it"),
+        ("click pane", "type into the session, as Enter"),
+        ("wheel", "moves what is under it"),
     ] {
         lines.push(row(key.into(), what));
     }

@@ -1,6 +1,6 @@
 //! One pull request whole: its head, then Overview, Conversation, Checks or Files.
 use super::inbox_view::{status_line, trouble};
-use super::markdown::{cut, render};
+use super::markdown::{cut, render, width_of};
 use super::{Detail, Tab, timeline};
 use crate::app::App;
 use crate::theme::Theme;
@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use termist_core::AgentStatus;
-use termist_core::github::{Check, CheckState, GhState, PrDetail, age, unix_secs};
+use termist_core::github::{Check, CheckState, GhState, PrDetail, Viewed, age, unix_secs};
 
 pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     let t = &app.theme;
@@ -48,6 +48,8 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
             .push(Span::styled(format!("  ⟳ {}", why.join(" ")), t.warn));
     }
     head.push(status);
+    let tab_row = area.y + head.len() as u16;
+    let mut places = vec![];
     let mut tabs = vec![Span::raw(" ")];
     for tab in Tab::ALL {
         let count = detail.and_then(|x| match tab {
@@ -61,6 +63,8 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
             None => format!(" {} ", tab.label()),
         };
         let style = if tab == d.tab { t.tab_active } else { t.dim };
+        let from = area.x + tabs.iter().map(Span::width).sum::<usize>() as u16;
+        places.push((tab, from, from + width_of(&label) as u16));
         tabs.push(Span::styled(label, style));
         tabs.push(Span::raw(" "));
     }
@@ -79,6 +83,7 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
         height: area.height - head_h,
         ..area
     };
+    let mut files = vec![];
     let (lines, threads, checks) = match detail {
         None => {
             let text = trouble(&state)
@@ -100,15 +105,30 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
                 let (lines, urls) = check_lines(x, d.check, t);
                 (lines, vec![], urls)
             }
-            Tab::Files => (file_lines(x, w, t), vec![], vec![]),
+            Tab::Files => {
+                files = x.files.iter().map(|f| f.path.clone()).collect();
+                let at = d
+                    .file
+                    .as_ref()
+                    .and_then(|p| files.iter().position(|f| f == p))
+                    .unwrap_or(0);
+                (file_lines(x, at, w, t), vec![], vec![])
+            }
         },
     };
     let page = body.height as usize;
     let end = lines.len().saturating_sub(page);
-    let scroll = if d.tab == Tab::Checks {
-        d.check.saturating_sub(page.saturating_sub(1)).min(end)
-    } else {
-        d.scroll.min(end)
+    let scroll = match d.tab {
+        Tab::Checks => d.check.saturating_sub(page.saturating_sub(1)).min(end),
+        Tab::Files => {
+            let at = d
+                .file
+                .as_ref()
+                .and_then(|p| files.iter().position(|f| f == p))
+                .unwrap_or(0);
+            at.saturating_sub(page.saturating_sub(1)).min(end)
+        }
+        _ => d.scroll.min(end),
     };
     let shown: Vec<Line> = lines.into_iter().skip(scroll).take(page).collect();
     f.render_widget(Paragraph::new(shown), body);
@@ -117,6 +137,11 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     layout.page = page;
     layout.threads = threads;
     layout.checks = checks;
+    layout.files = files;
+    layout.tabs = places;
+    layout.tab_row = tab_row;
+    layout.body = body;
+    layout.scroll = scroll;
 }
 
 fn overview(d: &PrDetail, w: usize, t: &Theme) -> Vec<Line<'static>> {
@@ -195,24 +220,42 @@ fn check_lines(
     (lines, checks.iter().map(|c| c.url.clone()).collect())
 }
 
-fn file_lines(d: &PrDetail, w: usize, t: &Theme) -> Vec<Line<'static>> {
+/// `✓` viewed, `◦` changed since it was viewed, nothing otherwise.
+pub fn viewed_mark(t: &Theme, viewed: Viewed) -> Span<'static> {
+    match viewed {
+        Viewed::Viewed => Span::styled("✓", Style::default().fg(t.status(AgentStatus::Finished))),
+        Viewed::Dismissed => Span::styled("◦", t.warn),
+        Viewed::Unviewed => Span::raw(" "),
+    }
+}
+
+fn file_lines(d: &PrDetail, highlight: usize, w: usize, t: &Theme) -> Vec<Line<'static>> {
     let green = Style::default().fg(t.status(AgentStatus::Unseen));
     let mut lines: Vec<Line> = d
         .files
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(i, f)| {
             let counts = format!("+{} −{}", f.additions, f.deletions);
-            let room = w.saturating_sub(4 + counts.len() + 2);
+            let room = w.saturating_sub(6 + counts.len() + 2);
             let path = cut(&f.path, room);
             let pad = room.saturating_sub(super::markdown::width_of(&path));
-            Line::from(vec![
+            let mut spans = vec![
+                Span::raw(" "),
+                viewed_mark(t, f.viewed),
                 Span::styled(format!(" {} ", f.change), t.accent),
                 Span::raw(path),
                 Span::raw(" ".repeat(pad + 1)),
                 Span::styled(format!("+{}", f.additions), green),
                 Span::raw(" "),
                 Span::styled(format!("−{}", f.deletions), t.error),
-            ])
+            ];
+            if i == highlight {
+                for s in &mut spans {
+                    s.style = s.style.patch(t.selection);
+                }
+            }
+            Line::from(spans)
         })
         .collect();
     if d.more.files > 0 {

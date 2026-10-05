@@ -184,6 +184,7 @@ fn draw_scene(f: &mut Frame, app: &App, name: &str, area: Rect, caption: Vec<Lin
 
 pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     let area = f.area();
+    *app.hits.borrow_mut() = crate::hit::Hits::default();
     f.buffer_mut().set_style(area, app.theme.base);
     match app.showing {
         Some(Showing {
@@ -261,7 +262,9 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                 continue;
             }
             draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
+            app.hits.borrow_mut().cards.push((s.id, rect));
         }
+        app.hits.borrow_mut().cards_zone = areas.cards_zone;
         if areas.scroll_lines {
             let above = first * per_row;
             let below = sessions
@@ -281,6 +284,12 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                         Paragraph::new(format!("{arrow} {n} more")).style(app.theme.dim),
                         rect,
                     );
+                    let mut hits = app.hits.borrow_mut();
+                    if arrow == '↑' {
+                        hits.above = Some(rect);
+                    } else {
+                        hits.below = Some(rect);
+                    }
                 }
             }
         }
@@ -310,6 +319,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             app.theme.accent.add_modifier(Modifier::BOLD),
         ));
     }
+    let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+    let mut tabs = Vec::new();
     for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
             app.theme.tab_active
@@ -317,6 +328,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
         };
         spans.push(Span::raw(" "));
+        let from = width(&spans);
         spans.push(Span::styled(format!(" {} ", p.name), style));
         for status in [
             AgentStatus::NeedsFeedback,
@@ -350,6 +362,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme.status(AgentStatus::NeedsFeedback)),
             ));
         }
+        let to = width(&spans);
+        if from < area.width as usize {
+            tabs.push((
+                p.id,
+                area.x + from as u16,
+                area.x + to.min(area.width as usize) as u16,
+            ));
+        }
+    }
+    {
+        let mut hits = app.hits.borrow_mut();
+        hits.tabs = tabs;
+        hits.header = area;
     }
     // Agents waiting in closed projects; the first thing to go when space is short.
     let waiting = app.waiting_in_closed_projects().len();
@@ -359,7 +384,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  closed ", app.theme.dim),
             Span::styled(format!("{glyph}{waiting}"), Style::default().fg(color)),
         ];
-        let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
         if width(&spans) + width(&marker) <= area.width as usize {
             spans.extend(marker);
         }
@@ -599,11 +623,17 @@ fn draw_toasts(f: &mut Frame, app: &App) {
                     Span::raw(chars.collect::<String>()),
                 ])
             }
-            crate::toast::ToastKind::Copied | crate::toast::ToastKind::Review { .. } => {
+            crate::toast::ToastKind::Copied
+            | crate::toast::ToastKind::Review { .. }
+            | crate::toast::ToastKind::Failed => {
                 let mut chars = text.chars();
                 let mark: String = chars.next().into_iter().collect();
+                let style = match toast.kind {
+                    crate::toast::ToastKind::Failed => t.error,
+                    _ => t.accent,
+                };
                 Line::from(vec![
-                    Span::styled(mark, t.accent),
+                    Span::styled(mark, style),
                     Span::raw(chars.collect::<String>()),
                 ])
             }
@@ -1734,6 +1764,383 @@ mod tests {
         let text = screen(&render(&mut app, 90, 16));
         assert!(text.contains("✗ lint"), "failing first: {text}");
         assert!(text.contains("1m 12s"));
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) -> Vec<crate::app::Action> {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ev = |kind| MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut actions = app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left)));
+        actions.extend(app.on_mouse(ev(MouseEventKind::Up(MouseButton::Left))));
+        actions
+    }
+
+    /// The column where `text` starts on row `y` of the last frame.
+    fn column_of(t: &Terminal<TestBackend>, y: u16, text: &str) -> u16 {
+        let row: Vec<String> = {
+            let buf = t.backend().buffer();
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        (0..row.len())
+            .find(|&x| row[x..].concat().starts_with(text))
+            .unwrap_or_else(|| panic!("{text} not on row {y}: {}", row.concat())) as u16
+    }
+
+    /// The fixture with a second project, `web`, empty.
+    fn two_tabs() -> (App, termist_core::ProjectId) {
+        let mut app = fixture();
+        let web = ProjectInfo {
+            id: ProjectId::new(),
+            name: "web".into(),
+            path: "/web".into(),
+            open: true,
+        };
+        let mut state = app.state.clone();
+        state.projects.push(web.clone());
+        app.on_event(ServerEvent::State(state));
+        (app, web.id)
+    }
+
+    #[test]
+    fn clicking_a_tab_goes_to_its_project_from_any_view() {
+        let (mut app, web) = two_tabs();
+        let orbit = app.state.projects[0].id;
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!(app.project, Some(web));
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "orbit-api") + 3, 0);
+        assert_eq!(app.project, Some(orbit));
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let t = render(&mut app, 100, 20);
+        let actions = click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!(app.project, Some(web));
+        assert!(matches!(&app.view, View::Prs(v) if v.project == Some(web)));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Send(termist_core::ClientRequest::SetPrFocus { project: Some(p), .. }) if *p == web
+        )));
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Focus);
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!((app.mode, app.project), (Mode::Grid, Some(web)));
+    }
+
+    fn mouse_at(app: &mut App, kind: ratatui::crossterm::event::MouseEventKind, x: u16, y: u16) {
+        app.on_mouse(ratatui::crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn a_card_click_selects_and_a_second_one_goes_in() {
+        let mut app = fixture();
+        let shell = app.state.sessions[1].id;
+        let t = render(&mut app, 60, 16);
+        let x = column_of(&t, 2, "shell-2");
+        click(&mut app, x, 2);
+        assert_eq!((app.selected, app.mode), (Some(shell), Mode::Grid));
+        render(&mut app, 60, 16);
+        click(&mut app, x, 2);
+        assert_eq!(app.mode, Mode::Focus);
+        let t = render(&mut app, 60, 16);
+        click(&mut app, column_of(&t, 2, "claude-1"), 2);
+        assert_eq!(
+            (app.selected, app.mode),
+            (Some(app.state.sessions[0].id), Mode::Grid),
+            "out of focus, onto the card clicked"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_pane_goes_in_and_a_drag_still_selects() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind as Kind};
+        let mut app = fixture();
+        let areas = layout(Rect::new(0, 0, 60, 16), 2, app.pane_position());
+        app.pane_area = areas.pane_inner;
+        render(&mut app, 60, 16);
+        let (x, y) = (areas.pane_inner.x + 1, areas.pane_inner.y);
+        mouse_at(&mut app, Kind::Down(MouseButton::Left), x, y);
+        mouse_at(&mut app, Kind::Drag(MouseButton::Left), x + 3, y);
+        mouse_at(&mut app, Kind::Up(MouseButton::Left), x + 3, y);
+        assert_eq!(app.mode, Mode::Grid, "a drag copies, it does not go in");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, Mode::Focus);
+    }
+
+    #[test]
+    fn the_wheel_and_the_more_lines_move_through_the_cards() {
+        use ratatui::crossterm::event::MouseEventKind as Kind;
+        let mut app = fixture();
+        let project = app.state.projects[0].id;
+        let mut state = app.state.clone();
+        for i in 3..=7 {
+            let mut s = state.sessions[1].clone();
+            s.id = SessionId::new();
+            s.project = project;
+            s.name = format!("shell-{i}");
+            state.sessions.push(s);
+        }
+        app.on_event(ServerEvent::State(state));
+        render(&mut app, 60, 16);
+        let first = app.selected;
+        mouse_at(&mut app, Kind::ScrollDown, 3, 3);
+        assert_eq!(app.selected, Some(app.state.sessions[2].id), "a row down");
+        mouse_at(&mut app, Kind::ScrollUp, 3, 3);
+        assert_eq!(app.selected, first);
+        let t = render(&mut app, 60, 16);
+        let below = (1..16)
+            .find(|y| screen(&t).lines().nth(*y as usize).unwrap().contains("↓"))
+            .unwrap();
+        click(&mut app, 3, below);
+        assert_eq!(app.selected, Some(app.state.sessions[2].id));
+    }
+
+    /// 212 open in Mercek on DealerFilter.tsx (thread T1 on its new line 42), the one
+    /// file not viewed; client.ts (T2, resolved, on line 10), a binary logo and a README
+    /// are.
+    fn mercek_fixture() -> App {
+        use termist_core::github::{DiffFile, Patch, PrDiff, Viewed};
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let f = |path: &str, change: char, patch: Patch| DiffFile {
+            path: path.into(),
+            previous: None,
+            change,
+            additions: 3,
+            deletions: 1,
+            viewed: Viewed::Unviewed,
+            patch,
+            url: format!("https://github.com/acme/site/pull/212/files#diff-{path}"),
+        };
+        let mut diff = PrDiff {
+            head_oid: "h1".into(),
+            files: vec![
+                f(
+                    "src/search/DealerFilter.tsx",
+                    'A',
+                    Patch::Text(
+                        "@@ -38,4 +38,6 @@ export function DealerFilter\n   const dealers = useDealers();\n   const [sel, setSel] = useState<string>();\n-  const label = 'All';\n+  const label = sel ?? 'All';\n+  useEffect(() => fetchAll(), []);\n+\treturn label;\n   return (\n".into(),
+                    ),
+                ),
+                f(
+                    "src/api/client.ts",
+                    'M',
+                    Patch::Text("@@ -8,3 +8,4 @@\n a\n b\n+c\n d".into()),
+                ),
+                f("public/logo.png", 'A', Patch::Binary),
+                f(
+                    "README.md",
+                    'M',
+                    Patch::Text("@@ -1 +1 @@\n-old\n+new".into()),
+                ),
+            ],
+            more: 0,
+        };
+        for f in &mut diff.files[1..] {
+            f.viewed = Viewed::Viewed;
+        }
+        app.on_event(ServerEvent::PrDiff {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::Ok,
+            diff: Some(Box::new(diff)),
+        });
+        app
+    }
+
+    /// The row of the last frame that holds `text`.
+    fn row_of(t: &Terminal<TestBackend>, text: &str) -> u16 {
+        screen(t)
+            .lines()
+            .position(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("{text} not on screen: {}", screen(t))) as u16
+    }
+
+    fn detail(app: &App) -> &crate::prs::Detail {
+        match &app.view {
+            View::Prs(v) => v.detail.as_ref().unwrap(),
+            _ => panic!("not in the PR view"),
+        }
+    }
+
+    #[test]
+    fn the_detail_takes_clicks_on_tabs_threads_checks_and_files() {
+        use crate::prs::Tab;
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "Conversation");
+        click(&mut app, column_of(&t, y, "Conversation"), y);
+        assert_eq!(detail(&app).tab, Tab::Conversation);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "src/api/client.ts:10");
+        click(&mut app, 5, y);
+        assert!(
+            detail(&app).toggled.contains("T2"),
+            "a resolved thread unfolds"
+        );
+        let t = render(&mut app, 90, 28);
+        click(
+            &mut app,
+            column_of(&t, row_of(&t, "Checks"), "Checks"),
+            row_of(&t, "Checks"),
+        );
+        let t = render(&mut app, 90, 28);
+        click(&mut app, 5, row_of(&t, "e2e"));
+        assert_eq!(detail(&app).check, 1, "failing first, then running");
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "Files");
+        click(&mut app, column_of(&t, y, "Files"), y);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "src/api/client.ts");
+        click(&mut app, 8, y);
+        assert_eq!(detail(&app).file.as_deref(), Some("src/api/client.ts"));
+        assert!(detail(&app).diff.is_none());
+        let actions = click(&mut app, 8, y);
+        assert_eq!(
+            detail(&app).diff.as_ref().and_then(|d| d.file.as_deref()),
+            Some("src/api/client.ts"),
+            "a second click opens its diff"
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Send(termist_core::ClientRequest::SetPrFocus { diff: true, .. })
+        )));
+    }
+
+    #[test]
+    fn mercek_takes_clicks_and_the_wheel_where_they_are() {
+        use crate::prs::diff::Panel;
+        use ratatui::crossterm::event::MouseEventKind as Kind;
+        let mut app = mercek_fixture();
+        let open = |app: &App| detail(app).diff.clone().unwrap();
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "client.ts");
+        click(&mut app, column_of(&t, y, "client.ts"), y);
+        assert_eq!(open(&app).file.as_deref(), Some("src/api/client.ts"));
+        assert_eq!(open(&app).panel, Panel::Tree, "the tree stays in use");
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "search/");
+        click(&mut app, 5, y);
+        assert!(open(&app).folded.contains("src/search"));
+        click(&mut app, 5, y);
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "DealerFilter");
+        click(&mut app, 8, y);
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "carol +1");
+        click(&mut app, 60, y);
+        assert_eq!(open(&app).panel, Panel::Diff);
+        assert!(open(&app).opened.contains("T1"));
+        // Short enough that the file with its open thread scrolls.
+        render(&mut app, 110, 12);
+        let cursor = open(&app).cursor;
+        mouse_at(&mut app, Kind::ScrollDown, 5, 5);
+        assert_eq!(open(&app).cursor, cursor + 1, "over the tree: its cursor");
+        mouse_at(&mut app, Kind::ScrollDown, 60, 5);
+        assert_eq!(open(&app).scroll, 3, "over the diff: three lines");
+        assert_eq!(
+            open(&app).panel,
+            Panel::Diff,
+            "the wheel does not change the panel"
+        );
+    }
+
+    #[test]
+    fn the_help_lists_the_diff_and_the_mouse() {
+        let app = fixture();
+        let text: String = crate::overlay_view::help_lines(&app)
+            .iter()
+            .map(|l| l.to_string() + "\n")
+            .collect();
+        assert!(text.contains("A pull request's diff (d)"));
+        assert!(text.contains("mark the file viewed on GitHub"));
+        assert!(text.contains("Mouse"));
+    }
+
+    #[test]
+    fn mercek_says_why_when_the_pull_request_cannot_be_read() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        app.on_event(ServerEvent::PrDetail {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::NoAccess,
+            detail: None,
+        });
+        let text = screen(&render(&mut app, 110, 14));
+        assert!(
+            text.contains("No logged-in account can see this repo."),
+            "{text}"
+        );
+        assert!(!text.contains("Reading the diff"));
+    }
+
+    #[test]
+    fn mercek_unified_and_split() {
+        let mut app = mercek_fixture();
+        insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());
+        let layout = app.pr_layout.borrow().diff.clone();
+        assert_eq!(layout.hunks, [0]);
+        assert_eq!(
+            layout
+                .threads
+                .iter()
+                .map(|t| t.1.as_str())
+                .collect::<Vec<_>>(),
+            ["T1"]
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        insta::assert_snapshot!("mercek_split", render(&mut app, 150, 18).backend());
+        let narrow = screen(&render(&mut app, 110, 18));
+        assert!(narrow.contains("split · too narrow"), "{narrow}");
+    }
+
+    #[test]
+    fn mercek_on_a_narrow_screen_shows_one_panel() {
+        let mut app = mercek_fixture();
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(!text.contains(" files "), "the tree is hidden: {text}");
+        assert!(text.contains("DealerFilter.tsx"));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        insta::assert_snapshot!("mercek_tree_alone", render(&mut app, 80, 14).backend());
+    }
+
+    #[test]
+    fn mercek_opens_a_thread_and_tells_a_file_without_a_patch() {
+        let mut app = mercek_fixture();
+        render(&mut app, 110, 18);
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 24));
+        assert!(
+            text.contains("This refetches on every mount, can we memoize?"),
+            "{text}"
+        );
+        assert!(text.contains("Good catch, will fix."));
+        app.on_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(text.contains("logo.png"));
+        assert!(text.contains("binary file"), "{text}");
     }
 
     #[test]

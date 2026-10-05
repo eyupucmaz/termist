@@ -1,4 +1,4 @@
-use crate::github::{GhState, PrDetail, PrRef, RepoId, RepoInfo, RepoPrs};
+use crate::github::{GhState, PrDetail, PrDiff, PrRef, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
     Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
     TermColors,
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -116,11 +116,12 @@ pub enum ClientRequest {
     SetGitHub {
         enabled: bool,
     },
-    /// What this client looks at: a project's pull requests, and maybe one of them.
-    /// The daemon reads those more often; `None`, `None` is nothing.
+    /// What this client looks at: a project's pull requests, and maybe one of them,
+    /// and maybe its diff. The daemon reads those more often; `None`, `None` is nothing.
     SetPrFocus {
         project: Option<ProjectId>,
         pr: Option<PrRef>,
+        diff: bool,
     },
     /// Answered with `Repos`, and again when the open counts come.
     ListRepos {
@@ -143,6 +144,12 @@ pub enum ClientRequest {
     MarkPrSeen {
         pr: PrRef,
         updated_at: String,
+    },
+    /// Marks a file of the pull request viewed on GitHub, or not.
+    SetFileViewed {
+        pr: PrRef,
+        path: String,
+        viewed: bool,
     },
     Shutdown,
 }
@@ -196,6 +203,18 @@ pub enum ServerEvent {
         state: GhState,
         detail: Option<Box<PrDetail>>,
     },
+    /// A pull request's diff, to the clients that look at it; `diff` stays the last
+    /// one read when `state` says the newest read failed.
+    PrDiff {
+        pr: PrRef,
+        state: GhState,
+        diff: Option<Box<PrDiff>>,
+    },
+    /// Something this client asked to change on GitHub did not happen.
+    PrWriteFailed {
+        pr: PrRef,
+        message: String,
+    },
     /// You were asked for a review since the last round.
     ReviewRequested {
         project: ProjectId,
@@ -211,7 +230,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_7_since_pull_requests() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+    fn the_protocol_is_8_since_the_diff() {
+        assert_eq!(PROTOCOL_VERSION, 8);
     }
 }

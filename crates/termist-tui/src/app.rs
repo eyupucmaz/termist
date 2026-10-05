@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
-use termist_core::github::{GhState, PrDetail, PrRef, RepoInfo};
+use termist_core::github::{GhState, PrDetail, PrDiff, PrRef, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -189,12 +189,16 @@ pub struct App {
     pub repo_lists: HashMap<ProjectId, (Vec<String>, Vec<RepoInfo>)>,
     /// Pull requests read whole: how the last read went, and the last good one.
     pub pr_details: HashMap<PrRef, (GhState, Option<PrDetail>)>,
+    /// Each pull request's diff as last read, and how the newest read went.
+    pub pr_diffs: HashMap<PrRef, (GhState, Option<PrDiff>)>,
     /// Where the last frame put the PR view's rows and threads.
     pub pr_layout: RefCell<PrLayout>,
+    /// What the last frame drew where, for the mouse.
+    pub hits: RefCell<crate::hit::Hits>,
     /// Tests fix the clock; ages are counted from it.
     pub frozen_now: Option<i64>,
     /// What the daemon was last told this client looks at.
-    pr_focus: (Option<ProjectId>, Option<PrRef>),
+    pr_focus: (Option<ProjectId>, Option<PrRef>, bool),
     rng: u64,
 }
 
@@ -284,9 +288,11 @@ impl App {
             prs: HashMap::new(),
             repo_lists: HashMap::new(),
             pr_details: HashMap::new(),
+            pr_diffs: HashMap::new(),
             pr_layout: RefCell::default(),
+            hits: RefCell::default(),
             frozen_now: None,
-            pr_focus: (None, None),
+            pr_focus: (None, None, false),
             screen: ratatui::layout::Rect::default(),
             rng: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -686,6 +692,41 @@ impl App {
             ServerEvent::PrDetail { pr, state, detail } => {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
+            ServerEvent::PrDiff { pr, state, diff } => {
+                // A failed read brings no diff: the one shown stays, with the failure.
+                let diff = diff
+                    .map(|d| *d)
+                    .or_else(|| self.pr_diffs.remove(&pr).and_then(|(_, d)| d));
+                if let (View::Prs(view), Some(diff)) = (&mut self.view, &diff)
+                    && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
+                    && let Some(open) = &mut d.diff
+                {
+                    open.settle(diff);
+                }
+                // Only the open diff is kept (each may be megabytes); the daemon sends a
+                // diff again to whoever comes back to it.
+                let open = match &self.view {
+                    View::Prs(v) => v.detail.as_ref().filter(|d| d.diff.is_some()).map(|d| d.pr),
+                    _ => None,
+                };
+                self.pr_diffs.retain(|p, _| Some(*p) == open);
+                if open == Some(pr) {
+                    self.pr_diffs.insert(pr, (state, diff));
+                }
+            }
+            ServerEvent::PrWriteFailed { pr, message } => {
+                if let View::Prs(view) = &mut self.view
+                    && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
+                    && let Some(open) = &mut d.diff
+                {
+                    open.pending.clear();
+                }
+                self.toasts.push(Toast {
+                    text: format!("✗ {message}"),
+                    kind: ToastKind::Failed,
+                    until: Instant::now() + toast::AGENT_FOR,
+                });
+            }
             ServerEvent::ReviewRequested {
                 project,
                 pr,
@@ -849,6 +890,17 @@ impl App {
     /// full-screen one that did not gets arrow keys (it keeps no history); otherwise the
     /// view moves through the session's history.
     pub fn on_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.overlays.is_empty()
+            && self.showing.is_none()
+            && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
+            && self.toasts.hit(self.screen, ev.column, ev.row).is_none()
+        {
+            let tab = self.hits.borrow().tab_at(ev.column, ev.row);
+            if let Some(project) = tab {
+                return self.click_tab(project);
+            }
+        }
         if matches!(self.view, View::Prs(_)) && self.overlays.is_empty() && self.showing.is_none() {
             let on_toast = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.toasts.hit(self.screen, ev.column, ev.row).is_some();
@@ -887,6 +939,25 @@ impl App {
                     };
                 }
                 self.toast_down = false;
+                if self.overlays.is_empty()
+                    && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
+                {
+                    let (card, more) = {
+                        let hits = self.hits.borrow();
+                        (
+                            hits.card_at(ev.column, ev.row),
+                            hits.more_at(ev.column, ev.row),
+                        )
+                    };
+                    if let Some(id) = card {
+                        return self.click_card(id);
+                    }
+                    if let Some(rows) = more {
+                        self.mode = Mode::Grid;
+                        self.move_by(rows * self.cards_per_row.max(1) as isize);
+                        return self.sync_attachment();
+                    }
+                }
                 if self.takes_mouse(ev) {
                     self.selection = self.attached.map(|id| Selection::new(id, self.in_pane(ev)));
                 }
@@ -906,11 +977,23 @@ impl App {
                 if std::mem::take(&mut self.toast_down) {
                     return vec![];
                 }
-                return self.copy_selection();
+                // A click on the pane, not a drag: into the session, as Enter.
+                let click = self.selection.as_ref().is_some_and(|s| s.anchor == s.head);
+                let actions = self.copy_selection();
+                if click && self.mode == Mode::Grid && self.view == View::Grid {
+                    return self.enter();
+                }
+                return actions;
             }
             _ => return vec![],
         };
         if !self.takes_mouse(ev) {
+            let cards = self.hits.borrow().over_cards(ev.column, ev.row);
+            if cards && self.overlays.is_empty() && self.mode == Mode::Grid {
+                let row = self.cards_per_row.max(1) as isize;
+                self.move_by(if up { -row } else { row });
+                return self.sync_attachment();
+            }
             return vec![];
         }
         let Some(id) = self.attached else {
@@ -935,6 +1018,32 @@ impl App {
             (false, true) => self.scroll_down(WHEEL_LINES),
             (false, false) => vec![],
         }
+    }
+
+    /// A card was clicked: it is selected, out of focus mode; a second click on the
+    /// selected card goes into it, as Enter.
+    fn click_card(&mut self, id: SessionId) -> Vec<Action> {
+        let focused = matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
+        let again = !focused && self.selected == Some(id) && self.view == View::Grid;
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.select(id);
+        if again {
+            actions.extend(self.enter());
+        }
+        actions.extend(self.sync_attachment());
+        actions
+    }
+
+    /// A project tab was clicked: that project, as its number key would; out of focus
+    /// mode first.
+    fn click_tab(&mut self, project: ProjectId) -> Vec<Action> {
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.go_to_project(project);
+        actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
+        actions
     }
 
     /// The mouse is over the pane and nothing sits on top of it.
@@ -1825,11 +1934,30 @@ impl App {
     /// a click on the selected row opens it.
     fn prs_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let layout = self.pr_layout.borrow().clone();
+        let View::Prs(view) = &mut self.view else {
+            return vec![];
+        };
+        let diff = view
+            .detail
+            .as_ref()
+            .and_then(|d| self.pr_diffs.get(&d.pr))
+            .and_then(|(_, d)| d.as_ref());
+        if let MouseEventKind::ScrollDown | MouseEventKind::ScrollUp = ev.kind
+            && let Some(open) = view.detail.as_mut().and_then(|d| d.diff.as_mut())
+        {
+            let down = ev.kind == MouseEventKind::ScrollDown;
+            open.wheel(ev.column, ev.row, down, diff, &layout.diff);
+            return vec![];
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) && view.detail.is_some() {
+            view.click(ev.column, ev.row, diff, &layout);
+            return vec![];
+        }
         match ev.kind {
             MouseEventKind::ScrollDown => self.prs_key(press(KeyCode::Down)),
             MouseEventKind::ScrollUp => self.prs_key(press(KeyCode::Up)),
             MouseEventKind::Down(MouseButton::Left) => {
-                let layout = self.pr_layout.borrow().clone();
                 let View::Prs(view) = &mut self.view else {
                     return vec![];
                 };
@@ -1901,9 +2029,14 @@ impl App {
                 let data = project.and_then(|p| self.prs.get(&p)).unwrap_or(&empty);
                 let list = prs::rows(data, view);
                 view.repair(&list);
-                (project, view.detail.as_ref().map(|d| d.pr))
+                let detail = view.detail.as_ref();
+                (
+                    project,
+                    detail.map(|d| d.pr),
+                    detail.is_some_and(|d| d.diff.is_some()),
+                )
             }
-            _ => (None, None),
+            _ => (None, None, false),
         };
         if focus == self.pr_focus || !self.config.github.enabled {
             return vec![];
@@ -1912,30 +2045,39 @@ impl App {
         vec![Action::Send(ClientRequest::SetPrFocus {
             project: focus.0,
             pr: focus.1,
+            diff: focus.2,
         })]
     }
 
     /// A key in the PR view. The grid's keys for tabs, help, settings, refresh and
     /// leaving work here too, unless the search takes the keys.
     fn prs_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let typing = matches!(&self.view, View::Prs(v) if v.typing);
+        let diff = match &self.view {
+            View::Prs(v) => v.detail.as_ref().and_then(|d| d.diff.as_ref()),
+            _ => None,
+        };
+        let typing =
+            matches!(&self.view, View::Prs(v) if v.typing) || diff.is_some_and(|d| d.typing);
+        // In the diff `s` turns it unified or split; the settings stay a key away.
+        let settings = diff.is_none();
         if !typing {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 self.mode = Mode::ConfirmQuit;
                 return vec![];
             }
-            if let Some(
-                action @ (KeyAction::PullRequests
-                | KeyAction::RefreshGitHub
-                | KeyAction::NextTab
-                | KeyAction::PrevTab
-                | KeyAction::Tab(_)
-                | KeyAction::Help
-                | KeyAction::Settings
-                | KeyAction::Quit),
-            ) = self.keymap.action(Context::Grid, &key)
-            {
-                return self.act(action);
+            match self.keymap.action(Context::Grid, &key) {
+                Some(KeyAction::Settings) if !settings => {}
+                Some(
+                    action @ (KeyAction::PullRequests
+                    | KeyAction::RefreshGitHub
+                    | KeyAction::NextTab
+                    | KeyAction::PrevTab
+                    | KeyAction::Tab(_)
+                    | KeyAction::Help
+                    | KeyAction::Settings
+                    | KeyAction::Quit),
+                ) => return self.act(action),
+                _ => {}
             }
         }
         let View::Prs(view) = &mut self.view else {
@@ -1946,8 +2088,13 @@ impl App {
             .project
             .and_then(|p| self.prs.get(&p))
             .unwrap_or(&empty);
+        let diff = view
+            .detail
+            .as_ref()
+            .and_then(|d| self.pr_diffs.get(&d.pr))
+            .and_then(|(_, d)| d.as_ref());
         let layout = self.pr_layout.borrow().clone();
-        match view.key(key, data, &layout) {
+        match view.key(key, data, diff, &layout) {
             None => vec![],
             Some(PrAction::Close) => {
                 self.view = View::Grid;
@@ -1958,6 +2105,20 @@ impl App {
             }
             Some(PrAction::Repos) => self.open_repos(),
             Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
+            Some(PrAction::Viewed { pr, path, viewed }) => {
+                vec![Action::Send(ClientRequest::SetFileViewed {
+                    pr,
+                    path,
+                    viewed,
+                })]
+            }
+            Some(PrAction::FlipLayout) => {
+                self.config.diff.layout = self.config.diff.layout.other();
+                vec![Action::WriteConfig(ConfigEdit::Set {
+                    key: "diff.layout",
+                    value: self.config.diff.layout.id().to_string(),
+                })]
+            }
         }
     }
 
@@ -2166,6 +2327,7 @@ impl App {
             SettingRow::StatusBattery => "status.battery",
             SettingRow::StatusClock => "status.clock",
             SettingRow::PullRequests => "github.enabled",
+            SettingRow::DiffLayout => "diff.layout",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -2200,6 +2362,12 @@ impl App {
                     Action::WriteConfig(ConfigEdit::Set { key, value }),
                     Action::Preview(chosen),
                 ];
+            }
+            SettingRow::DiffLayout => {
+                self.config.diff.layout = self.config.diff.layout.other();
+                quiet(self);
+                let value = self.config.diff.layout.id().to_string();
+                return vec![Action::WriteConfig(ConfigEdit::Set { key, value })];
             }
             SettingRow::PullRequests => {
                 self.config.github.enabled = !self.config.github.enabled;
@@ -5743,6 +5911,31 @@ mod tests {
     }
 
     #[test]
+    fn the_diff_layout_setting_flips_and_saves() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::DiffLayout)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert_eq!(
+            app.config.diff.layout,
+            termist_core::config::DiffLayout::Split
+        );
+        assert_eq!(
+            actions,
+            [Action::WriteConfig(ConfigEdit::Set {
+                key: "diff.layout",
+                value: "split".into()
+            })]
+        );
+    }
+
+    #[test]
     fn the_pull_requests_setting_tells_the_daemon() {
         let (mut app, _) = app();
         app.on_key(k(K::Char('s')));
@@ -5811,7 +6004,9 @@ mod tests {
         sent(actions)
             .into_iter()
             .filter_map(|r| match r {
-                ClientRequest::SetPrFocus { project, pr } => Some((*project, pr.map(|p| p.number))),
+                ClientRequest::SetPrFocus { project, pr, .. } => {
+                    Some((*project, pr.map(|p| p.number)))
+                }
                 _ => None,
             })
             .collect()
@@ -5874,6 +6069,212 @@ mod tests {
                 project: s[0].project
             }]
         );
+    }
+
+    /// The diff flags of the focuses among `actions`.
+    fn diff_focus(actions: &[Action]) -> Vec<bool> {
+        sent(actions)
+            .into_iter()
+            .filter_map(|r| match r {
+                ClientRequest::SetPrFocus { diff, .. } => Some(*diff),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pr_212() -> PrRef {
+        PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        }
+    }
+
+    /// Two files of 212: `src/a.rs` already viewed, `src/b.rs` not.
+    fn diff_of_212() -> PrDiff {
+        use crate::prs::diff::tree::tests::file;
+        let mut files = vec![file("src/a.rs"), file("src/b.rs")];
+        files[0].viewed = termist_core::github::Viewed::Viewed;
+        PrDiff {
+            head_oid: "h1".into(),
+            files,
+            more: 0,
+        }
+    }
+
+    /// The open diff of the PR view.
+    fn open_diff(app: &App) -> Option<&crate::prs::diff::DiffView> {
+        match &app.view {
+            View::Prs(v) => v.detail.as_ref()?.diff.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn d_opens_the_diff_and_esc_comes_back_to_the_files() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        let actions = app.on_key(k(K::Char('d')));
+        assert_eq!(diff_focus(&actions), [true], "from the inbox, at once");
+        assert!(
+            sent(&actions)
+                .iter()
+                .any(|r| matches!(r, ClientRequest::MarkPrSeen { .. }))
+        );
+        let actions = app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        assert!(diff_focus(&actions).is_empty());
+        assert_eq!(
+            open_diff(&app).and_then(|d| d.file.as_deref()),
+            Some("src/b.rs"),
+            "the first file not viewed"
+        );
+        let actions = app.on_key(k(K::Esc));
+        assert_eq!(diff_focus(&actions), [false]);
+        let View::Prs(v) = &app.view else { panic!() };
+        let d = v.detail.as_ref().unwrap();
+        assert_eq!(
+            (d.tab, d.file.as_deref()),
+            (crate::prs::Tab::Files, Some("src/b.rs"))
+        );
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(diff_focus(&actions), [true]);
+        assert_eq!(
+            open_diff(&app).and_then(|d| d.file.as_deref()),
+            Some("src/b.rs"),
+            "Enter on the Files tab opens its file; the diff read is used at once"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_asks_github_and_a_refusal_undoes_it() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        let actions = app.on_key(ctrl('r'));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetFileViewed {
+                pr: pr_212(),
+                path: "src/b.rs".into(),
+                viewed: true
+            }]
+        );
+        assert!(!open_diff(&app).unwrap().pending.is_empty());
+        app.on_event(ServerEvent::PrWriteFailed {
+            pr: pr_212(),
+            message: "couldn't mark b.rs viewed · no access".into(),
+        });
+        assert!(open_diff(&app).unwrap().pending.is_empty());
+        assert_eq!(
+            app.toasts.items().next().map(|t| t.text.as_str()),
+            Some("✗ couldn't mark b.rs viewed · no access")
+        );
+    }
+
+    #[test]
+    fn s_in_the_diff_flips_the_layout_and_saves_it() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        let actions = app.on_key(k(K::Char('s')));
+        assert_eq!(
+            app.config.diff.layout,
+            termist_core::config::DiffLayout::Split
+        );
+        assert_eq!(
+            actions,
+            [Action::WriteConfig(ConfigEdit::Set {
+                key: "diff.layout",
+                value: "split".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn a_failed_read_without_a_diff_keeps_the_one_shown() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Failed("HTTP 502".into()),
+            diff: None,
+        });
+        let (state, diff) = &app.pr_diffs[&pr_212()];
+        assert_eq!(*state, GhState::Failed("HTTP 502".into()));
+        assert!(diff.is_some(), "the failure is told, the diff stays");
+    }
+
+    #[test]
+    fn only_the_open_diff_is_kept() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('d')));
+        let pr_209 = PrRef {
+            number: 209,
+            ..pr_212()
+        };
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_209,
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        assert_eq!(
+            app.pr_diffs.keys().collect::<Vec<_>>(),
+            [&pr_209],
+            "a diff of up to 8 MB is not kept once left; the daemon sends it again"
+        );
+    }
+
+    #[test]
+    fn the_diff_search_takes_every_letter() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_key(k(K::Char('/')));
+        for c in "qv]s?".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        assert_eq!(open_diff(&app).map(|d| d.query.as_str()), Some("qv]s?"));
+        assert!(app.overlays.is_empty() && app.mode == Mode::Grid);
     }
 
     #[test]
