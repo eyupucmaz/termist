@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+A pull request's diff in termist, and the mouse everywhere.
+
+### Added
+
+- **A pull request's diff (`d`).** In a pull request, `d` (or Enter on a file) opens its files as a tree
+  beside one file's changes: unified, or old and new side by side with `s`, the words that changed
+  marked, line comments under their lines. `J` / `K` go from file to file, `{` / `}` from hunk to hunk,
+  and `Ctrl+r` marks a file viewed on GitHub, as the checkbox there does, then shows the next one.
+- **The mouse, everywhere.** A click on a project tab goes to it, on a card selects it (again: types into
+  it), on the pane types into it. In a pull request the tabs, threads, checks and files take clicks;
+  in its diff, the tree and the threads. The wheel moves what is under it.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions
+can stop, `termist kill` and start `termist` again.
+
 ## 0.1.2 - 2026-10-03
 
 A project's pull requests in termist: `v` lists them repo by repo, with the reviews asked of you,

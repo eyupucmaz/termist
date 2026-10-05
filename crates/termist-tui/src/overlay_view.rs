@@ -879,7 +879,38 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("b", "open in the browser (a check's log on the checks tab)"),
         ("Tab", "next section: overview, conversation, checks, files"),
         ("n / N", "next / previous open thread"),
+        ("d", "the files and their diff"),
         ("Esc", "back"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("A pull request's diff (d)".into()));
+    for (key, what) in [
+        ("Tab", "the file tree or the diff"),
+        ("J / K", "next / previous file"),
+        ("{ / }", "previous / next hunk"),
+        ("n / N", "next / previous thread"),
+        ("Enter", "open a file, fold a folder or a thread"),
+        (
+            "C-r",
+            "mark the file viewed on GitHub, or not; then the next one",
+        ),
+        ("s", "unified or split"),
+        ("← →", "move long lines sideways"),
+        ("/", "search the paths"),
+        ("b", "the file on GitHub"),
+        ("Esc", "back to the pull request"),
+    ] {
+        lines.push(row(key.into(), what));
+    }
+    lines.push(Line::default());
+    lines.push(heading("Mouse".into()));
+    for (key, what) in [
+        ("click", "a project tab, a card, a panel, a file, a thread"),
+        ("click again", "the selected card or pull request: open it"),
+        ("click pane", "type into the session, as Enter"),
+        ("wheel", "moves what is under it"),
     ] {
         lines.push(row(key.into(), what));
     }

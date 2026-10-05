@@ -140,7 +140,8 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | drag | select in the pane; letting go copies it, and a toast in the top right says so |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
-| `v` | the project's open pull requests (needs the GitHub CLI) |
+| `v` | the project's open pull requests and their diffs (needs the GitHub CLI) |
+| click | a project tab, a card (again: type into it), the pane, a file, a thread |
 | `s` / `?` | settings / every key as it is bound now |
 | `q` | quit the TUI; the agents keep running |
 
@@ -160,6 +161,9 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
 | drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
 | `v` / `R` | the project's pull requests / read GitHub again |
+| `d` | in a pull request: its files and their diff |
+| click | a project tab, a card (a second click types into it), the pane (types into it), a file, a thread |
+| wheel | moves what is under it: the cards, a session's history, a list, the diff |
 | `o` / `x` | open a project / close its tab (sessions keep running) |
 | `r` / `a` / `A` | rename / archive / show archived |
 | `d` | stop a session (asks first) |
@@ -179,9 +183,16 @@ files. termist reads GitHub through the [GitHub CLI](https://cli.github.com): in
 `gh auth login`. With several accounts logged in, each repo is read with the account that has the most
 access to it; `m`, then `a`, picks another.
 
+`d`, or Enter on a file, opens the diff: the files as a tree beside one file's changes, with the line
+comments under their lines. `J` / `K` go from file to file, `s` shows old and new side by side, and
+`Ctrl+r` marks a file viewed on GitHub (as the checkbox there does) and goes to the next one.
+
 ```toml
 [github]
 enabled = true
+
+[diff]
+layout = "unified"   # or "split"
 ```
 
 <details>

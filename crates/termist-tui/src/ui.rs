@@ -2063,6 +2063,18 @@ mod tests {
     }
 
     #[test]
+    fn the_help_lists_the_diff_and_the_mouse() {
+        let app = fixture();
+        let text: String = crate::overlay_view::help_lines(&app)
+            .iter()
+            .map(|l| l.to_string() + "\n")
+            .collect();
+        assert!(text.contains("A pull request's diff (d)"));
+        assert!(text.contains("mark the file viewed on GitHub"));
+        assert!(text.contains("Mouse"));
+    }
+
+    #[test]
     fn mercek_unified_and_split() {
         let mut app = mercek_fixture();
         insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());
