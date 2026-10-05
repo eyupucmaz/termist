@@ -534,6 +534,8 @@ pub mod fixtures {
         };
         PrDetail {
             summary,
+            id: "PR_212".into(),
+            head_oid: "h1".into(),
             body: "Adds a dealer dropdown to the search page.\n\nCloses #198.".into(),
             comments: vec![c("bob", "Screenshots attached ![before](https://x.io/b.png)", "2026-10-02T09:00:00Z")],
             reviews: vec![
@@ -555,6 +557,7 @@ pub mod fixtures {
                     id: "T1".into(),
                     path: "src/search/DealerFilter.tsx".into(),
                     line: Some(42),
+                    side: Side::Right,
                     resolved: false,
                     outdated: false,
                     hunk: "@@ -38,3 +40,5 @@\n  const dealers = useDealers();\n  const [sel, setSel] = useState<string>();\n+ useEffect(() => fetchAll(), []);".into(),
@@ -568,6 +571,7 @@ pub mod fixtures {
                     id: "T2".into(),
                     path: "src/api/client.ts".into(),
                     line: Some(10),
+                    side: Side::Right,
                     resolved: true,
                     outdated: false,
                     hunk: "@@ -10 +10 @@\n-a\n+b".into(),
@@ -607,12 +611,14 @@ pub mod fixtures {
                     additions: 120,
                     deletions: 2,
                     change: 'A',
+                    viewed: Viewed::Viewed,
                 },
                 FileChange {
                     path: "src/api/client.ts".into(),
                     additions: 4,
                     deletions: 0,
                     change: 'M',
+                    viewed: Viewed::Unviewed,
                 },
             ],
             more: More::default(),

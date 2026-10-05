@@ -435,7 +435,7 @@ impl GitHub {
             }
             return fx;
         }
-        if let ClientRequest::SetPrFocus { project, pr } = req {
+        if let ClientRequest::SetPrFocus { project, pr, .. } = req {
             // Only a client that is still known: a late request after `gone` is ignored.
             let Some(focus) = self.clients.get_mut(&client) else {
                 return fx;
@@ -1525,6 +1525,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(p0),
             pr: None,
+            diff: false,
         });
         w.tick();
         answer(&mut w, 0, "work", &["site", "admin"], vec![]);
@@ -1671,6 +1672,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: Some(pr),
+            diff: false,
         });
         let fx = w.tick();
         assert!(
@@ -1684,6 +1686,8 @@ mod tests {
                 "alice",
             )
             .unwrap(),
+            id: "PR_1".into(),
+            head_oid: "h1".into(),
             body: "body".into(),
             comments: vec![],
             reviews: vec![],
@@ -1703,6 +1707,7 @@ mod tests {
             ClientRequest::SetPrFocus {
                 project: None,
                 pr: Some(pr),
+                diff: false,
             },
             &w.store,
             &w.projects,
@@ -1724,6 +1729,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: Some(pr),
+            diff: false,
         });
         w.join(ClientId(2));
         w.gh.gone(w.client);
@@ -1738,6 +1744,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: None,
+            diff: false,
         });
         assert!(w.tick().jobs.is_empty());
     }
@@ -1753,6 +1760,7 @@ mod tests {
             ClientRequest::SetPrFocus {
                 project: Some(w.projects[0].id),
                 pr: None,
+                diff: false,
             },
             &w.store,
             &w.projects,
@@ -1776,6 +1784,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: None,
+            diff: false,
         });
         w.tick();
         let ids = vec![w.id("site"), w.id("admin")];

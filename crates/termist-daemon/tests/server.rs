@@ -1749,6 +1749,7 @@ async fn pull_requests_come_through_gh() {
     c.send(&ClientRequest::SetPrFocus {
         project: Some(project),
         pr: None,
+        diff: false,
     })
     .await
     .unwrap();

@@ -245,6 +245,12 @@ mod tests {
             ClientRequest::SetPrFocus {
                 project: Some(crate::ProjectId::new()),
                 pr: Some(pr),
+                diff: true,
+            },
+            ClientRequest::SetFileViewed {
+                pr,
+                path: "src/a \"b\".rs".into(),
+                viewed: true,
             },
             ClientRequest::SetRepoAccount {
                 repo: RepoId(7),
@@ -283,6 +289,8 @@ mod tests {
                 state: GhState::Ok,
                 detail: Some(Box::new(PrDetail {
                     summary,
+                    id: "PR_kw1".into(),
+                    head_oid: "b4d4d37".into(),
                     body: "Closes #198.".into(),
                     comments: vec![],
                     reviews: vec![],
@@ -290,6 +298,7 @@ mod tests {
                         id: "T1".into(),
                         path: "src/a.rs".into(),
                         line: Some(42),
+                        side: Side::Left,
                         resolved: false,
                         outdated: false,
                         hunk: "@@ -1 +1 @@\n-a\n+b".into(),
@@ -306,9 +315,44 @@ mod tests {
                         additions: 1,
                         deletions: 1,
                         change: 'M',
+                        viewed: Viewed::Dismissed,
                     }],
                     more: More::default(),
                 })),
+            },
+            ServerEvent::PrDiff {
+                pr,
+                state: GhState::Ok,
+                diff: Some(Box::new(PrDiff {
+                    head_oid: "b4d4d37".into(),
+                    files: vec![
+                        DiffFile {
+                            path: "src/a.rs".into(),
+                            previous: Some("src/old.rs".into()),
+                            change: 'R',
+                            additions: 1,
+                            deletions: 1,
+                            viewed: Viewed::Viewed,
+                            patch: Patch::Text("@@ -1 +1 @@\n-a\n+b".into()),
+                            url: "https://github.com/acme/site/pull/212/files#diff-ab".into(),
+                        },
+                        DiffFile {
+                            path: "logo.png".into(),
+                            previous: None,
+                            change: 'A',
+                            additions: 0,
+                            deletions: 0,
+                            viewed: Viewed::Unviewed,
+                            patch: Patch::Binary,
+                            url: String::new(),
+                        },
+                    ],
+                    more: 3,
+                })),
+            },
+            ServerEvent::PrWriteFailed {
+                pr,
+                message: "couldn't mark src/a.rs viewed: Resource not accessible".into(),
             },
             ServerEvent::ReviewRequested {
                 project: crate::ProjectId::new(),

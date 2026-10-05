@@ -686,6 +686,7 @@ impl App {
             ServerEvent::PrDetail { pr, state, detail } => {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
+            ServerEvent::PrDiff { .. } | ServerEvent::PrWriteFailed { .. } => {}
             ServerEvent::ReviewRequested {
                 project,
                 pr,
@@ -1912,6 +1913,7 @@ impl App {
         vec![Action::Send(ClientRequest::SetPrFocus {
             project: focus.0,
             pr: focus.1,
+            diff: false,
         })]
     }
 
@@ -5811,7 +5813,9 @@ mod tests {
         sent(actions)
             .into_iter()
             .filter_map(|r| match r {
-                ClientRequest::SetPrFocus { project, pr } => Some((*project, pr.map(|p| p.number))),
+                ClientRequest::SetPrFocus { project, pr, .. } => {
+                    Some((*project, pr.map(|p| p.number)))
+                }
                 _ => None,
             })
             .collect()

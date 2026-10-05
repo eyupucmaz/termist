@@ -4,7 +4,7 @@ use super::accounts::Permission;
 use serde_json::Value;
 use termist_core::github::{
     Check, CheckState, Checks, Comment, FileChange, GhState, Mergeable, More, PrDetail, PrState,
-    PrSummary, Review, ReviewDecision, ReviewState, Thread,
+    PrSummary, Review, ReviewDecision, ReviewState, Side, Thread, Viewed,
 };
 
 /// Open PRs read per repo; a repo with more shows `+N more`.
@@ -311,6 +311,8 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
     let contexts = &p["checks"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
     Ok(PrDetail {
         summary,
+        id: String::new(),
+        head_oid: String::new(),
         body: text(&p["body"]),
         comments: nodes(&p["comments"]).map(comment).collect(),
         reviews: nodes(&p["reviews"])
@@ -331,6 +333,7 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
                     .as_u64()
                     .or_else(|| t["originalLine"].as_u64())
                     .map(|n| n as u32),
+                side: Side::Right,
                 resolved: t["isResolved"].as_bool().unwrap_or(false),
                 outdated: t["isOutdated"].as_bool().unwrap_or(false),
                 hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
@@ -351,6 +354,7 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
                     Some("COPIED") => 'C',
                     _ => 'M',
                 },
+                viewed: Viewed::Unviewed,
             })
             .collect(),
         more: More {
