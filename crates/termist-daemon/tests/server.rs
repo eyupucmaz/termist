@@ -1690,8 +1690,11 @@ async fn the_codex_catalog_comes_from_the_cli() {
 }
 
 /// A stand-in gh: one account, alice; acme/site with one pull request asking her for a
-/// review.
+/// review, its detail, its one file and that file's viewed state.
 fn stub_gh(dir: &std::path::Path) -> String {
+    const DETAIL: &str = r#"{"data":{"viewer":{"login":"alice"},"repository":{"pullRequest":{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","id":"PR_212","headRefOid":"h1","changedFiles":1,"body":"","files":{"totalCount":1,"nodes":[{"path":"src/a.rs","additions":1,"deletions":1,"changeType":"MODIFIED","viewerViewedState":"UNVIEWED"}]}}}}}"#;
+    const VIEWED: &str = r#"{"data":{"repository":{"pullRequest":{"files":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"path":"src/a.rs","viewerViewedState":"UNVIEWED"}]}}}}}"#;
+    const FILES: &str = r#"[{"filename":"src/a.rs","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -1 +1 @@\n-a\n+b"}]"#;
     const INBOX: &str = r#"{"data":{"viewer":{"login":"alice"},"rateLimit":{"remaining":4990,"resetAt":"2026-10-02T11:00:00Z"},"r0":{"pullRequests":{"totalCount":1,"nodes":[{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","headRefName":"feat/dealer","baseRefName":"main","additions":1,"deletions":1,"changedFiles":1,"mergeable":"MERGEABLE","reviewDecision":"REVIEW_REQUIRED","author":{"login":"bob"},"reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"alice"}}]},"latestOpinionatedReviews":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}]}}}}"#;
     let script = r#"#!/bin/sh
 case "$1 $2" in
@@ -1701,12 +1704,19 @@ case "$1 $2" in
     body=$(cat)
     case "$body" in
       *viewerPermission*) echo '{"data":{"r0":{"viewerPermission":"WRITE"}}}' ;;
+      *markFileAsViewed*) echo '{"data":{"markFileAsViewed":{"clientMutationId":null}}}' ;;
+      *reviewThreads*) printf '%s\n' '@DETAIL@' ;;
+      *pageInfo*) printf '%s\n' '@VIEWED@' ;;
       *) echo 'INBOX' ;;
     esac ;;
+  "api --hostname") printf '%s\n' '@FILES@' ;;
   *) exit 1 ;;
 esac
 "#
-    .replace("INBOX", INBOX);
+    .replace("INBOX", INBOX)
+    .replace("@DETAIL@", DETAIL)
+    .replace("@VIEWED@", VIEWED)
+    .replace("@FILES@", FILES);
     let p = dir.join("gh");
     std::fs::write(&p, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -1778,6 +1788,86 @@ async fn pull_requests_come_through_gh() {
         &mut c,
         |e| matches!(e, ServerEvent::Prs { repos, discovered: 1, .. } if repos.is_empty()),
     )
+    .await;
+}
+
+#[tokio::test]
+async fn a_pull_requests_diff_comes_through_gh_and_a_file_is_marked_viewed() {
+    use termist_core::github::{Patch, PrRef, Viewed};
+    let tmp = tempfile::tempdir().unwrap();
+    let site = tmp.path().join("site");
+    std::fs::create_dir(&site).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&site)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git(&["init", "-q"]) {
+        return; // no git on this machine
+    }
+    assert!(git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/site.git"
+    ]));
+    let d = start(DaemonConfig {
+        gh_bin: Some(stub_gh(tmp.path())),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, site).await;
+    c.send(&ClientRequest::SetGitHub { enabled: true })
+        .await
+        .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::Prs { repos, .. } if repos.first().is_some_and(|r| !r.prs.is_empty()))
+    })
+    .await;
+    let ServerEvent::Prs { repos, .. } = ev else {
+        unreachable!()
+    };
+    let pr = PrRef {
+        repo: repos[0].repo,
+        number: 212,
+    };
+    c.send(&ClientRequest::SetPrFocus {
+        project: Some(project),
+        pr: Some(pr),
+        diff: true,
+    })
+    .await
+    .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::PrDiff { diff: Some(_), .. })
+    })
+    .await;
+    let ServerEvent::PrDiff {
+        diff: Some(diff), ..
+    } = ev
+    else {
+        unreachable!()
+    };
+    assert_eq!(diff.head_oid, "h1");
+    assert_eq!(diff.files[0].path, "src/a.rs");
+    assert_eq!(
+        diff.files[0].patch,
+        Patch::Text("@@ -1 +1 @@\n-a\n+b".into())
+    );
+    c.send(&ClientRequest::SetFileViewed {
+        pr,
+        path: "src/a.rs".into(),
+        viewed: true,
+    })
+    .await
+    .unwrap();
+    next_event(&mut c, |e| {
+        matches!(e, ServerEvent::PrDiff { diff: Some(d), .. } if d.files[0].viewed == Viewed::Viewed)
+    })
     .await;
 }
 
