@@ -36,7 +36,7 @@ pub struct InboxReply {
 }
 
 /// A GraphQL string: JSON's quoting is GraphQL's.
-fn quoted(s: &str) -> String {
+pub fn quoted(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 

@@ -5,6 +5,7 @@
 //! blocking threads and feeds back what they found (`Done`). Nothing is read while no
 //! client is connected or GitHub is off.
 pub mod accounts;
+pub mod files;
 pub mod gh;
 pub mod jobs;
 pub mod poller;

@@ -119,6 +119,19 @@ pub fn graphql(gh: &dyn Gh, token: &str, query: &str) -> Result<Value, GhState> 
     }
 }
 
+/// A GET of GitHub's REST API (`path` as `repos/o/n/…`) as `token`.
+pub fn rest(gh: &dyn Gh, token: &str, path: &str) -> Result<Value, GhState> {
+    let out = gh.run(
+        &["api", "--hostname", "github.com", path],
+        Some(token),
+        None,
+    )?;
+    if !out.success {
+        return Err(classify(&out));
+    }
+    serde_json::from_str::<Value>(&out.stdout).map_err(|_| classify(&out))
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::*;
@@ -255,6 +268,30 @@ mod tests {
         );
         assert_eq!(calls[0].token.as_deref(), Some("tok-alice"));
         assert_eq!(calls[0].query(), "query { viewer { login } }");
+    }
+
+    #[test]
+    fn rest_reads_a_path_with_the_token() {
+        let fake = FakeGh::new(|_| ok(r#"[{"filename":"a"}]"#));
+        let v = rest(&*fake, "tok", "repos/acme/site/pulls/1/files?page=1").unwrap();
+        assert_eq!(v[0]["filename"], "a");
+        let call = &fake.calls()[0];
+        assert_eq!(
+            call.args,
+            [
+                "api",
+                "--hostname",
+                "github.com",
+                "repos/acme/site/pulls/1/files?page=1"
+            ]
+        );
+        assert_eq!(call.token.as_deref(), Some("tok"));
+        let missing =
+            FakeGh::new(|_| fails(r#"{"message":"Not Found"}"#, "gh: Not Found (HTTP 404)"));
+        assert_eq!(
+            rest(&*missing, "tok", "x"),
+            Err(GhState::Failed("Not Found (HTTP 404)".into()))
+        );
     }
 
     #[test]
