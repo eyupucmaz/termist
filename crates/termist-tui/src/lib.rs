@@ -2,6 +2,7 @@
 pub mod app;
 pub mod browse;
 pub mod encode;
+pub mod hit;
 pub mod keys;
 pub mod list_picker;
 pub mod overlay;

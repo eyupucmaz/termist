@@ -193,6 +193,8 @@ pub struct App {
     pub pr_diffs: HashMap<PrRef, (GhState, Option<PrDiff>)>,
     /// Where the last frame put the PR view's rows and threads.
     pub pr_layout: RefCell<PrLayout>,
+    /// What the last frame drew where, for the mouse.
+    pub hits: RefCell<crate::hit::Hits>,
     /// Tests fix the clock; ages are counted from it.
     pub frozen_now: Option<i64>,
     /// What the daemon was last told this client looks at.
@@ -288,6 +290,7 @@ impl App {
             pr_details: HashMap::new(),
             pr_diffs: HashMap::new(),
             pr_layout: RefCell::default(),
+            hits: RefCell::default(),
             frozen_now: None,
             pr_focus: (None, None, false),
             screen: ratatui::layout::Rect::default(),
@@ -875,6 +878,17 @@ impl App {
     /// full-screen one that did not gets arrow keys (it keeps no history); otherwise the
     /// view moves through the session's history.
     pub fn on_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.overlays.is_empty()
+            && self.showing.is_none()
+            && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
+            && self.toasts.hit(self.screen, ev.column, ev.row).is_none()
+        {
+            let tab = self.hits.borrow().tab_at(ev.column, ev.row);
+            if let Some(project) = tab {
+                return self.click_tab(project);
+            }
+        }
         if matches!(self.view, View::Prs(_)) && self.overlays.is_empty() && self.showing.is_none() {
             let on_toast = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.toasts.hit(self.screen, ev.column, ev.row).is_some();
@@ -961,6 +975,17 @@ impl App {
             (false, true) => self.scroll_down(WHEEL_LINES),
             (false, false) => vec![],
         }
+    }
+
+    /// A project tab was clicked: that project, as its number key would; out of focus
+    /// mode first.
+    fn click_tab(&mut self, project: ProjectId) -> Vec<Action> {
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.go_to_project(project);
+        actions.extend(self.sync_attachment());
+        actions.extend(self.sync_prs());
+        actions
     }
 
     /// The mouse is over the pane and nothing sits on top of it.

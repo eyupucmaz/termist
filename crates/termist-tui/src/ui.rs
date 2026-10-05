@@ -184,6 +184,7 @@ fn draw_scene(f: &mut Frame, app: &App, name: &str, area: Rect, caption: Vec<Lin
 
 pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
     let area = f.area();
+    *app.hits.borrow_mut() = crate::hit::Hits::default();
     f.buffer_mut().set_style(area, app.theme.base);
     match app.showing {
         Some(Showing {
@@ -310,6 +311,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             app.theme.accent.add_modifier(Modifier::BOLD),
         ));
     }
+    let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+    let mut tabs = Vec::new();
     for p in app.open_projects() {
         let style = if Some(p.id) == app.project {
             app.theme.tab_active
@@ -317,6 +320,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default()
         };
         spans.push(Span::raw(" "));
+        let from = width(&spans);
         spans.push(Span::styled(format!(" {} ", p.name), style));
         for status in [
             AgentStatus::NeedsFeedback,
@@ -350,6 +354,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(app.theme.status(AgentStatus::NeedsFeedback)),
             ));
         }
+        let to = width(&spans);
+        if from < area.width as usize {
+            tabs.push((
+                p.id,
+                area.x + from as u16,
+                area.x + to.min(area.width as usize) as u16,
+            ));
+        }
+    }
+    {
+        let mut hits = app.hits.borrow_mut();
+        hits.tabs = tabs;
+        hits.header = area;
     }
     // Agents waiting in closed projects; the first thing to go when space is short.
     let waiting = app.waiting_in_closed_projects().len();
@@ -359,7 +376,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  closed ", app.theme.dim),
             Span::styled(format!("{glyph}{waiting}"), Style::default().fg(color)),
         ];
-        let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
         if width(&spans) + width(&marker) <= area.width as usize {
             spans.extend(marker);
         }
@@ -1740,6 +1756,75 @@ mod tests {
         let text = screen(&render(&mut app, 90, 16));
         assert!(text.contains("✗ lint"), "failing first: {text}");
         assert!(text.contains("1m 12s"));
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) -> Vec<crate::app::Action> {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let ev = |kind| MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut actions = app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left)));
+        actions.extend(app.on_mouse(ev(MouseEventKind::Up(MouseButton::Left))));
+        actions
+    }
+
+    /// The column where `text` starts on row `y` of the last frame.
+    fn column_of(t: &Terminal<TestBackend>, y: u16, text: &str) -> u16 {
+        let row: Vec<String> = {
+            let buf = t.backend().buffer();
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        (0..row.len())
+            .find(|&x| row[x..].concat().starts_with(text))
+            .unwrap_or_else(|| panic!("{text} not on row {y}: {}", row.concat())) as u16
+    }
+
+    /// The fixture with a second project, `web`, empty.
+    fn two_tabs() -> (App, termist_core::ProjectId) {
+        let mut app = fixture();
+        let web = ProjectInfo {
+            id: ProjectId::new(),
+            name: "web".into(),
+            path: "/web".into(),
+            open: true,
+        };
+        let mut state = app.state.clone();
+        state.projects.push(web.clone());
+        app.on_event(ServerEvent::State(state));
+        (app, web.id)
+    }
+
+    #[test]
+    fn clicking_a_tab_goes_to_its_project_from_any_view() {
+        let (mut app, web) = two_tabs();
+        let orbit = app.state.projects[0].id;
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!(app.project, Some(web));
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "orbit-api") + 3, 0);
+        assert_eq!(app.project, Some(orbit));
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let t = render(&mut app, 100, 20);
+        let actions = click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!(app.project, Some(web));
+        assert!(matches!(&app.view, View::Prs(v) if v.project == Some(web)));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Send(termist_core::ClientRequest::SetPrFocus { project: Some(p), .. }) if *p == web
+        )));
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Focus);
+        let t = render(&mut app, 100, 20);
+        click(&mut app, column_of(&t, 0, "web"), 0);
+        assert_eq!((app.mode, app.project), (Mode::Grid, Some(web)));
     }
 
     /// 212 open in Mercek on DealerFilter.tsx (thread T1 on its new line 42), the one
