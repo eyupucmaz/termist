@@ -170,6 +170,14 @@ pub enum PrAction {
     Opened(PrRef, String),
     Browser(String),
     Repos,
+    /// Mark a file of the diff viewed on GitHub, or not.
+    Viewed {
+        pr: PrRef,
+        path: String,
+        viewed: bool,
+    },
+    /// The diff the other way: unified or split.
+    FlipLayout,
 }
 
 /// A line of the inbox list.

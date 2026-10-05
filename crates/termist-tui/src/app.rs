@@ -1960,6 +1960,20 @@ impl App {
             }
             Some(PrAction::Repos) => self.open_repos(),
             Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
+            Some(PrAction::Viewed { pr, path, viewed }) => {
+                vec![Action::Send(ClientRequest::SetFileViewed {
+                    pr,
+                    path,
+                    viewed,
+                })]
+            }
+            Some(PrAction::FlipLayout) => {
+                self.config.diff.layout = self.config.diff.layout.other();
+                vec![Action::WriteConfig(ConfigEdit::Set {
+                    key: "diff.layout",
+                    value: self.config.diff.layout.id().to_string(),
+                })]
+            }
         }
     }
 
