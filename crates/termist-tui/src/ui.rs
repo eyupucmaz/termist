@@ -1964,6 +1964,104 @@ mod tests {
         app
     }
 
+    /// The row of the last frame that holds `text`.
+    fn row_of(t: &Terminal<TestBackend>, text: &str) -> u16 {
+        screen(t)
+            .lines()
+            .position(|l| l.contains(text))
+            .unwrap_or_else(|| panic!("{text} not on screen: {}", screen(t))) as u16
+    }
+
+    fn detail(app: &App) -> &crate::prs::Detail {
+        match &app.view {
+            View::Prs(v) => v.detail.as_ref().unwrap(),
+            _ => panic!("not in the PR view"),
+        }
+    }
+
+    #[test]
+    fn the_detail_takes_clicks_on_tabs_threads_checks_and_files() {
+        use crate::prs::Tab;
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "Conversation");
+        click(&mut app, column_of(&t, y, "Conversation"), y);
+        assert_eq!(detail(&app).tab, Tab::Conversation);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "src/api/client.ts:10");
+        click(&mut app, 5, y);
+        assert!(
+            detail(&app).toggled.contains("T2"),
+            "a resolved thread unfolds"
+        );
+        let t = render(&mut app, 90, 28);
+        click(
+            &mut app,
+            column_of(&t, row_of(&t, "Checks"), "Checks"),
+            row_of(&t, "Checks"),
+        );
+        let t = render(&mut app, 90, 28);
+        click(&mut app, 5, row_of(&t, "e2e"));
+        assert_eq!(detail(&app).check, 1, "failing first, then running");
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "Files");
+        click(&mut app, column_of(&t, y, "Files"), y);
+        let t = render(&mut app, 90, 28);
+        let y = row_of(&t, "src/api/client.ts");
+        click(&mut app, 8, y);
+        assert_eq!(detail(&app).file.as_deref(), Some("src/api/client.ts"));
+        assert!(detail(&app).diff.is_none());
+        let actions = click(&mut app, 8, y);
+        assert_eq!(
+            detail(&app).diff.as_ref().and_then(|d| d.file.as_deref()),
+            Some("src/api/client.ts"),
+            "a second click opens its diff"
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Send(termist_core::ClientRequest::SetPrFocus { diff: true, .. })
+        )));
+    }
+
+    #[test]
+    fn mercek_takes_clicks_and_the_wheel_where_they_are() {
+        use crate::prs::diff::Panel;
+        use ratatui::crossterm::event::MouseEventKind as Kind;
+        let mut app = mercek_fixture();
+        let open = |app: &App| detail(app).diff.clone().unwrap();
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "client.ts");
+        click(&mut app, column_of(&t, y, "client.ts"), y);
+        assert_eq!(open(&app).file.as_deref(), Some("src/api/client.ts"));
+        assert_eq!(open(&app).panel, Panel::Tree, "the tree stays in use");
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "search/");
+        click(&mut app, 5, y);
+        assert!(open(&app).folded.contains("src/search"));
+        click(&mut app, 5, y);
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "DealerFilter");
+        click(&mut app, 8, y);
+        let t = render(&mut app, 110, 18);
+        let y = row_of(&t, "carol +1");
+        click(&mut app, 60, y);
+        assert_eq!(open(&app).panel, Panel::Diff);
+        assert!(open(&app).opened.contains("T1"));
+        // Short enough that the file with its open thread scrolls.
+        render(&mut app, 110, 12);
+        let cursor = open(&app).cursor;
+        mouse_at(&mut app, Kind::ScrollDown, 5, 5);
+        assert_eq!(open(&app).cursor, cursor + 1, "over the tree: its cursor");
+        mouse_at(&mut app, Kind::ScrollDown, 60, 5);
+        assert_eq!(open(&app).scroll, 3, "over the diff: three lines");
+        assert_eq!(
+            open(&app).panel,
+            Panel::Diff,
+            "the wheel does not change the panel"
+        );
+    }
+
     #[test]
     fn mercek_unified_and_split() {
         let mut app = mercek_fixture();

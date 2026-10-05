@@ -1,6 +1,6 @@
 //! One pull request whole: its head, then Overview, Conversation, Checks or Files.
 use super::inbox_view::{status_line, trouble};
-use super::markdown::{cut, render};
+use super::markdown::{cut, render, width_of};
 use super::{Detail, Tab, timeline};
 use crate::app::App;
 use crate::theme::Theme;
@@ -48,6 +48,8 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
             .push(Span::styled(format!("  ⟳ {}", why.join(" ")), t.warn));
     }
     head.push(status);
+    let tab_row = area.y + head.len() as u16;
+    let mut places = vec![];
     let mut tabs = vec![Span::raw(" ")];
     for tab in Tab::ALL {
         let count = detail.and_then(|x| match tab {
@@ -61,6 +63,8 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
             None => format!(" {} ", tab.label()),
         };
         let style = if tab == d.tab { t.tab_active } else { t.dim };
+        let from = area.x + tabs.iter().map(Span::width).sum::<usize>() as u16;
+        places.push((tab, from, from + width_of(&label) as u16));
         tabs.push(Span::styled(label, style));
         tabs.push(Span::raw(" "));
     }
@@ -134,6 +138,10 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     layout.threads = threads;
     layout.checks = checks;
     layout.files = files;
+    layout.tabs = places;
+    layout.tab_row = tab_row;
+    layout.body = body;
+    layout.scroll = scroll;
 }
 
 fn overview(d: &PrDetail, w: usize, t: &Theme) -> Vec<Line<'static>> {

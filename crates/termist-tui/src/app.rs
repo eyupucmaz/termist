@@ -1922,11 +1922,30 @@ impl App {
     /// a click on the selected row opens it.
     fn prs_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let layout = self.pr_layout.borrow().clone();
+        let View::Prs(view) = &mut self.view else {
+            return vec![];
+        };
+        let diff = view
+            .detail
+            .as_ref()
+            .and_then(|d| self.pr_diffs.get(&d.pr))
+            .and_then(|(_, d)| d.as_ref());
+        if let MouseEventKind::ScrollDown | MouseEventKind::ScrollUp = ev.kind
+            && let Some(open) = view.detail.as_mut().and_then(|d| d.diff.as_mut())
+        {
+            let down = ev.kind == MouseEventKind::ScrollDown;
+            open.wheel(ev.column, ev.row, down, diff, &layout.diff);
+            return vec![];
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) && view.detail.is_some() {
+            view.click(ev.column, ev.row, diff, &layout);
+            return vec![];
+        }
         match ev.kind {
             MouseEventKind::ScrollDown => self.prs_key(press(KeyCode::Down)),
             MouseEventKind::ScrollUp => self.prs_key(press(KeyCode::Up)),
             MouseEventKind::Down(MouseButton::Left) => {
-                let layout = self.pr_layout.borrow().clone();
                 let View::Prs(view) = &mut self.view else {
                     return vec![];
                 };

@@ -171,6 +171,12 @@ pub struct PrLayout {
     /// The Files tab's paths, in the order shown.
     pub files: Vec<String>,
     pub diff: DiffArea,
+    /// The detail's tab names on screen (their columns) and their row.
+    pub tabs: Vec<(Tab, u16, u16)>,
+    pub tab_row: u16,
+    /// The detail's body on screen and the line shown at its top.
+    pub body: Rect,
+    pub scroll: usize,
 }
 
 /// A thread's first line in the conversation.
@@ -390,6 +396,49 @@ impl PrView {
             _ => {}
         }
         None
+    }
+
+    /// A click on the open pull request: a tab name, a thread to fold, a check, a
+    /// file (the selected one opens its diff), or a place in the diff.
+    pub fn click(&mut self, x: u16, y: u16, diff: Option<&PrDiff>, layout: &PrLayout) {
+        let Some(d) = self.detail.as_mut() else {
+            return;
+        };
+        if let Some(open) = &mut d.diff {
+            open.click(x, y, diff, &layout.diff);
+            return;
+        }
+        if y == layout.tab_row
+            && let Some((tab, ..)) = layout.tabs.iter().find(|(_, a, b)| (*a..*b).contains(&x))
+        {
+            d.tab = *tab;
+            d.scroll = 0;
+            return;
+        }
+        if !layout.body.contains(ratatui::layout::Position::new(x, y)) {
+            return;
+        }
+        let line = layout.scroll + (y - layout.body.y) as usize;
+        match d.tab {
+            Tab::Conversation => {
+                if let Some(a) = layout.threads.iter().find(|a| a.line == line)
+                    && !d.toggled.remove(&a.id)
+                {
+                    d.toggled.insert(a.id.clone());
+                }
+            }
+            Tab::Checks if line < layout.checks.len() => d.check = line,
+            Tab::Files => {
+                if let Some(path) = layout.files.get(line) {
+                    if d.file.as_ref() == Some(path) {
+                        d.open_diff(Some(path.clone()), diff);
+                    } else {
+                        d.file = Some(path.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn detail_key(

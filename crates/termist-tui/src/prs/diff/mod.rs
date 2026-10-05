@@ -323,6 +323,57 @@ impl DiffView {
         None
     }
 
+    /// A click: on the tree, that row (a file opens, a folder folds); on the diff, the
+    /// thread there folds or unfolds. The panel clicked is the one in use.
+    pub fn click(&mut self, x: u16, y: u16, diff: Option<&PrDiff>, area: &DiffArea) {
+        let at = ratatui::layout::Position::new(x, y);
+        if area.tree.contains(at) {
+            self.panel = Panel::Tree;
+            let Some(diff) = diff else {
+                return;
+            };
+            let i = area.tree_first + (y - area.tree.y) as usize;
+            let Some(row) = self.rows(diff).get(i).cloned() else {
+                return;
+            };
+            self.cursor = i;
+            match row.node {
+                Node::File { index, .. } => self.show(index, diff),
+                Node::Dir { path, .. } => {
+                    if !self.folded.remove(&path) {
+                        self.folded.insert(path);
+                    }
+                }
+            }
+        } else if area.body.contains(at) {
+            self.panel = Panel::Diff;
+            let line = self.scroll.min(area.end) + (y - area.body.y) as usize;
+            if let Some((_, id)) = area.threads.iter().find(|(l, _)| *l == line) {
+                let id = id.clone();
+                self.toggle(&id);
+            }
+        }
+    }
+
+    /// The wheel moves the panel under it: the tree's cursor, or the diff three lines.
+    pub fn wheel(&mut self, x: u16, y: u16, down: bool, diff: Option<&PrDiff>, area: &DiffArea) {
+        let at = ratatui::layout::Position::new(x, y);
+        if area.tree.contains(at) {
+            self.cursor = if down {
+                self.cursor + 1
+            } else {
+                self.cursor.saturating_sub(1)
+            };
+            self.clamp(diff);
+        } else if area.body.contains(at) {
+            self.scroll = if down {
+                (self.scroll + 3).min(area.end)
+            } else {
+                self.scroll.min(area.end).saturating_sub(3)
+            };
+        }
+    }
+
     /// Unfolds a folded thread, folds an open one.
     pub fn toggle(&mut self, id: &str) {
         if !self.opened.remove(id) {
