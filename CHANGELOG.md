@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 - 2026-10-05
 
 A pull request's diff in termist, and the mouse everywhere.
 
