@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use termist_core::github::{
-    GhState, PrDetail, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, rfc3339,
+    GhState, PrDetail, PrDiff, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, rfc3339,
 };
 use termist_core::status::now_ms;
 use termist_core::{ClientRequest, ProjectId, ProjectInfo, ServerEvent};
@@ -74,6 +74,23 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// The files and patches of one pull request at one head commit.
+    Diff {
+        gh: GhHandle,
+        pr: PrRef,
+        account: Account,
+        want: files::Want,
+    },
+    /// Marks a file viewed on GitHub, or not, as `client` asked.
+    MarkViewed {
+        gh: GhHandle,
+        pr: PrRef,
+        account: Account,
+        id: String,
+        path: String,
+        viewed: bool,
+        client: ClientId,
+    },
 }
 
 #[derive(Debug)]
@@ -103,6 +120,18 @@ pub enum Done {
     Detail {
         pr: PrRef,
         reply: Result<PrDetail, GhState>,
+    },
+    Diff {
+        pr: PrRef,
+        head_oid: String,
+        reply: Result<PrDiff, GhState>,
+    },
+    Marked {
+        pr: PrRef,
+        path: String,
+        viewed: bool,
+        client: ClientId,
+        reply: Result<(), GhState>,
     },
 }
 
@@ -951,6 +980,7 @@ impl GitHub {
                     }
                 }
             }
+            Done::Diff { .. } | Done::Marked { .. } => {}
         }
         fx
     }
