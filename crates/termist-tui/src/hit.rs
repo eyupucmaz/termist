@@ -10,6 +10,8 @@ pub struct Hits {
     pub tabs: Vec<(ProjectId, u16, u16)>,
     pub header: Rect,
     pub cards: Vec<(SessionId, Rect)>,
+    /// Where cards go: the wheel moves through them here.
+    pub cards_zone: Rect,
     /// `↑ n more` and `↓ n more`.
     pub above: Option<Rect>,
     pub below: Option<Rect>,
@@ -31,6 +33,10 @@ impl Hits {
             .iter()
             .find(|(_, r)| r.contains(Position::new(x, y)))
             .map(|(id, _)| *id)
+    }
+
+    pub fn over_cards(&self, x: u16, y: u16) -> bool {
+        self.cards_zone.contains(Position::new(x, y))
     }
 
     /// `-1` on the line above the cards, `1` on the one below.
@@ -55,6 +61,7 @@ mod tests {
             tabs: vec![(a, 10, 16), (b, 17, 24)],
             header: Rect::new(0, 0, 80, 1),
             cards: vec![(card, Rect::new(0, 1, 24, 4))],
+            cards_zone: Rect::new(0, 1, 80, 6),
             above: None,
             below: Some(Rect::new(0, 5, 24, 1)),
         };
@@ -66,5 +73,6 @@ mod tests {
         assert_eq!(hits.card_at(24, 4), None);
         assert_eq!(hits.more_at(3, 5), Some(1));
         assert_eq!(hits.more_at(3, 0), None);
+        assert!(hits.over_cards(70, 6) && !hits.over_cards(70, 7));
     }
 }

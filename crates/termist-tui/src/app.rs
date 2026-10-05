@@ -927,6 +927,25 @@ impl App {
                     };
                 }
                 self.toast_down = false;
+                if self.overlays.is_empty()
+                    && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
+                {
+                    let (card, more) = {
+                        let hits = self.hits.borrow();
+                        (
+                            hits.card_at(ev.column, ev.row),
+                            hits.more_at(ev.column, ev.row),
+                        )
+                    };
+                    if let Some(id) = card {
+                        return self.click_card(id);
+                    }
+                    if let Some(rows) = more {
+                        self.mode = Mode::Grid;
+                        self.move_by(rows * self.cards_per_row.max(1) as isize);
+                        return self.sync_attachment();
+                    }
+                }
                 if self.takes_mouse(ev) {
                     self.selection = self.attached.map(|id| Selection::new(id, self.in_pane(ev)));
                 }
@@ -946,11 +965,23 @@ impl App {
                 if std::mem::take(&mut self.toast_down) {
                     return vec![];
                 }
-                return self.copy_selection();
+                // A click on the pane, not a drag: into the session, as Enter.
+                let click = self.selection.as_ref().is_some_and(|s| s.anchor == s.head);
+                let actions = self.copy_selection();
+                if click && self.mode == Mode::Grid && self.view == View::Grid {
+                    return self.enter();
+                }
+                return actions;
             }
             _ => return vec![],
         };
         if !self.takes_mouse(ev) {
+            let cards = self.hits.borrow().over_cards(ev.column, ev.row);
+            if cards && self.overlays.is_empty() && self.mode == Mode::Grid {
+                let row = self.cards_per_row.max(1) as isize;
+                self.move_by(if up { -row } else { row });
+                return self.sync_attachment();
+            }
             return vec![];
         }
         let Some(id) = self.attached else {
@@ -975,6 +1006,21 @@ impl App {
             (false, true) => self.scroll_down(WHEEL_LINES),
             (false, false) => vec![],
         }
+    }
+
+    /// A card was clicked: it is selected, out of focus mode; a second click on the
+    /// selected card goes into it, as Enter.
+    fn click_card(&mut self, id: SessionId) -> Vec<Action> {
+        let focused = matches!(self.mode, Mode::Focus | Mode::FocusPrefix);
+        let again = !focused && self.selected == Some(id) && self.view == View::Grid;
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.select(id);
+        if again {
+            actions.extend(self.enter());
+        }
+        actions.extend(self.sync_attachment());
+        actions
     }
 
     /// A project tab was clicked: that project, as its number key would; out of focus

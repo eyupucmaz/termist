@@ -262,7 +262,9 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                 continue;
             }
             draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
+            app.hits.borrow_mut().cards.push((s.id, rect));
         }
+        app.hits.borrow_mut().cards_zone = areas.cards_zone;
         if areas.scroll_lines {
             let above = first * per_row;
             let below = sessions
@@ -282,6 +284,12 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                         Paragraph::new(format!("{arrow} {n} more")).style(app.theme.dim),
                         rect,
                     );
+                    let mut hits = app.hits.borrow_mut();
+                    if arrow == '↑' {
+                        hits.above = Some(rect);
+                    } else {
+                        hits.below = Some(rect);
+                    }
                 }
             }
         }
@@ -1825,6 +1833,79 @@ mod tests {
         let t = render(&mut app, 100, 20);
         click(&mut app, column_of(&t, 0, "web"), 0);
         assert_eq!((app.mode, app.project), (Mode::Grid, Some(web)));
+    }
+
+    fn mouse_at(app: &mut App, kind: ratatui::crossterm::event::MouseEventKind, x: u16, y: u16) {
+        app.on_mouse(ratatui::crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn a_card_click_selects_and_a_second_one_goes_in() {
+        let mut app = fixture();
+        let shell = app.state.sessions[1].id;
+        let t = render(&mut app, 60, 16);
+        let x = column_of(&t, 2, "shell-2");
+        click(&mut app, x, 2);
+        assert_eq!((app.selected, app.mode), (Some(shell), Mode::Grid));
+        render(&mut app, 60, 16);
+        click(&mut app, x, 2);
+        assert_eq!(app.mode, Mode::Focus);
+        let t = render(&mut app, 60, 16);
+        click(&mut app, column_of(&t, 2, "claude-1"), 2);
+        assert_eq!(
+            (app.selected, app.mode),
+            (Some(app.state.sessions[0].id), Mode::Grid),
+            "out of focus, onto the card clicked"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_pane_goes_in_and_a_drag_still_selects() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind as Kind};
+        let mut app = fixture();
+        let areas = layout(Rect::new(0, 0, 60, 16), 2, app.pane_position());
+        app.pane_area = areas.pane_inner;
+        render(&mut app, 60, 16);
+        let (x, y) = (areas.pane_inner.x + 1, areas.pane_inner.y);
+        mouse_at(&mut app, Kind::Down(MouseButton::Left), x, y);
+        mouse_at(&mut app, Kind::Drag(MouseButton::Left), x + 3, y);
+        mouse_at(&mut app, Kind::Up(MouseButton::Left), x + 3, y);
+        assert_eq!(app.mode, Mode::Grid, "a drag copies, it does not go in");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, Mode::Focus);
+    }
+
+    #[test]
+    fn the_wheel_and_the_more_lines_move_through_the_cards() {
+        use ratatui::crossterm::event::MouseEventKind as Kind;
+        let mut app = fixture();
+        let project = app.state.projects[0].id;
+        let mut state = app.state.clone();
+        for i in 3..=7 {
+            let mut s = state.sessions[1].clone();
+            s.id = SessionId::new();
+            s.project = project;
+            s.name = format!("shell-{i}");
+            state.sessions.push(s);
+        }
+        app.on_event(ServerEvent::State(state));
+        render(&mut app, 60, 16);
+        let first = app.selected;
+        mouse_at(&mut app, Kind::ScrollDown, 3, 3);
+        assert_eq!(app.selected, Some(app.state.sessions[2].id), "a row down");
+        mouse_at(&mut app, Kind::ScrollUp, 3, 3);
+        assert_eq!(app.selected, first);
+        let t = render(&mut app, 60, 16);
+        let below = (1..16)
+            .find(|y| screen(&t).lines().nth(*y as usize).unwrap().contains("↓"))
+            .unwrap();
+        click(&mut app, 3, below);
+        assert_eq!(app.selected, Some(app.state.sessions[2].id));
     }
 
     /// 212 open in Mercek on DealerFilter.tsx (thread T1 on its new line 42), the one
