@@ -1,0 +1,22 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 110, 18).backend()"
+---
+" termist pull requests   orbit-api ◆1✓1⇄1                                                               12:00 "
+" #212 Add a dealer filter to search                                                      unified · 3/4 viewed "
+"┌ files ──────────────────┐┌ src/search/DealerFilter.tsx  A  +3 −1 ──────────────────────────────────────────┐"
+"│ ▾ public/               ││ @@ -38,4 +38,6 @@ export function DealerFilter                                  │"
+"│   ✓ A logo.png          ││ 38 38 │     const dealers = useDealers();                                       │"
+"│ ▾ src/                  ││ 39 39 │     const [sel, setSel] = useState<string>();                           │"
+"│   ▾ api/                ││ 40    │ -   const label = 'All';                                                │"
+"│     ✓ M client.ts      1││    40 │ +   const label = sel ?? 'All';                                         │"
+"│   ▾ search/             ││    41 │ +   useEffect(() => fetchAll(), []);                                    │"
+"│       A DealerFilter.… 1││    42 │ +     return label;                                                     │"
+"│ ✓ M README.md           ││ ┃ ▸ carol +1 · open · This refetches on every mount, can we memoize?            │"
+"│                         ││ 41 43 │     return (                                                            │"
+"│                         ││                                                                                 │"
+"│                         ││                                                                                 │"
+"│                         ││                                                                                 │"
+"│                         ││                                                                                 │"
+"└─────────────────────────┘└─────────────────────────────────────────────────────────────────────────────────┘"
+"#212 · Tab panel · J/K file · {/} hunk · n/N thread · ^R viewed · s split · / search · b browser · Esc back   "

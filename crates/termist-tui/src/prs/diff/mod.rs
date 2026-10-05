@@ -2,6 +2,7 @@
 //! keeps the state and the keys; `view` draws it.
 pub mod render;
 pub mod tree;
+pub mod view;
 pub mod words;
 
 use super::PrAction;

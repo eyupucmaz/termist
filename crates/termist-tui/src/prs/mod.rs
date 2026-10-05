@@ -500,7 +500,10 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
     // thread anchors for the keys and the mouse.
     *app.pr_layout.borrow_mut() = PrLayout::default();
     match &view.detail {
-        Some(detail) => detail_view::draw(f, app, detail, area),
+        Some(detail) => match &detail.diff {
+            Some(open) => diff::view::draw(f, app, detail.pr, open, area),
+            None => detail_view::draw(f, app, detail, area),
+        },
         None => inbox_view::draw(f, app, view, area),
     }
 }
@@ -513,6 +516,19 @@ pub fn hint(app: &App, view: &PrView) -> String {
         return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
     }
     if let Some(d) = &view.detail {
+        if let Some(open) = &d.diff {
+            if open.typing {
+                return "type to search the paths · ↑/↓ choose · Enter keep · Esc clear".into();
+            }
+            let other = match app.config.diff.layout {
+                termist_core::config::DiffLayout::Unified => "split",
+                termist_core::config::DiffLayout::Split => "unified",
+            };
+            return format!(
+                "#{} · Tab panel · J/K file · {{/}} hunk · n/N thread · ^R viewed · s {other} · / search · b browser · Esc back",
+                d.pr.number
+            );
+        }
         if d.tab == Tab::Files {
             return format!(
                 "#{} · Tab section · j/k file · Enter diff · b browser · {} refresh · Esc list",

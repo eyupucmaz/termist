@@ -1742,6 +1742,111 @@ mod tests {
         assert!(text.contains("1m 12s"));
     }
 
+    /// 212 open in Mercek on DealerFilter.tsx (thread T1 on its new line 42), the one
+    /// file not viewed; client.ts (T2, resolved, on line 10), a binary logo and a README
+    /// are.
+    fn mercek_fixture() -> App {
+        use termist_core::github::{DiffFile, Patch, PrDiff, Viewed};
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let f = |path: &str, change: char, patch: Patch| DiffFile {
+            path: path.into(),
+            previous: None,
+            change,
+            additions: 3,
+            deletions: 1,
+            viewed: Viewed::Unviewed,
+            patch,
+            url: format!("https://github.com/acme/site/pull/212/files#diff-{path}"),
+        };
+        let mut diff = PrDiff {
+            head_oid: "h1".into(),
+            files: vec![
+                f(
+                    "src/search/DealerFilter.tsx",
+                    'A',
+                    Patch::Text(
+                        "@@ -38,4 +38,6 @@ export function DealerFilter\n   const dealers = useDealers();\n   const [sel, setSel] = useState<string>();\n-  const label = 'All';\n+  const label = sel ?? 'All';\n+  useEffect(() => fetchAll(), []);\n+\treturn label;\n   return (\n".into(),
+                    ),
+                ),
+                f(
+                    "src/api/client.ts",
+                    'M',
+                    Patch::Text("@@ -8,3 +8,4 @@\n a\n b\n+c\n d".into()),
+                ),
+                f("public/logo.png", 'A', Patch::Binary),
+                f(
+                    "README.md",
+                    'M',
+                    Patch::Text("@@ -1 +1 @@\n-old\n+new".into()),
+                ),
+            ],
+            more: 0,
+        };
+        for f in &mut diff.files[1..] {
+            f.viewed = Viewed::Viewed;
+        }
+        app.on_event(ServerEvent::PrDiff {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::Ok,
+            diff: Some(Box::new(diff)),
+        });
+        app
+    }
+
+    #[test]
+    fn mercek_unified_and_split() {
+        let mut app = mercek_fixture();
+        insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());
+        let layout = app.pr_layout.borrow().diff.clone();
+        assert_eq!(layout.hunks, [0]);
+        assert_eq!(
+            layout
+                .threads
+                .iter()
+                .map(|t| t.1.as_str())
+                .collect::<Vec<_>>(),
+            ["T1"]
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        insta::assert_snapshot!("mercek_split", render(&mut app, 150, 18).backend());
+        let narrow = screen(&render(&mut app, 110, 18));
+        assert!(narrow.contains("split · too narrow"), "{narrow}");
+    }
+
+    #[test]
+    fn mercek_on_a_narrow_screen_shows_one_panel() {
+        let mut app = mercek_fixture();
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(!text.contains(" files "), "the tree is hidden: {text}");
+        assert!(text.contains("DealerFilter.tsx"));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        insta::assert_snapshot!("mercek_tree_alone", render(&mut app, 80, 14).backend());
+    }
+
+    #[test]
+    fn mercek_opens_a_thread_and_tells_a_file_without_a_patch() {
+        let mut app = mercek_fixture();
+        render(&mut app, 110, 18);
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 24));
+        assert!(
+            text.contains("This refetches on every mount, can we memoize?"),
+            "{text}"
+        );
+        assert!(text.contains("Good catch, will fix."));
+        app.on_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(text.contains("logo.png"));
+        assert!(text.contains("binary file"), "{text}");
+    }
+
     #[test]
     fn n_jumps_to_the_open_thread_after_a_frame() {
         let mut app = pr_fixture();
