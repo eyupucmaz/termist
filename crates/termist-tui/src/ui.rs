@@ -2075,6 +2075,26 @@ mod tests {
     }
 
     #[test]
+    fn mercek_says_why_when_the_pull_request_cannot_be_read() {
+        let mut app = pr_fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        app.on_event(ServerEvent::PrDetail {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::NoAccess,
+            detail: None,
+        });
+        let text = screen(&render(&mut app, 110, 14));
+        assert!(
+            text.contains("No logged-in account can see this repo."),
+            "{text}"
+        );
+        assert!(!text.contains("Reading the diff"));
+    }
+
+    #[test]
     fn mercek_unified_and_split() {
         let mut app = mercek_fixture();
         insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());

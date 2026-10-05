@@ -288,6 +288,9 @@ pub struct GitHub {
     diff_flying: HashSet<PrRef>,
     /// The head whose diff could not be read: not tried again until a refresh.
     diff_failed: HashMap<PrRef, String>,
+    /// Diffs to read again although read at this head (`R`); the one read stays
+    /// shown until the new one comes.
+    diff_stale: HashSet<PrRef>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
@@ -321,6 +324,7 @@ impl GitHub {
             diffs: vec![],
             diff_flying: HashSet::new(),
             diff_failed: HashMap::new(),
+            diff_stale: HashSet::new(),
             slow_until: HashMap::new(),
             seen,
         }
@@ -614,7 +618,7 @@ impl GitHub {
                     if diff {
                         // Read again even at the same head.
                         self.diff_failed.remove(&pr);
-                        self.diffs.retain(|(p, _)| *p != pr);
+                        self.diff_stale.insert(pr);
                     }
                 }
             }
@@ -785,7 +789,8 @@ impl GitHub {
                 continue;
             };
             let head = &detail.head_oid;
-            let read = self.cached_diff(pr).is_some_and(|d| d.head_oid == *head);
+            let read = !self.diff_stale.contains(&pr)
+                && self.cached_diff(pr).is_some_and(|d| d.head_oid == *head);
             if read || self.diff_flying.contains(&pr) || self.diff_failed.get(&pr) == Some(head) {
                 continue;
             }
@@ -1145,6 +1150,7 @@ impl GitHub {
                 reply,
             } => {
                 self.diff_flying.remove(&pr);
+                self.diff_stale.remove(&pr);
                 let state = match reply {
                     Ok(diff) => {
                         self.diff_failed.remove(&pr);
@@ -2398,6 +2404,54 @@ mod tests {
             project: w.projects[0].id,
         });
         assert_eq!(diff_jobs(&w.tick()), ["h2"]);
+    }
+
+    #[test]
+    fn a_refresh_that_fails_keeps_the_diff_on_screen() {
+        let (mut w, pr) = looking(true);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.tick();
+        w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Ok(diff_at("h1")),
+        });
+        w.request(ClientRequest::RefreshPrs {
+            project: w.projects[0].id,
+        });
+        assert_eq!(diff_jobs(&w.tick()), ["h1"], "read again at the same head");
+        let fx = w.done(Done::Diff {
+            pr,
+            head_oid: "h1".into(),
+            reply: Err(GhState::Failed("HTTP 502".into())),
+        });
+        assert!(matches!(
+            &fx.events[..],
+            [(_, ServerEvent::PrDiff { state: GhState::Failed(_), diff: Some(d), .. })] if d.head_oid == "h1"
+        ));
+        assert!(diff_jobs(&w.tick()).is_empty(), "not again until asked");
+        let other = ClientId(2);
+        w.join(other);
+        let fx = w.gh.request(
+            other,
+            ClientRequest::SetPrFocus {
+                project: None,
+                pr: Some(pr),
+                diff: true,
+            },
+            &w.store,
+            &w.projects,
+            w.now,
+        );
+        assert!(
+            fx.events
+                .iter()
+                .any(|(_, e)| matches!(e, ServerEvent::PrDiff { diff: Some(_), .. })),
+            "the diff read before is still there for a newcomer"
+        );
     }
 
     #[test]

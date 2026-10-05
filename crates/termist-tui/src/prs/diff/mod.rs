@@ -194,12 +194,13 @@ impl DiffView {
                 KeyCode::Enter => self.typing = false,
                 KeyCode::Backspace => {
                     self.query.pop();
+                    self.cursor = self.first_file(diff);
                 }
                 KeyCode::Down => self.cursor += 1,
                 KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
                 KeyCode::Char(c) if !ctrl => {
                     self.query.push(c);
-                    self.cursor = 0;
+                    self.cursor = self.first_file(diff);
                 }
                 _ => {}
             }
@@ -379,6 +380,13 @@ impl DiffView {
         if !self.opened.remove(id) {
             self.opened.insert(id.to_string());
         }
+    }
+
+    /// The first file row of the tree as it is now: where a search lands, so Enter
+    /// opens what was searched for rather than folding its folder.
+    fn first_file(&self, diff: Option<&PrDiff>) -> usize {
+        diff.and_then(|d| self.rows(d).iter().position(|r| r.file().is_some()))
+            .unwrap_or(0)
     }
 
     /// Keeps the tree's cursor on a row.
@@ -590,6 +598,29 @@ mod tests {
         assert_eq!(
             key(&mut v, K::Esc),
             Some(DiffAction::Back(Some("README.md".into())))
+        );
+    }
+
+    #[test]
+    fn a_search_lands_on_the_first_matching_file_not_its_folder() {
+        let mut v = DiffView::new(Some("README.md".into()));
+        key(&mut v, K::Char('/'));
+        for c in "client".chars() {
+            key(&mut v, K::Char(c));
+        }
+        let rows = v.rows(&diff());
+        assert_eq!(
+            rows[v.cursor].file(),
+            Some(3),
+            "src/api/client.ts, under src/api/"
+        );
+        key(&mut v, K::Enter);
+        key(&mut v, K::Enter);
+        assert_eq!(v.file.as_deref(), Some("src/api/client.ts"));
+        key(&mut v, K::Backspace);
+        assert!(
+            v.rows(&diff())[v.cursor].file().is_some(),
+            "and again as it changes"
         );
     }
 

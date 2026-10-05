@@ -35,7 +35,7 @@ pub const SPLIT_FROM: u16 = 100;
 const TAB: &str = "    ";
 
 /// A file's lines as drawn, with where its hunks and threads start.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Drawn {
     lines: Vec<Line<'static>>,
     hunks: Vec<usize>,
@@ -58,9 +58,15 @@ pub fn layout(want: DiffLayout, width: u16) -> (DiffLayout, &'static str) {
 pub fn draw(f: &mut Frame, app: &App, pr: PrRef, view: &DiffView, area: Rect) {
     let t = &app.theme;
     let detail = app.pr_details.get(&pr).and_then(|(_, d)| d.as_ref());
+    // Before the first diff, the pull request's own trouble: no detail, no diff.
     let (state, diff) = match app.pr_diffs.get(&pr) {
         Some((state, diff)) => (state.clone(), diff.as_ref()),
-        None => (GhState::Ok, None),
+        None => (
+            app.pr_details
+                .get(&pr)
+                .map_or(GhState::Ok, |(state, _)| state.clone()),
+            None,
+        ),
     };
     if area.height < 3 {
         return;
@@ -351,33 +357,35 @@ fn draw_diff(
     )
         .hash(&mut hasher);
     let key = hasher.finish();
-    let drawn = KEPT.with(|k| match &*k.borrow() {
-        Some((kept, drawn)) if *kept == key => Some(drawn.clone()),
-        _ => None,
-    });
-    let drawn = drawn.unwrap_or_else(|| {
-        let drawn = lines(
-            text,
-            layout,
-            &threads,
-            &view.opened,
-            width,
-            view.hscroll,
-            t,
-            app.now_secs(),
-        );
-        KEPT.with(|k| *k.borrow_mut() = Some((key, drawn.clone())));
-        drawn
-    });
     let page = inner.height as usize;
-    let end = drawn.lines.len().saturating_sub(page);
-    let scroll = view.scroll.min(end);
-    let shown: Vec<Line> = drawn.lines.into_iter().skip(scroll).take(page).collect();
+    // The file's lines stay in the cache; a frame copies only the page it shows.
+    let (shown, end, hunks, threads) = KEPT.with(|k| {
+        let mut kept = k.borrow_mut();
+        let stale = !matches!(&*kept, Some((at, _)) if *at == key);
+        if stale {
+            let drawn = lines(
+                text,
+                layout,
+                &threads,
+                &view.opened,
+                width,
+                view.hscroll,
+                t,
+                app.now_secs(),
+            );
+            *kept = Some((key, drawn));
+        }
+        let drawn = &kept.as_ref().expect("filled above").1;
+        let end = drawn.lines.len().saturating_sub(page);
+        let scroll = view.scroll.min(end);
+        let shown: Vec<Line> = drawn.lines[scroll..].iter().take(page).cloned().collect();
+        (shown, end, drawn.hunks.clone(), drawn.threads.clone())
+    });
     f.render_widget(Paragraph::new(shown), inner);
     out.end = end;
     out.page = page;
-    out.hunks = drawn.hunks;
-    out.threads = drawn.threads;
+    out.hunks = hunks;
+    out.threads = threads;
 }
 
 /// `text` with its `words` in `word` and the rest in `base`, tabs as spaces.

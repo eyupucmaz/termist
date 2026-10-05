@@ -693,14 +693,26 @@ impl App {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
             ServerEvent::PrDiff { pr, state, diff } => {
-                let diff = diff.map(|d| *d);
+                // A failed read brings no diff: the one shown stays, with the failure.
+                let diff = diff
+                    .map(|d| *d)
+                    .or_else(|| self.pr_diffs.remove(&pr).and_then(|(_, d)| d));
                 if let (View::Prs(view), Some(diff)) = (&mut self.view, &diff)
                     && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
                     && let Some(open) = &mut d.diff
                 {
                     open.settle(diff);
                 }
-                self.pr_diffs.insert(pr, (state, diff));
+                // Only the open diff is kept (each may be megabytes); the daemon sends a
+                // diff again to whoever comes back to it.
+                let open = match &self.view {
+                    View::Prs(v) => v.detail.as_ref().filter(|d| d.diff.is_some()).map(|d| d.pr),
+                    _ => None,
+                };
+                self.pr_diffs.retain(|p, _| Some(*p) == open);
+                if open == Some(pr) {
+                    self.pr_diffs.insert(pr, (state, diff));
+                }
             }
             ServerEvent::PrWriteFailed { pr, message } => {
                 if let View::Prs(view) = &mut self.view
@@ -6191,6 +6203,58 @@ mod tests {
                 key: "diff.layout",
                 value: "split".into()
             })]
+        );
+    }
+
+    #[test]
+    fn a_failed_read_without_a_diff_keeps_the_one_shown() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Failed("HTTP 502".into()),
+            diff: None,
+        });
+        let (state, diff) = &app.pr_diffs[&pr_212()];
+        assert_eq!(*state, GhState::Failed("HTTP 502".into()));
+        assert!(diff.is_some(), "the failure is told, the diff stays");
+    }
+
+    #[test]
+    fn only_the_open_diff_is_kept() {
+        let (mut app, s) = app();
+        with_prs(&mut app, s[0].project);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('d')));
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_212(),
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('d')));
+        let pr_209 = PrRef {
+            number: 209,
+            ..pr_212()
+        };
+        app.on_event(ServerEvent::PrDiff {
+            pr: pr_209,
+            state: GhState::Ok,
+            diff: Some(Box::new(diff_of_212())),
+        });
+        assert_eq!(
+            app.pr_diffs.keys().collect::<Vec<_>>(),
+            [&pr_209],
+            "a diff of up to 8 MB is not kept once left; the daemon sends it again"
         );
     }
 
