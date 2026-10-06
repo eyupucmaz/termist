@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.3-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.1.4-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,10 +28,11 @@
 </div>
 
 > [!NOTE]
-> **termist 0.1.3 is out**: a pull request's diff with `d`, as a file tree beside unified or side by
-> side changes, with its line comments and files marked viewed on GitHub; and the mouse everywhere. On
-> top of 0.1.2's pull requests (`v`), 0.1.1's toasts, status line and themes, and 0.1.0's scenes,
-> sounds, settings and scrolling back. It is used every day by its author; please
+> **termist 0.1.4 is out**: write to a pull request without leaving it: comments, replies, line and
+> range comments with suggestions, and your review sent as Comment, Approve or Request changes. The
+> pane goes on any side, with the cards in one column beside it. On top of 0.1.3's diff and mouse,
+> 0.1.2's pull requests (`v`), 0.1.1's toasts, status line and themes, and 0.1.0's scenes, sounds,
+> settings and scrolling back. It is used every day by its author; please
 > [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
 
 ## Why termist

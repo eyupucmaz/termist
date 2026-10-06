@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-10-06
 
 Writing to pull requests from termist, and the pane on any side.
 
