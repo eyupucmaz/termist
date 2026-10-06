@@ -1,6 +1,6 @@
 //! What each job does: the gh calls, on a blocking thread.
 use super::gh::{self, GhHandle};
-use super::{Done, Job, Slug, accounts, files, query, repos};
+use super::{Done, Job, Slug, accounts, files, query, repos, write};
 use std::sync::Arc;
 use termist_core::github::GhState;
 
@@ -96,6 +96,21 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             reply: files::fetch(&*gh.0, &account.token, &want),
             head_oid: want.head_oid,
         },
+        Job::Write {
+            gh,
+            pr,
+            account,
+            at,
+            write: w,
+            client,
+            ticket,
+        } => Done::Written {
+            pr,
+            client,
+            ticket,
+            what: write::what(&w),
+            reply: write::send(&*gh.0, &account.token, &w, &at),
+        },
         Job::MarkViewed {
             gh,
             pr,
@@ -149,6 +164,19 @@ pub fn failed(job: &Job) -> Done {
         Job::Diff { pr, want, .. } => Done::Diff {
             pr: *pr,
             head_oid: want.head_oid.clone(),
+            reply: Err(why()),
+        },
+        Job::Write {
+            pr,
+            write: w,
+            client,
+            ticket,
+            ..
+        } => Done::Written {
+            pr: *pr,
+            client: *client,
+            ticket: *ticket,
+            what: write::what(w),
             reply: Err(why()),
         },
         Job::MarkViewed {
@@ -471,6 +499,44 @@ mod tests {
                 want: want(),
             }),
             Done::Diff { reply: Err(_), ref head_oid, .. } if head_oid == "h1"
+        ));
+    }
+
+    #[test]
+    fn a_write_job_writes_as_its_account_and_says_what_it_was() {
+        let fake = FakeGh::new(|_| ok(r#"{"data":{"addComment":{"clientMutationId":null}}}"#));
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let client = crate::session::ClientId(3);
+        let job = |gh: GhHandle| Job::Write {
+            gh,
+            pr,
+            account: account("alice", true),
+            at: write::Spot {
+                id: "PR_1".into(),
+                owner: "acme".into(),
+                name: "site".into(),
+                number: 212,
+            },
+            write: termist_core::github::PrWrite::Comment { body: "hi".into() },
+            client,
+            ticket: 5,
+        };
+        let done = run(job(GhHandle(fake.clone())), &(Arc::new(|| None) as Locate));
+        assert!(matches!(
+            done,
+            Done::Written { ticket: 5, client: c, what: "post your comment", reply: Ok(()), .. } if c == client
+        ));
+        assert_eq!(fake.calls()[0].token.as_deref(), Some("tok-alice"));
+        assert!(matches!(
+            failed(&job(GhHandle(fake))),
+            Done::Written {
+                ticket: 5,
+                reply: Err(_),
+                ..
+            }
         ));
     }
 

@@ -19,11 +19,13 @@ use accounts::{Account, Permission};
 use gh::GhHandle;
 use poller::Beat;
 use repos::LocalRepo;
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use termist_core::github::{
-    GhState, PrDetail, PrDiff, PrRef, PrSummary, RepoId, RepoInfo, RepoPrs, Viewed, rfc3339,
+    GhState, PrDetail, PrDiff, PrRef, PrSummary, PrWrite, RepoId, RepoInfo, RepoPrs, Viewed,
+    rfc3339,
 };
 use termist_core::status::now_ms;
 use termist_core::{ClientRequest, ProjectId, ProjectInfo, ServerEvent};
@@ -84,6 +86,16 @@ pub enum Job {
         account: Account,
         want: files::Want,
     },
+    /// Writes to a pull request, as `client` asked under `ticket`.
+    Write {
+        gh: GhHandle,
+        pr: PrRef,
+        account: Account,
+        at: write::Spot,
+        write: PrWrite,
+        client: ClientId,
+        ticket: u64,
+    },
     /// Marks a file viewed on GitHub, or not, as `client` asked.
     MarkViewed {
         gh: GhHandle,
@@ -128,6 +140,14 @@ pub enum Done {
         pr: PrRef,
         head_oid: String,
         reply: Result<PrDiff, GhState>,
+    },
+    Written {
+        pr: PrRef,
+        client: ClientId,
+        ticket: u64,
+        /// What it was, for "couldn't …".
+        what: &'static str,
+        reply: Result<(), GhState>,
     },
     Marked {
         pr: PrRef,
@@ -292,6 +312,10 @@ pub struct GitHub {
     /// Diffs to read again although read at this head (`R`); the one read stays
     /// shown until the new one comes.
     diff_stale: HashSet<PrRef>,
+    /// Writes waiting, per pull request: one runs at a time, so two line comments
+    /// never open two pending reviews.
+    writes: HashMap<PrRef, VecDeque<(ClientId, u64, PrWrite)>>,
+    writing: HashSet<PrRef>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
@@ -326,6 +350,8 @@ impl GitHub {
             diff_flying: HashSet::new(),
             diff_failed: HashMap::new(),
             diff_stale: HashSet::new(),
+            writes: HashMap::new(),
+            writing: HashSet::new(),
             slow_until: HashMap::new(),
             seen,
         }
@@ -623,6 +649,26 @@ impl GitHub {
                     }
                 }
             }
+            ClientRequest::WritePr { pr, ticket, write } => {
+                let known =
+                    self.cached(pr).is_some_and(|d| !d.id.is_empty()) && self.ready().is_some();
+                if !known {
+                    fx.send(
+                        To::One(client),
+                        ServerEvent::PrWriteFailed {
+                            pr,
+                            ticket: Some(ticket),
+                            message: format!("couldn't {} · not loaded yet", write::what(&write)),
+                        },
+                    );
+                    return fx;
+                }
+                self.writes
+                    .entry(pr)
+                    .or_default()
+                    .push_back((client, ticket, write));
+                self.next_write(pr, &mut fx);
+            }
             ClientRequest::SetFileViewed { pr, path, viewed } => {
                 let job = (|| {
                     let (gh, accounts) = self.ready()?;
@@ -753,6 +799,56 @@ impl GitHub {
 
     fn cached(&self, pr: PrRef) -> Option<&PrDetail> {
         self.details.iter().find(|(p, _)| *p == pr).map(|(_, d)| d)
+    }
+
+    /// Starts the next write waiting on `pr`, unless one is running. One that cannot
+    /// start (the accounts went, the repo lost its reader) is answered at once and the
+    /// next one tried.
+    fn next_write(&mut self, pr: PrRef, fx: &mut Effects) {
+        if self.writing.contains(&pr) {
+            return;
+        }
+        while let Some((client, ticket, write)) =
+            self.writes.get_mut(&pr).and_then(VecDeque::pop_front)
+        {
+            let job = (|| {
+                let (gh, accounts) = self.ready()?;
+                let detail = self.cached(pr).filter(|d| !d.id.is_empty())?;
+                let r = self.repo(pr.repo)?;
+                let login = r.account()?;
+                let account = accounts.into_iter().find(|a| a.login == login)?;
+                Some(Job::Write {
+                    gh,
+                    pr,
+                    account,
+                    at: write::Spot {
+                        id: detail.id.clone(),
+                        owner: r.stored.owner.clone(),
+                        name: r.stored.name.clone(),
+                        number: pr.number,
+                    },
+                    write: write.clone(),
+                    client,
+                    ticket,
+                })
+            })();
+            match job {
+                Some(job) => {
+                    self.writing.insert(pr);
+                    fx.jobs.push(job);
+                    return;
+                }
+                None => fx.send(
+                    To::One(client),
+                    ServerEvent::PrWriteFailed {
+                        pr,
+                        ticket: Some(ticket),
+                        message: format!("couldn't {} · not loaded yet", write::what(&write)),
+                    },
+                ),
+            }
+        }
+        self.writes.remove(&pr);
     }
 
     fn cached_diff(&self, pr: PrRef) -> Option<&PrDiff> {
@@ -1170,6 +1266,31 @@ impl GitHub {
                     diff: self.cached_diff(pr).cloned().map(Box::new),
                 };
                 self.to_diff_watchers(pr, event, &mut fx);
+            }
+            Done::Written {
+                pr,
+                client,
+                ticket,
+                what,
+                reply,
+            } => {
+                self.writing.remove(&pr);
+                match reply {
+                    Ok(()) => {
+                        fx.send(To::One(client), ServerEvent::PrWritten { pr, ticket });
+                        // Show what was written as GitHub has it now.
+                        self.detail_beats.entry(pr).or_default().hurry(now);
+                    }
+                    Err(state) => fx.send(
+                        To::One(client),
+                        ServerEvent::PrWriteFailed {
+                            pr,
+                            ticket: Some(ticket),
+                            message: format!("couldn't {what} · {}", said(&state)),
+                        },
+                    ),
+                }
+                self.next_write(pr, &mut fx);
             }
             Done::Marked {
                 pr,
@@ -2582,6 +2703,116 @@ mod tests {
                     pr,
                     ticket: None,
                     message: "couldn't mark DealerFilter.tsx unviewed · Resource not accessible by integration".into(),
+                }
+            )]
+        );
+    }
+
+    /// A comment on `pr` asked under `ticket`.
+    fn comment_on(pr: PrRef, ticket: u64) -> ClientRequest {
+        ClientRequest::WritePr {
+            pr,
+            ticket,
+            write: PrWrite::Comment { body: "hi".into() },
+        }
+    }
+
+    fn write_jobs(fx: &Effects) -> Vec<(u64, String, String)> {
+        fx.jobs
+            .iter()
+            .filter_map(|j| match j {
+                Job::Write {
+                    ticket,
+                    account,
+                    at,
+                    ..
+                } => Some((
+                    *ticket,
+                    account.login.clone(),
+                    format!("{}/{}#{} {}", at.owner, at.name, at.number, at.id),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_write_runs_as_the_reader_one_at_a_time_and_answers_its_ticket() {
+        let (mut w, pr) = looking(false);
+        let fx = w.request(comment_on(pr, 1));
+        assert_eq!(
+            fx.events,
+            [(
+                To::One(w.client),
+                ServerEvent::PrWriteFailed {
+                    pr,
+                    ticket: Some(1),
+                    message: "couldn't post your comment · not loaded yet".into(),
+                }
+            )]
+        );
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        let fx = w.request(comment_on(pr, 2));
+        assert_eq!(
+            write_jobs(&fx),
+            [(2, "work".to_string(), "acme/site#212 PR_212".to_string())]
+        );
+        assert!(
+            write_jobs(&w.request(comment_on(pr, 3))).is_empty(),
+            "one at a time"
+        );
+        let fx = w.done(Done::Written {
+            pr,
+            client: w.client,
+            ticket: 2,
+            what: "post your comment",
+            reply: Ok(()),
+        });
+        assert!(
+            fx.events
+                .contains(&(To::One(w.client), ServerEvent::PrWritten { pr, ticket: 2 }))
+        );
+        assert_eq!(write_jobs(&fx).len(), 1, "then the next");
+        assert!(
+            w.tick()
+                .jobs
+                .iter()
+                .any(|j| matches!(j, Job::Detail { pr: p, .. } if *p == pr)),
+            "what was written is read back at once"
+        );
+    }
+
+    #[test]
+    fn a_refused_write_tells_only_the_writer() {
+        let (mut w, pr) = looking(false);
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail_at("h1")),
+        });
+        w.join(ClientId(2));
+        w.request(comment_on(pr, 4));
+        let fx = w.done(Done::Written {
+            pr,
+            client: w.client,
+            ticket: 4,
+            what: "send your review",
+            reply: Err(GhState::Failed(
+                "Review Can not approve your own pull request".into(),
+            )),
+        });
+        assert_eq!(
+            fx.events,
+            [(
+                To::One(w.client),
+                ServerEvent::PrWriteFailed {
+                    pr,
+                    ticket: Some(4),
+                    message:
+                        "couldn't send your review · Review Can not approve your own pull request"
+                            .into(),
                 }
             )]
         );
