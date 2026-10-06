@@ -7,7 +7,7 @@ use crate::overlay::{
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
 use crate::prs::compose::{Compose, ComposeAction, Sending, Target};
-use crate::prs::{self, PrAction, PrLayout, PrView, ProjectPrs};
+use crate::prs::{self, Ask, Mine, PrAction, PrLayout, PrView, ProjectPrs, Subject};
 use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
-use termist_core::github::{GhState, PrDetail, PrDiff, PrRef, RepoInfo};
+use termist_core::github::{CommentKind, GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -56,6 +56,8 @@ pub enum Mode {
     ConfirmClose(ProjectId),
     /// `a` was pressed on this session; `y` / Enter archives it.
     ConfirmArchive(SessionId),
+    /// `D` was pressed on a comment of yours (`App::deleting`); `y` / Enter deletes it.
+    ConfirmDelete,
 }
 
 /// What the body shows: the grid of cards, the archived cards, or pull requests.
@@ -194,8 +196,10 @@ pub struct App {
     pub pr_diffs: HashMap<PrRef, (GhState, Option<PrDiff>)>,
     /// Words written to a pull request and not sent yet, by what they go to.
     pub drafts: HashMap<(PrRef, Target), String>,
-    /// Writes on their way, by ticket: what to forget once GitHub took them.
-    writes: HashMap<u64, (PrRef, Target)>,
+    /// Writes on their way, by ticket: the draft to forget once GitHub took them.
+    writes: HashMap<u64, Option<(PrRef, Target)>>,
+    /// The comment `D` asked to delete, waiting for a yes.
+    pub deleting: Option<(PrRef, String, CommentKind)>,
     next_ticket: u64,
     /// Where the last frame put the PR view's rows and threads.
     pub pr_layout: RefCell<PrLayout>,
@@ -297,6 +301,7 @@ impl App {
             pr_diffs: HashMap::new(),
             drafts: HashMap::new(),
             writes: HashMap::new(),
+            deleting: None,
             next_ticket: 0,
             pr_layout: RefCell::default(),
             hits: RefCell::default(),
@@ -724,7 +729,7 @@ impl App {
                 }
             }
             ServerEvent::PrWritten { ticket, .. } => {
-                if let Some(target) = self.writes.remove(&ticket) {
+                if let Some(Some(target)) = self.writes.remove(&ticket) {
                     self.drafts.remove(&target);
                 }
                 if matches!(self.overlays.last(), Some(Overlay::Compose(c)) if c.state == Sending::Sending(ticket))
@@ -848,6 +853,16 @@ impl App {
                 self.mode = Mode::Grid;
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
                     return vec![Action::Send(ClientRequest::ArchiveSession { session })];
+                }
+                return vec![];
+            }
+            Mode::ConfirmDelete => {
+                self.mode = Mode::Grid;
+                let deleting = self.deleting.take();
+                if let Some((pr, comment, kind)) = deleting
+                    && matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+                {
+                    return self.write_now(pr, PrWrite::Delete { comment, kind });
                 }
                 return vec![];
             }
@@ -1235,6 +1250,138 @@ impl App {
         })]
     }
 
+    /// Sends a write that needs no words (resolving, deleting) under a new ticket.
+    fn write_now(&mut self, pr: PrRef, write: PrWrite) -> Vec<Action> {
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        self.writes.insert(ticket, None);
+        vec![Action::Send(ClientRequest::WritePr { pr, ticket, write })]
+    }
+
+    /// A write a key asked for, made whole with what the pull request's detail says:
+    /// who started a thread, what GitHub allows, your comment, your pending review.
+    fn ask(&mut self, ask: Ask) -> Vec<Action> {
+        let View::Prs(view) = &self.view else {
+            return vec![];
+        };
+        let Some(pr) = view.detail.as_ref().map(|d| d.pr) else {
+            return vec![];
+        };
+        let Some(detail) = self.pr_details.get(&pr).and_then(|(_, d)| d.as_ref()) else {
+            self.message = Some("the pull request is not read yet".into());
+            return vec![];
+        };
+        let thread = |id: &str| detail.threads.iter().find(|t| t.id == id).cloned();
+        // Your comment in question: the one named, or your last one in the thread.
+        let mine = |s: &Subject| match s {
+            Subject::Comment(m) => Some(m.clone()),
+            Subject::Thread(id) => {
+                thread(id)?
+                    .comments
+                    .iter()
+                    .rev()
+                    .find(|c| c.mine)
+                    .map(|c| Mine {
+                        id: c.id.clone(),
+                        kind: CommentKind::Review,
+                        body: c.body.clone(),
+                        can_edit: c.can_edit,
+                        can_delete: c.can_delete,
+                    })
+            }
+        };
+        let pending = detail
+            .threads
+            .iter()
+            .flat_map(|t| &t.comments)
+            .filter(|c| c.pending && c.mine)
+            .count();
+        let own = detail.mine;
+        let refuse = |app: &mut App, why: &str| {
+            app.message = Some(why.into());
+            vec![]
+        };
+        match ask {
+            Ask::Comment => self.open_compose(Compose::new(pr, Target::Comment, "")),
+            Ask::Submit => {
+                let mut c = Compose::new(pr, Target::Submit, "");
+                c.mine = own;
+                c.pending = pending;
+                self.open_compose(c);
+            }
+            Ask::Line { path, target } => {
+                let mut c = Compose::new(
+                    pr,
+                    Target::Line {
+                        path,
+                        side: target.side,
+                        line: target.line,
+                        start: target.start,
+                    },
+                    "",
+                );
+                c.context = target.context;
+                c.suggest = target.new;
+                self.open_compose(c);
+            }
+            Ask::Reply { thread: id } => {
+                let Some(th) = thread(&id) else {
+                    return refuse(self, "that thread is gone");
+                };
+                if !th.can_reply {
+                    return refuse(self, "GitHub does not let you reply here");
+                }
+                let to = th
+                    .comments
+                    .first()
+                    .map_or("the thread".to_string(), |c| c.author.clone());
+                self.open_compose(Compose::new(pr, Target::Reply { thread: id, to }, ""));
+            }
+            Ask::Resolve { thread: id } => {
+                let Some(th) = thread(&id) else {
+                    return refuse(self, "that thread is gone");
+                };
+                if !th.can_resolve {
+                    return refuse(self, "GitHub does not let you resolve this (yet)");
+                }
+                return self.write_now(
+                    pr,
+                    PrWrite::Resolve {
+                        thread: id,
+                        resolved: !th.resolved,
+                    },
+                );
+            }
+            Ask::Edit(subject) => {
+                let Some(m) = mine(&subject) else {
+                    return refuse(self, "not your comment");
+                };
+                if !m.can_edit {
+                    return refuse(self, "GitHub does not let you edit this");
+                }
+                self.open_compose(Compose::new(
+                    pr,
+                    Target::Edit {
+                        comment: m.id,
+                        kind: m.kind,
+                    },
+                    &m.body,
+                ));
+            }
+            Ask::Delete(subject) => {
+                let Some(m) = mine(&subject) else {
+                    return refuse(self, "not your comment");
+                };
+                if !m.can_delete {
+                    return refuse(self, "GitHub does not let you delete this");
+                }
+                self.deleting = Some((pr, m.id, m.kind));
+                self.mode = Mode::ConfirmDelete;
+            }
+        }
+        vec![]
+    }
+
     /// Opens the box for `compose`, on the draft its target has if there is one.
     pub fn open_compose(&mut self, mut compose: Compose) {
         if let Some(draft) = self.drafts.get(&(compose.pr, compose.target.clone())) {
@@ -1271,7 +1418,7 @@ impl App {
                 let pr = c.pr;
                 let key = (pr, c.target.clone());
                 self.drafts.insert(key.clone(), c.input.text().to_string());
-                self.writes.insert(ticket, key);
+                self.writes.insert(ticket, Some(key));
                 vec![Action::Send(ClientRequest::WritePr { pr, ticket, write })]
             }
         }
@@ -2138,7 +2285,8 @@ impl App {
         };
         let typing =
             matches!(&self.view, View::Prs(v) if v.typing) || diff.is_some_and(|d| d.typing);
-        // In the diff `s` turns it unified or split; the settings stay a key away.
+        // In the diff `s` turns it unified or split and `v` chooses lines; the
+        // settings and the grid stay a key away.
         let settings = diff.is_none();
         if !typing {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -2146,7 +2294,7 @@ impl App {
                 return vec![];
             }
             match self.keymap.action(Context::Grid, &key) {
-                Some(KeyAction::Settings) if !settings => {}
+                Some(KeyAction::Settings | KeyAction::PullRequests) if !settings => {}
                 Some(
                     action @ (KeyAction::PullRequests
                     | KeyAction::RefreshGitHub
@@ -2191,6 +2339,11 @@ impl App {
                     path,
                     viewed,
                 })]
+            }
+            Some(PrAction::Ask(ask)) => self.ask(ask),
+            Some(PrAction::Note(why)) => {
+                self.message = Some(why.into());
+                vec![]
             }
             Some(PrAction::FlipLayout) => {
                 self.config.diff.layout = self.config.diff.layout.other();

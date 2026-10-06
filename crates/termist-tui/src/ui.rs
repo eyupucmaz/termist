@@ -599,6 +599,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 t.warn,
             )
         }
+        (_, Mode::ConfirmDelete) => (
+            "Delete your comment? GitHub keeps no copy.  y / Enter: delete · any key: keep it"
+                .into(),
+            t.warn,
+        ),
         (_, Mode::ConfirmArchive(id)) => {
             let session = app.state.sessions.iter().find(|s| s.id == id);
             let name = session.map_or("this session", |s| s.display_name());
@@ -2179,6 +2184,198 @@ mod tests {
         review.pending = 3;
         app.open_compose(review);
         insta::assert_snapshot!("compose_review", render(&mut app, 90, 16).backend());
+    }
+
+    fn press(app: &mut App, c: char) -> Vec<crate::app::Action> {
+        let mods = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char(c), mods))
+    }
+
+    fn compose(app: &App) -> Option<&crate::prs::compose::Compose> {
+        match app.overlays.last() {
+            Some(crate::overlay::Overlay::Compose(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn writes(actions: &[crate::app::Action]) -> Vec<termist_core::github::PrWrite> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::app::Action::Send(termist_core::ClientRequest::WritePr {
+                    write, ..
+                }) => Some(write.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 212 open whole, with a comment of yours (alice) at the end of the conversation.
+    fn detail_with_yours() -> App {
+        use termist_core::github::Comment;
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let pr = app.prs[&project].repos[0].prs[0].clone();
+        let mut detail = crate::prs::fixtures::detail(pr);
+        detail.comments.push(Comment {
+            id: "IC_mine".into(),
+            author: "alice".into(),
+            body: "Thanks, merging after CI.".into(),
+            created_at: "2026-10-02T11:50:00Z".into(),
+            mine: true,
+            can_edit: true,
+            can_delete: true,
+            pending: false,
+        });
+        app.on_event(ServerEvent::PrDetail {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::Ok,
+            detail: Some(Box::new(detail)),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn c_writes_on_the_pull_request_and_a_reviews_it() {
+        use crate::prs::compose::Target;
+        let mut app = detail_with_yours();
+        render(&mut app, 90, 28);
+        press(&mut app, 'c');
+        assert_eq!(
+            compose(&app).map(|c| c.target.clone()),
+            Some(Target::Comment)
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(&mut app, 'A');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            (c.target.clone(), c.mine, c.pending),
+            (Target::Submit, false, 0)
+        );
+    }
+
+    #[test]
+    fn on_a_thread_r_replies_and_x_resolves_and_only_your_comments_are_edited() {
+        use crate::prs::compose::Target;
+        use termist_core::github::{CommentKind, PrWrite};
+        let mut app = detail_with_yours();
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 40);
+        let layout = app.pr_layout.borrow().clone();
+        let t1 = layout
+            .items
+            .iter()
+            .position(|i| i.thread.as_deref() == Some("T1"))
+            .unwrap();
+        for _ in 0..t1 {
+            press(&mut app, 'j');
+        }
+        press(&mut app, 'r');
+        assert_eq!(
+            compose(&app).map(|c| c.target.clone()),
+            Some(Target::Reply {
+                thread: "T1".into(),
+                to: "carol".into()
+            })
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let actions = press(&mut app, 'x');
+        assert_eq!(
+            writes(&actions),
+            [PrWrite::Resolve {
+                thread: "T1".into(),
+                resolved: true
+            }]
+        );
+        press(&mut app, 'e');
+        assert_eq!(app.message.as_deref(), Some("not your comment"));
+        // Yours is the last item.
+        for _ in 0..9 {
+            press(&mut app, 'j');
+        }
+        render(&mut app, 90, 40);
+        press(&mut app, 'e');
+        let c = compose(&app).unwrap();
+        assert_eq!(c.input.text(), "Thanks, merging after CI.");
+        assert_eq!(
+            c.target,
+            Target::Edit {
+                comment: "IC_mine".into(),
+                kind: CommentKind::Issue
+            }
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(&mut app, 'D');
+        assert_eq!(app.mode, Mode::ConfirmDelete);
+        assert!(screen(&render(&mut app, 90, 40)).contains("Delete your comment?"));
+        let actions = press(&mut app, 'y');
+        assert_eq!(
+            writes(&actions),
+            [PrWrite::Delete {
+                comment: "IC_mine".into(),
+                kind: CommentKind::Issue
+            }]
+        );
+    }
+
+    #[test]
+    fn in_the_diff_c_comments_on_the_line_or_the_range_and_v_stays_in_the_diff() {
+        use crate::prs::compose::Target;
+        use termist_core::github::Side;
+        let mut app = mercek_fixture();
+        render(&mut app, 110, 18);
+        // The first lines: the hunk header, then line 38.
+        press(&mut app, 'j');
+        press(&mut app, 'c');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            c.target,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 38,
+                start: None
+            }
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // 39 (kept) and the deleted 40: two sides.
+        press(&mut app, 'j');
+        press(&mut app, 'v');
+        press(&mut app, 'j');
+        assert!(
+            matches!(app.view, View::Prs(_)),
+            "v chose a line, it did not leave"
+        );
+        press(&mut app, 'c');
+        assert!(compose(&app).is_none());
+        assert_eq!(app.message.as_deref(), Some("a range stays on one side"));
+        press(&mut app, 'v');
+        // The added 40 to 42.
+        press(&mut app, 'j');
+        press(&mut app, 'v');
+        press(&mut app, 'j');
+        press(&mut app, 'j');
+        press(&mut app, 'c');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            c.target,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 42,
+                start: Some(40)
+            }
+        );
+        assert_eq!(c.suggest.len(), 3, "their new lines, for C-s");
+        assert_eq!(c.context.first().map(|l| l.0), Some(40));
     }
 
     #[test]

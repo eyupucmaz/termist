@@ -11,7 +11,7 @@ pub mod timeline;
 use crate::app::App;
 use crate::list_picker::matches;
 use crate::theme::Theme;
-use diff::{DiffAction, DiffArea, DiffView};
+use diff::{DiffAction, DiffArea, DiffView, LineTarget};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -227,6 +227,29 @@ pub enum PrAction {
     },
     /// The diff the other way: unified or split.
     FlipLayout,
+    /// Something to write to the pull request; the app finds the rest in its detail.
+    Ask(Ask),
+    /// Why a key did nothing, for the footer.
+    Note(&'static str),
+}
+
+/// A write asked for by a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Comment,
+    Line { path: String, target: LineTarget },
+    Reply { thread: String },
+    Resolve { thread: String },
+    Edit(Subject),
+    Delete(Subject),
+    Submit,
+}
+
+/// Whose comment: one named in the conversation, or your last one in a thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Subject {
+    Comment(Mine),
+    Thread(String),
 }
 
 /// A line of the inbox list.
@@ -507,7 +530,30 @@ impl PrView {
             .file
             .as_ref()
             .and_then(|f| layout.files.iter().position(|x| x == f));
+        let item = layout.items.get(d.item).filter(|_| talk);
         match key.code {
+            KeyCode::Char('c') if !ctrl => return Some(PrAction::Ask(Ask::Comment)),
+            KeyCode::Char('A') => return Some(PrAction::Ask(Ask::Submit)),
+            KeyCode::Char(c @ ('r' | 'x')) if !ctrl && talk => {
+                let Some(thread) = item.and_then(|i| i.thread.clone()) else {
+                    return Some(PrAction::Note("not on a thread"));
+                };
+                return Some(PrAction::Ask(if c == 'r' {
+                    Ask::Reply { thread }
+                } else {
+                    Ask::Resolve { thread }
+                }));
+            }
+            KeyCode::Char(c @ ('e' | 'D')) if talk => {
+                let Some(mine) = item.and_then(|i| i.mine.clone()) else {
+                    return Some(PrAction::Note("not your comment"));
+                };
+                return Some(PrAction::Ask(if c == 'e' {
+                    Ask::Edit(Subject::Comment(mine))
+                } else {
+                    Ask::Delete(Subject::Comment(mine))
+                }));
+            }
             KeyCode::Char('d') if !ctrl => d.open_diff(None, diff),
             KeyCode::Enter if files => {
                 let file = d.file.clone().or_else(|| layout.files.first().cloned());

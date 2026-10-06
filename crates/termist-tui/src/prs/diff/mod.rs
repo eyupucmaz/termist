@@ -5,7 +5,7 @@ pub mod tree;
 pub mod view;
 pub mod words;
 
-use super::PrAction;
+use super::{Ask, PrAction, Subject};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
@@ -381,6 +381,28 @@ impl DiffView {
                 return Some(DiffAction::Pr(PrAction::Viewed { pr, path, viewed }));
             }
             KeyCode::Char('s') => return Some(DiffAction::Pr(PrAction::FlipLayout)),
+            KeyCode::Char('A') => return Some(DiffAction::Pr(PrAction::Ask(Ask::Submit))),
+            KeyCode::Char('c') if !ctrl && !tree => {
+                if self.thread_here(area).is_some() {
+                    return Some(DiffAction::Pr(PrAction::Note("on a thread: r replies")));
+                }
+                let path = self.file.clone()?;
+                return Some(DiffAction::Pr(match self.target(area) {
+                    Ok(target) => PrAction::Ask(Ask::Line { path, target }),
+                    Err(why) => PrAction::Note(why),
+                }));
+            }
+            KeyCode::Char(c @ ('r' | 'x' | 'e' | 'D')) if !ctrl && !tree => {
+                let Some(thread) = self.thread_here(area).map(str::to_string) else {
+                    return Some(DiffAction::Pr(PrAction::Note("not on a thread")));
+                };
+                return Some(DiffAction::Pr(PrAction::Ask(match c {
+                    'r' => Ask::Reply { thread },
+                    'x' => Ask::Resolve { thread },
+                    'e' => Ask::Edit(Subject::Thread(thread)),
+                    _ => Ask::Delete(Subject::Thread(thread)),
+                })));
+            }
             KeyCode::Char('b') => {
                 let i = self.index(diff)?;
                 return Some(DiffAction::Pr(PrAction::Browser(diff.files[i].url.clone())));
