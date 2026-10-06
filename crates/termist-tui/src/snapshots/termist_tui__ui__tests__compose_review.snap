@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 90, 16).backend()"
+---
+" termist pull requests   orbit-api ◆1✓1⇄1                                           12:00 "
+" Add a dealer filter to search                                                            "
+" bob wants to merge feat into main · +184 −32 · 9 files · opened 1d ago                   "
+" ◇ your r┌ review #212 · 3 comments pending ────────────────────────────────────┐         "
+"  Overvie│ ‹ Comment ›   Approve     Request changes                            │         "
+"─────────│──────────────────────────────────────────────────────────────────────│─────────"
+" Adds a d│Looks good overall, two nits.                                         │         "
+"         │                                                                      │         "
+" Closes #│                                                                      │         "
+"         │                                                                      │         "
+"         │Enter send · Alt+Enter new line · Tab verdict · Esc keep              │         "
+"         └──────────────────────────────────────────────────────────────────────┘         "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"Enter send · Alt+Enter new line · Esc keep the draft                                      "

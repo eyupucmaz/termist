@@ -1,6 +1,7 @@
 //! The pull request view: a project's open pull requests (the inbox) and one of them
 //! whole (the detail). This module keeps its state and keys; `inbox_view` and
 //! `detail_view` draw it.
+pub mod compose;
 pub mod detail_view;
 pub mod diff;
 pub mod inbox_view;

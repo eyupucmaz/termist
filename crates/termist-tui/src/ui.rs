@@ -2148,6 +2148,40 @@ mod tests {
     }
 
     #[test]
+    fn the_box_for_a_line_comment_and_for_a_review() {
+        use crate::prs::compose::{Compose, Target};
+        use termist_core::github::{PrRef, RepoId, Side};
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let mut c = Compose::new(
+            pr,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 42,
+                start: Some(40),
+            },
+            "This refetches on every mount, can we memoize?",
+        );
+        c.context = vec![
+            (40, '+', "useEffect(() => fetchAll(), []);".into()),
+            (41, '+', "const label = sel ?? 'All';".into()),
+            (42, '+', "\treturn label;".into()),
+        ];
+        app.open_compose(c);
+        insta::assert_snapshot!("compose_line", render(&mut app, 90, 20).backend());
+        app.overlays.pop();
+        let mut review = Compose::new(pr, Target::Submit, "Looks good overall, two nits.");
+        review.pending = 3;
+        app.open_compose(review);
+        insta::assert_snapshot!("compose_review", render(&mut app, 90, 16).backend());
+    }
+
+    #[test]
     fn mercek_unified_and_split() {
         let mut app = mercek_fixture();
         insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());

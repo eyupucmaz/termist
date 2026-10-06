@@ -165,6 +165,78 @@ const PROMPT_WIDTH: u16 = 72;
 const MIN_PROMPT_ROWS: usize = 4;
 const MAX_PROMPT_ROWS: usize = 10;
 
+/// The box a comment or a review is written in: the lines commented on (or the
+/// verdicts) over the text, and a line saying what is happening under it.
+fn compose_box(f: &mut Frame, t: &Theme, body: Rect, c: &crate::prs::compose::Compose, top: bool) {
+    use termist_core::github::Verdict;
+    let width = PROMPT_WIDTH.min(body.width);
+    let inner = width.saturating_sub(2) as usize;
+    let mut head: Vec<Line<'static>> = c
+        .context
+        .iter()
+        .map(|(n, mark, text)| {
+            Line::from(Span::styled(
+                crate::prs::markdown::cut(
+                    &format!("{n:>5} {mark} {}", text.replace('\t', "    ")),
+                    inner,
+                ),
+                t.dim,
+            ))
+        })
+        .collect();
+    if c.target == crate::prs::compose::Target::Submit {
+        let mut spans = vec![Span::raw(" ")];
+        for v in Verdict::ALL {
+            let style = if v == c.verdict {
+                t.tab_active
+            } else if c.mine && v != Verdict::Comment {
+                t.dim.add_modifier(Modifier::CROSSED_OUT)
+            } else {
+                t.dim
+            };
+            let label = if v == c.verdict {
+                format!("‹ {} ›", v.label())
+            } else {
+                format!("  {}  ", v.label())
+            };
+            spans.push(Span::styled(label, style));
+            spans.push(Span::raw(" "));
+        }
+        head.push(Line::from(spans));
+    }
+    if !head.is_empty() {
+        head.push(Line::from(Span::styled("─".repeat(inner), t.border)));
+    }
+    let (all, (cy, cx)) = wrapped_rows(&c.input, width.saturating_sub(2));
+    let fixed = 3 + head.len() as u16;
+    let height =
+        (all.len().clamp(MIN_PROMPT_ROWS, MAX_PROMPT_ROWS) as u16 + fixed).min(body.height);
+    let area = centered(body, width, height);
+    let room = area.height.saturating_sub(fixed) as usize;
+    let first = (cy + 1).saturating_sub(room);
+    let mut lines = head.clone();
+    let mut text: Vec<Line<'static>> = all
+        .into_iter()
+        .skip(first)
+        .take(room)
+        .map(Line::from)
+        .collect();
+    text.resize(room, Line::default());
+    lines.extend(text);
+    let footer_style = match &c.state {
+        crate::prs::compose::Sending::Failed(_) => t.error,
+        _ => t.dim,
+    };
+    lines.push(Line::from(Span::styled(c.footer(), footer_style)));
+    boxed(f, t, area, &c.title(), lines);
+    if top && room > 0 && !matches!(c.state, crate::prs::compose::Sending::Sending(_)) {
+        f.set_cursor_position((
+            area.x + 1 + cx as u16,
+            area.y + 1 + head.len() as u16 + (cy - first) as u16,
+        ));
+    }
+}
+
 /// A one-line text box; the cursor shows when it is the top overlay.
 fn text_box(
     f: &mut Frame,
@@ -745,6 +817,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::Compose(c) => compose_box(f, t, body, c, top),
         Overlay::RepoAccount { picker, .. } => {
             let rows = picker
                 .visible()
@@ -799,6 +872,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::KeyCapture(_) => "press a key · Esc cancel",
         Overlay::Repos { .. } => "j/k choose · Space show/hide · a account · Esc close",
         Overlay::RepoAccount { .. } => "j/k choose · Enter use · Esc back",
+        Overlay::Compose(_) => "Enter send · Alt+Enter new line · Esc keep the draft",
     }
 }
 

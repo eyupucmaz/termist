@@ -166,7 +166,7 @@ pub struct Review {
 }
 
 /// Which side of the diff a thread's line is on: the old file's or the new one's.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Left,
     #[default]
