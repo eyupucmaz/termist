@@ -662,7 +662,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
                 termist_core::config::DiffLayout::Split => "unified",
             };
             return format!(
-                "#{} · Tab panel · J/K file · {{/}} hunk · n/N thread · ^R viewed · s {other} · / search · b browser · Esc back",
+                "#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · ^R viewed · s {other} · A review · Esc back",
+                d.pr.number
+            );
+        }
+        if d.tab == Tab::Conversation {
+            return format!(
+                "#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · A review · Esc list",
                 d.pr.number
             );
         }
@@ -674,7 +680,7 @@ pub fn hint(app: &App, view: &PrView) -> String {
             );
         }
         return format!(
-            "#{} · Tab section · j/k scroll · n/N next open thread · Enter fold · d diff · b browser · {} refresh · Esc list",
+            "#{} · Tab section · j/k scroll · d diff · c comment · A review · b browser · {} refresh · Esc list",
             d.pr.number,
             key(Action::RefreshGitHub)
         );
@@ -688,6 +694,18 @@ pub fn hint(app: &App, view: &PrView) -> String {
 
 fn fg(color: ratatui::style::Color) -> Style {
     Style::default().fg(color)
+}
+
+/// `✎ your review · 3 pending` while you have a review not sent yet.
+pub fn pending_mark(t: &Theme, d: &termist_core::github::PrDetail) -> Option<Span<'static>> {
+    let n = d
+        .threads
+        .iter()
+        .flat_map(|th| &th.comments)
+        .filter(|c| c.pending && c.mine)
+        .count();
+    (d.pending_review.is_some() || n > 0)
+        .then(|| Span::styled(format!("✎ your review · {n} pending"), t.warn))
 }
 
 /// `◇` asked of you, `✓` approved, `✗` changes requested, `·` no verdict.

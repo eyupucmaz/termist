@@ -42,6 +42,10 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     ];
     let mut status = status_line(t, s);
     status.spans.insert(0, Span::raw(" "));
+    if let Some(mark) = detail.and_then(|x| super::pending_mark(t, x)) {
+        status.spans.push(Span::raw("    "));
+        status.spans.push(mark);
+    }
     if let Some(why) = trouble(&state) {
         status
             .spans

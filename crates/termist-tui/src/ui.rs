@@ -2379,6 +2379,29 @@ mod tests {
     }
 
     #[test]
+    fn a_review_not_sent_yet_shows_in_the_head_and_on_its_comments() {
+        let mut app = mercek_fixture();
+        let pr = termist_core::github::PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        };
+        let (_, detail) = app.pr_details.get_mut(&pr).unwrap();
+        let detail = detail.as_mut().unwrap();
+        detail.pending_review = Some("PRR_1".into());
+        let mine = &mut detail.threads[0].comments[0];
+        (mine.pending, mine.mine) = (true, true);
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(text.contains("✎ your review · 1 pending"), "{text}");
+        assert!(text.contains("carol +1 · open · pending"), "{text}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(
+            text.contains("✎ your review · 1 pending"),
+            "the detail too: {text}"
+        );
+    }
+
+    #[test]
     fn mercek_unified_and_split() {
         let mut app = mercek_fixture();
         insta::assert_snapshot!("mercek_unified", render(&mut app, 110, 18).backend());

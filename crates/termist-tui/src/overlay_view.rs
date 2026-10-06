@@ -956,6 +956,14 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("Tab", "next section: overview, conversation, checks, files"),
         ("n / N", "next / previous open thread"),
         ("d", "the files and their diff"),
+        (
+            "c",
+            "comment on the pull request (in the diff: on the line)",
+        ),
+        ("r", "on a thread: reply"),
+        ("x", "on a thread: resolve, or unresolve"),
+        ("e / D", "on a comment of yours: edit / delete"),
+        ("A", "send your review: comment, approve, request changes"),
         ("Esc", "back"),
     ] {
         lines.push(row(key.into(), what));
@@ -964,6 +972,9 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
     lines.push(heading("A pull request's diff (d)".into()));
     for (key, what) in [
         ("Tab", "the file tree or the diff"),
+        ("j / k", "the line cursor; v starts a range"),
+        ("c", "comment on the line or the range, into your review"),
+        ("C-s", "in a line comment: the lines as a suggestion"),
         ("J / K", "next / previous file"),
         ("{ / }", "previous / next hunk"),
         ("n / N", "next / previous thread"),

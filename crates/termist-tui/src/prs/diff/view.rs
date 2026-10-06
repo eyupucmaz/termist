@@ -123,7 +123,12 @@ fn head(
 ) {
     let t = &app.theme;
     let title = detail.map(|d| format!(" #{} {}", d.summary.number, d.summary.title));
-    let mut right = vec![Span::styled(label.to_string(), t.dim)];
+    let mut right = vec![];
+    if let Some(mark) = detail.and_then(|d| crate::prs::pending_mark(t, d)) {
+        right.push(mark);
+        right.push(Span::raw(" · "));
+    }
+    right.push(Span::styled(label.to_string(), t.dim));
     if let Some(d) = diff {
         let seen = d
             .files
@@ -353,7 +358,14 @@ fn draw_diff(
         opened,
         threads
             .iter()
-            .map(|th| (&th.id, th.comments.len()))
+            // A comment sent or written turns its thread over.
+            .map(|th| {
+                (
+                    &th.id,
+                    th.comments.len(),
+                    th.comments.iter().filter(|c| c.pending).count(),
+                )
+            })
             .collect::<Vec<_>>(),
         t.diff_add,
         t.dim,
@@ -687,9 +699,17 @@ fn thread_lines(
                 .trim()
         })
         .unwrap_or("");
+    let pending = if first.is_some_and(|c| c.pending) {
+        " · pending"
+    } else {
+        ""
+    };
     let head = format!("{mark} {author}{others} · {status}");
-    let room = width.saturating_sub(3 + width_of(&head) + 3);
+    let room = width.saturating_sub(3 + width_of(&head) + pending.len() + 3);
     let mut spans = vec![bar(), Span::styled(head, t.accent)];
+    if !pending.is_empty() {
+        spans.push(Span::styled(pending, t.warn));
+    }
     if !open && !gist.is_empty() {
         spans.push(Span::styled(format!(" · {}", cut(gist, room)), t.dim));
     }
@@ -702,14 +722,18 @@ fn thread_lines(
         let ago = unix_secs(&c.created_at)
             .map(|u| format!(" · {} ago", age(now - u)))
             .unwrap_or_default();
-        out.push(Line::from(vec![
+        let mut head = vec![
             bar(),
             Span::styled(
                 c.author.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(ago, t.dim),
-        ]));
+        ];
+        if c.pending {
+            head.push(Span::styled(" · pending", t.warn));
+        }
+        out.push(Line::from(head));
         for line in render(&c.body, room, t) {
             let mut spans = vec![bar(), Span::raw("  ")];
             spans.extend(line.spans);
