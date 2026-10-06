@@ -2101,8 +2101,13 @@ mod tests {
         let cursor = open(&app).cursor;
         mouse_at(&mut app, Kind::ScrollDown, 5, 5);
         assert_eq!(open(&app).cursor, cursor + 1, "over the tree: its cursor");
+        let line = open(&app).line;
         mouse_at(&mut app, Kind::ScrollDown, 60, 5);
-        assert_eq!(open(&app).scroll, 3, "over the diff: three lines");
+        assert_eq!(
+            open(&app).line,
+            line + 3,
+            "over the diff: three lines, the cursor too"
+        );
         assert_eq!(
             open(&app).panel,
             Panel::Diff,

@@ -3,7 +3,7 @@
 //! changes (another file, width, layout, a thread folded); scrolling only moves them.
 use super::render::{Cell, Row, rows};
 use super::tree::{Node, TreeRow};
-use super::{DiffArea, DiffView, Panel};
+use super::{DiffArea, DiffView, Panel, Spot, follow};
 use crate::app::App;
 use crate::prs::detail_view::viewed_mark;
 use crate::prs::inbox_view::trouble;
@@ -19,11 +19,12 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::rc::Rc;
 use termist_core::AgentStatus;
 use termist_core::config::DiffLayout;
 use termist_core::diff::{LineKind, parse_patch};
 use termist_core::github::{
-    GhState, Patch, PrDetail, PrDiff, PrRef, Thread, Viewed, age, unix_secs,
+    GhState, Patch, PrDetail, PrDiff, PrRef, Side, Thread, Viewed, age, unix_secs,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -40,6 +41,8 @@ struct Drawn {
     lines: Vec<Line<'static>>,
     hunks: Vec<usize>,
     threads: Vec<(usize, String)>,
+    /// What each line is.
+    spots: Rc<Vec<Spot>>,
 }
 
 thread_local! {
@@ -359,7 +362,7 @@ fn draw_diff(
     let key = hasher.finish();
     let page = inner.height as usize;
     // The file's lines stay in the cache; a frame copies only the page it shows.
-    let (shown, end, hunks, threads) = KEPT.with(|k| {
+    let (mut shown, top, end, hunks, threads, spots) = KEPT.with(|k| {
         let mut kept = k.borrow_mut();
         let stale = !matches!(&*kept, Some((at, _)) if *at == key);
         if stale {
@@ -377,15 +380,41 @@ fn draw_diff(
         }
         let drawn = &kept.as_ref().expect("filled above").1;
         let end = drawn.lines.len().saturating_sub(page);
-        let scroll = view.scroll.min(end);
-        let shown: Vec<Line> = drawn.lines[scroll..].iter().take(page).cloned().collect();
-        (shown, end, drawn.hunks.clone(), drawn.threads.clone())
+        // The screen follows the cursor.
+        let top = follow(view.line, view.scroll, page).min(end);
+        let shown: Vec<Line> = drawn.lines[top..].iter().take(page).cloned().collect();
+        (
+            shown,
+            top,
+            end,
+            drawn.hunks.clone(),
+            drawn.threads.clone(),
+            drawn.spots.clone(),
+        )
     });
+    // The cursor, and the range from `v`.
+    let (lo, hi) = match view.anchor {
+        Some(a) => (a.min(view.line), a.max(view.line)),
+        None => (view.line, view.line),
+    };
+    let mark = if view.panel == Panel::Diff {
+        t.selection
+    } else {
+        t.dim.add_modifier(Modifier::REVERSED)
+    };
+    for (i, l) in shown.iter_mut().enumerate() {
+        if (lo..=hi).contains(&(top + i)) {
+            for s in &mut l.spans {
+                s.style = s.style.patch(mark);
+            }
+        }
+    }
     f.render_widget(Paragraph::new(shown), inner);
     out.end = end;
     out.page = page;
     out.hunks = hunks;
     out.threads = threads;
+    out.spots = spots;
 }
 
 /// `text` with its `words` in `word` and the rest in `base`, tabs as spaces.
@@ -515,9 +544,15 @@ fn lines(
         .to_string()
         .len();
     let mut d = Drawn::default();
+    let mut spots: Vec<Spot> = Vec::new();
+    // The hunk the rows are in; none once in the outdated threads.
+    let mut hunk: Option<usize> = None;
     for row in rows(&hunks, layout, threads) {
         match row {
             Row::Hunk(header) => {
+                let n = hunk.map_or(0, |h| h + 1);
+                hunk = Some(n);
+                spots.push(Spot::Hunk(n));
                 d.hunks.push(d.lines.len());
                 d.lines.push(Line::from(Span::styled(
                     cut(&format!(" {header}"), width),
@@ -543,6 +578,7 @@ fn lines(
                     base,
                 ));
                 d.lines.push(Line::from(spans));
+                spots.push(line_spot(hunk, Some(&c), None));
             }
             Row::Split { left, right } => {
                 let lw = width.saturating_sub(1) / 2;
@@ -555,13 +591,21 @@ fn lines(
                 spans.push(Span::styled("│", t.border));
                 spans.extend(side(&right, true, rw));
                 d.lines.push(Line::from(spans));
+                spots.push(line_spot(hunk, left.as_ref(), right.as_ref()));
             }
             Row::Thread(i) => {
                 let th = threads[i];
                 d.threads.push((d.lines.len(), th.id.clone()));
+                let before = d.lines.len();
                 thread_lines(&mut d.lines, th, opened.contains(&th.id), width, t, now);
+                spots.extend((before..d.lines.len()).map(|_| Spot::Thread {
+                    hunk,
+                    id: th.id.clone(),
+                }));
             }
             Row::Outdated => {
+                hunk = None;
+                spots.extend([Spot::Other { hunk: None }, Spot::Other { hunk: None }]);
                 d.lines.push(Line::default());
                 d.lines.push(Line::from(Span::styled(
                     " outdated",
@@ -570,7 +614,43 @@ fn lines(
             }
         }
     }
+    d.spots = Rc::new(spots);
     d
+}
+
+/// What a comment on a drawn line takes. Unified: the line itself (`left` alone).
+/// Split: the new side when the row has one, else the deleted line on the old side.
+fn line_spot(hunk: Option<usize>, left: Option<&Cell>, right: Option<&Cell>) -> Spot {
+    let hunk_or_other = |s: Spot| match hunk {
+        Some(_) => s,
+        None => Spot::Other { hunk: None },
+    };
+    let pick = match (left, right) {
+        (_, Some(r)) if r.line.kind != LineKind::NoNewline => Some(r),
+        (Some(l), _) => Some(l),
+        _ => None,
+    };
+    let Some(c) = pick.filter(|c| c.line.kind != LineKind::NoNewline) else {
+        return Spot::Other { hunk };
+    };
+    let (side, number) = match (c.line.kind, c.line.new, c.line.old) {
+        (LineKind::Del, _, Some(old)) => (Side::Left, old),
+        (_, Some(new), _) => (Side::Right, new),
+        _ => return Spot::Other { hunk },
+    };
+    let mark = match c.line.kind {
+        LineKind::Add => '+',
+        LineKind::Del => '-',
+        _ => ' ',
+    };
+    hunk_or_other(Spot::Line {
+        hunk: hunk.unwrap_or(0),
+        side,
+        number,
+        mark,
+        text: c.line.text.clone(),
+        new: (side == Side::Right).then(|| c.line.text.clone()),
+    })
 }
 
 fn thread_lines(
@@ -681,6 +761,59 @@ mod tests {
         );
         let p = pieces("\tx = 1", &[Range { start: 5, end: 6 }], base, word);
         assert_eq!(p, [("    x = ".to_string(), base), ("1".to_string(), word)]);
+    }
+
+    #[test]
+    fn every_drawn_line_says_what_a_comment_on_it_takes() {
+        let t = Theme::terminal();
+        let thread = Thread {
+            id: "T1".into(),
+            path: "a.rs".into(),
+            line: Some(1),
+            start_line: None,
+            side: Side::Right,
+            resolved: false,
+            outdated: false,
+            hunk: String::new(),
+            comments: vec![],
+            more: 0,
+            can_reply: true,
+            can_resolve: true,
+        };
+        let opened = std::collections::HashSet::new();
+        let shape = |layout| {
+            let d = lines(
+                "@@ -1,2 +1,2 @@\n-a\n+b\n c",
+                layout,
+                &[&thread],
+                &opened,
+                80,
+                0,
+                &t,
+                0,
+            );
+            assert_eq!(d.spots.len(), d.lines.len(), "one spot a line");
+            d.spots
+                .iter()
+                .map(|s| match s {
+                    Spot::Hunk(n) => format!("hunk {n}"),
+                    Spot::Line {
+                        side, number, mark, ..
+                    } => format!("{side:?} {number}{mark}"),
+                    Spot::Thread { id, .. } => id.clone(),
+                    Spot::Other { .. } => "other".into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shape(DiffLayout::Unified),
+            ["hunk 0", "Left 1-", "Right 1+", "T1", "Right 2 "]
+        );
+        assert_eq!(
+            shape(DiffLayout::Split),
+            ["hunk 0", "Right 1+", "T1", "Right 2 "],
+            "a deleted line beside an added one: the new side"
+        );
     }
 
     #[test]

@@ -9,7 +9,8 @@ use super::PrAction;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
-use termist_core::github::{DiffFile, PrDiff, PrRef, Viewed};
+use std::rc::Rc;
+use termist_core::github::{DiffFile, PrDiff, PrRef, Side, Viewed};
 use tree::{Node, TreeRow};
 
 /// How far `←` and `→` move a long line.
@@ -39,6 +40,10 @@ pub struct DiffView {
     pub typing: bool,
     /// The first line of the diff on screen, and how far long lines are moved left.
     pub scroll: usize,
+    /// The diff's cursor: the drawn line comments go to.
+    pub line: usize,
+    /// Where a range began (`v`); the range runs to `line`.
+    pub anchor: Option<usize>,
     pub hscroll: usize,
     /// Threads unfolded, by id.
     pub opened: HashSet<String>,
@@ -61,6 +66,131 @@ pub struct DiffArea {
     pub hunks: Vec<usize>,
     /// Each thread's first line and its id.
     pub threads: Vec<(usize, String)>,
+    /// What each drawn line is, the whole file's.
+    pub spots: Rc<Vec<Spot>>,
+}
+
+/// What a drawn line of the diff is, for the cursor and the comments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Spot {
+    /// The header of hunk `n`.
+    Hunk(usize),
+    /// A line of the file: the side and number a comment on it takes, its mark and
+    /// text there, and its new text if it has one (a suggestion's lines).
+    Line {
+        hunk: usize,
+        side: Side,
+        number: u32,
+        mark: char,
+        text: String,
+        new: Option<String>,
+    },
+    /// A line of a thread, under the line it is on (no hunk: an outdated one).
+    Thread { hunk: Option<usize>, id: String },
+    /// Anything else: `\ No newline`, the outdated heading.
+    Other { hunk: Option<usize> },
+}
+
+impl Spot {
+    pub fn hunk(&self) -> Option<usize> {
+        match self {
+            Spot::Hunk(n) | Spot::Line { hunk: n, .. } => Some(*n),
+            Spot::Thread { hunk, .. } | Spot::Other { hunk } => *hunk,
+        }
+    }
+
+    pub fn thread(&self) -> Option<&str> {
+        match self {
+            Spot::Thread { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// The lines a comment goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineTarget {
+    pub side: Side,
+    /// The last line, and the first when there are several.
+    pub line: u32,
+    pub start: Option<u32>,
+    /// The last few lines commented on: number, mark, text.
+    pub context: Vec<(u32, char, String)>,
+    /// The new text of the lines, for a suggestion; empty when they are deleted ones.
+    pub new: Vec<String>,
+}
+
+/// Lines shown above a comment being written.
+const CONTEXT: usize = 3;
+
+/// What a comment at `line` (from `anchor` when a range is chosen) goes to, or why
+/// there is nothing there to comment on.
+pub fn target_at(
+    spots: &[Spot],
+    line: usize,
+    anchor: Option<usize>,
+) -> Result<LineTarget, &'static str> {
+    let (lo, hi) = match anchor {
+        Some(a) => (a.min(line), a.max(line)),
+        None => (line, line),
+    };
+    let chosen: Vec<&Spot> = spots
+        .get(lo..=hi)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|s| matches!(s, Spot::Line { .. }))
+        .collect();
+    if !matches!(spots.get(line), Some(Spot::Line { .. })) || chosen.is_empty() {
+        return Err("not on a line of the diff");
+    }
+    let mut lines = Vec::new();
+    let (mut first_side, mut first_hunk) = (None, None);
+    for s in chosen {
+        let Spot::Line {
+            hunk,
+            side,
+            number,
+            mark,
+            text,
+            new,
+        } = s
+        else {
+            continue;
+        };
+        if *first_hunk.get_or_insert(*hunk) != *hunk {
+            return Err("a range stays in one hunk");
+        }
+        if *first_side.get_or_insert(*side) != *side {
+            return Err("a range stays on one side");
+        }
+        lines.push((*number, *mark, text.clone(), new.clone()));
+    }
+    let side = first_side.expect("one line at least");
+    let first = lines.first().expect("one line at least").0;
+    let last = lines.last().expect("one line at least").0;
+    Ok(LineTarget {
+        side,
+        line: last,
+        start: (first != last).then_some(first),
+        context: lines
+            .iter()
+            .skip(lines.len().saturating_sub(CONTEXT))
+            .map(|(n, m, t, _)| (*n, *m, t.clone()))
+            .collect(),
+        new: lines.iter().filter_map(|l| l.3.clone()).collect(),
+    })
+}
+
+/// The first line on screen that keeps `line` on a page of `page` lines.
+pub fn follow(line: usize, scroll: usize, page: usize) -> usize {
+    let page = page.max(1);
+    if line < scroll {
+        line
+    } else if line >= scroll + page {
+        line + 1 - page
+    } else {
+        scroll
+    }
 }
 
 /// What a key in the diff asks of the PR view.
@@ -131,6 +261,8 @@ impl DiffView {
         self.file = Some(diff.files[index].path.clone());
         self.scroll = 0;
         self.hscroll = 0;
+        self.line = 0;
+        self.anchor = None;
         self.follow(index, diff);
     }
 
@@ -208,6 +340,9 @@ impl DiffView {
             return None;
         }
         if key.code == KeyCode::Esc {
+            if self.anchor.take().is_some() {
+                return None;
+            }
             if !self.query.is_empty() {
                 self.query.clear();
                 self.clamp(diff);
@@ -282,46 +417,94 @@ impl DiffView {
                 }
                 _ => {}
             },
-            KeyCode::Char('j') | KeyCode::Down => self.scroll += 1,
-            KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-            KeyCode::Char('d') if ctrl => self.scroll += half,
-            KeyCode::Char('u') if ctrl => self.scroll = self.scroll.saturating_sub(half),
-            KeyCode::PageDown => self.scroll += page,
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(page),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => self.scroll = area.end,
+            KeyCode::Char('j') | KeyCode::Down => self.move_to(self.line + 1, area),
+            KeyCode::Char('k') | KeyCode::Up => self.move_to(self.line.saturating_sub(1), area),
+            KeyCode::Char('d') if ctrl => self.move_to(self.line + half, area),
+            KeyCode::Char('u') if ctrl => self.move_to(self.line.saturating_sub(half), area),
+            KeyCode::PageDown => self.move_to(self.line + page, area),
+            KeyCode::PageUp => self.move_to(self.line.saturating_sub(page), area),
+            KeyCode::Char('g') | KeyCode::Home => self.move_to(0, area),
+            KeyCode::Char('G') | KeyCode::End => self.move_to(usize::MAX, area),
             KeyCode::Char('l') => self.hscroll += SIDEWAYS,
             KeyCode::Char('h') => self.hscroll = self.hscroll.saturating_sub(SIDEWAYS),
             KeyCode::Char('}') => {
-                if let Some(&line) = area.hunks.iter().find(|l| **l > self.scroll) {
-                    self.scroll = line;
+                if let Some(&line) = area.hunks.iter().find(|l| **l > self.line) {
+                    self.move_to(line, area);
                 }
             }
             KeyCode::Char('{') => {
-                if let Some(&line) = area.hunks.iter().rev().find(|l| **l < self.scroll) {
-                    self.scroll = line;
+                if let Some(&line) = area.hunks.iter().rev().find(|l| **l < self.line) {
+                    self.move_to(line, area);
                 }
             }
             KeyCode::Char('n') => {
-                if let Some((line, _)) = area.threads.iter().find(|(l, _)| *l > self.scroll) {
-                    self.scroll = *line;
+                if let Some((line, _)) = area.threads.iter().find(|(l, _)| *l > self.line) {
+                    self.move_to(*line, area);
                 }
             }
             KeyCode::Char('N') => {
-                if let Some((line, _)) = area.threads.iter().rev().find(|(l, _)| *l < self.scroll) {
-                    self.scroll = *line;
+                if let Some((line, _)) = area.threads.iter().rev().find(|(l, _)| *l < self.line) {
+                    self.move_to(*line, area);
                 }
             }
             KeyCode::Enter => {
-                if let Some((_, id)) = area.threads.iter().find(|(l, _)| *l >= self.scroll) {
-                    self.toggle(id);
+                if let Some(id) = area.spots.get(self.line).and_then(Spot::thread) {
+                    let id = id.to_string();
+                    self.toggle(&id);
                 }
+            }
+            KeyCode::Char('v') => {
+                self.anchor = match self.anchor {
+                    Some(_) => None,
+                    None => matches!(area.spots.get(self.line), Some(Spot::Line { .. }))
+                        .then_some(self.line),
+                };
             }
             _ => {}
         }
-        self.scroll = self.scroll.min(area.end);
+        self.scroll = follow(self.line, self.scroll, area.page).min(area.end);
         self.clamp(Some(diff));
         None
+    }
+
+    /// The cursor toward `want`, held in the file; while a range is chosen, held in its
+    /// hunk too.
+    fn move_to(&mut self, want: usize, area: &DiffArea) {
+        let last = area.spots.len().saturating_sub(1);
+        let want = want.min(last);
+        let Some(hunk) = self
+            .anchor
+            .and_then(|a| area.spots.get(a))
+            .and_then(Spot::hunk)
+        else {
+            self.line = want;
+            return;
+        };
+        let inside = |i: usize| {
+            area.spots.get(i).and_then(Spot::hunk) == Some(hunk)
+                && !matches!(area.spots.get(i), Some(Spot::Hunk(_)))
+        };
+        while self.line != want {
+            let next = if want > self.line {
+                self.line + 1
+            } else {
+                self.line - 1
+            };
+            if !inside(next) {
+                break;
+            }
+            self.line = next;
+        }
+    }
+
+    /// What `c` would comment on here.
+    pub fn target(&self, area: &DiffArea) -> Result<LineTarget, &'static str> {
+        target_at(&area.spots, self.line, self.anchor)
+    }
+
+    /// The thread under the cursor, if any.
+    pub fn thread_here<'a>(&self, area: &'a DiffArea) -> Option<&'a str> {
+        area.spots.get(self.line).and_then(Spot::thread)
     }
 
     /// A click: on the tree, that row (a file opens, a folder folds); on the diff, the
@@ -348,7 +531,12 @@ impl DiffView {
             }
         } else if area.body.contains(at) {
             self.panel = Panel::Diff;
-            let line = self.scroll.min(area.end) + (y - area.body.y) as usize;
+            let top = follow(self.line, self.scroll, area.page).min(area.end);
+            let line = top + (y - area.body.y) as usize;
+            if line < area.spots.len() {
+                self.line = line;
+                self.scroll = top;
+            }
             if let Some((_, id)) = area.threads.iter().find(|(l, _)| *l == line) {
                 let id = id.clone();
                 self.toggle(&id);
@@ -367,11 +555,16 @@ impl DiffView {
             };
             self.clamp(diff);
         } else if area.body.contains(at) {
-            self.scroll = if down {
-                (self.scroll + 3).min(area.end)
+            // The screen moves and the cursor with it, so it stays on screen.
+            let top = follow(self.line, self.scroll, area.page).min(area.end);
+            let last = area.spots.len().saturating_sub(1);
+            if down {
+                self.scroll = (top + 3).min(area.end);
+                self.line = (self.line + 3).min(last);
             } else {
-                self.scroll.min(area.end).saturating_sub(3)
-            };
+                self.scroll = top.saturating_sub(3);
+                self.line = self.line.saturating_sub(3);
+            }
         }
     }
 
@@ -434,12 +627,50 @@ mod tests {
         }
     }
 
+    /// A new line `n` of hunk `hunk`.
+    fn added(hunk: usize, n: u32) -> Spot {
+        Spot::Line {
+            hunk,
+            side: Side::Right,
+            number: n,
+            mark: '+',
+            text: format!("new {n}"),
+            new: Some(format!("new {n}")),
+        }
+    }
+
+    /// Sixty drawn lines: hunks at 0, 12 and 30, threads T1 at 4 and T2 at 20, new
+    /// lines numbered by where they are drawn.
     fn area() -> DiffArea {
+        let spots = (0..60)
+            .map(|i| {
+                let hunk = if i < 12 {
+                    0
+                } else if i < 30 {
+                    1
+                } else {
+                    2
+                };
+                match i {
+                    0 | 12 | 30 => Spot::Hunk(hunk),
+                    4 => Spot::Thread {
+                        hunk: Some(0),
+                        id: "T1".into(),
+                    },
+                    20 => Spot::Thread {
+                        hunk: Some(1),
+                        id: "T2".into(),
+                    },
+                    _ => added(hunk, i as u32),
+                }
+            })
+            .collect();
         DiffArea {
             end: 50,
             page: 10,
             hunks: vec![0, 12, 30],
             threads: vec![(4, "T1".into()), (20, "T2".into())],
+            spots: Rc::new(spots),
             ..DiffArea::default()
         }
     }
@@ -480,24 +711,89 @@ mod tests {
     }
 
     #[test]
-    fn hunks_and_threads_are_reached_from_where_the_screen_is() {
+    fn the_cursor_reaches_hunks_and_threads_and_the_screen_follows() {
         let mut v = DiffView::new(Some("src/App.tsx".into()));
         key(&mut v, K::Char('}'));
-        assert_eq!(v.scroll, 12);
+        assert_eq!(
+            (v.line, v.scroll),
+            (12, 3),
+            "the screen keeps the cursor on it"
+        );
         key(&mut v, K::Char('n'));
-        assert_eq!(v.scroll, 20);
+        assert_eq!(v.line, 20);
         key(&mut v, K::Char('{'));
-        assert_eq!(v.scroll, 12);
+        assert_eq!(v.line, 12);
         key(&mut v, K::Char('N'));
-        assert_eq!(v.scroll, 4);
+        assert_eq!(
+            (v.line, v.scroll),
+            (4, 4),
+            "above the screen: it starts there"
+        );
         key(&mut v, K::Enter);
-        assert!(v.opened.contains("T1"));
+        assert!(v.opened.contains("T1"), "Enter on a thread folds it");
         key(&mut v, K::Enter);
         assert!(v.opened.is_empty());
         key(&mut v, K::Char('G'));
-        assert_eq!(v.scroll, 50);
+        assert_eq!((v.line, v.scroll), (59, 50));
         key(&mut v, K::Char('j'));
-        assert_eq!(v.scroll, 50, "held at the end");
+        assert_eq!(v.line, 59, "held at the end");
+    }
+
+    #[test]
+    fn a_range_stays_in_its_hunk_and_esc_drops_it_first() {
+        let mut v = DiffView::new(Some("src/App.tsx".into()));
+        v.line = 14;
+        key(&mut v, K::Char('v'));
+        assert_eq!(v.anchor, Some(14));
+        for _ in 0..30 {
+            key(&mut v, K::Char('j'));
+        }
+        assert_eq!(v.line, 29, "the last line of its hunk");
+        let target = v.target(&area()).unwrap();
+        assert_eq!((target.line, target.start), (29, Some(14)));
+        assert_eq!(target.context.len(), 3);
+        assert_eq!(key(&mut v, K::Esc), None);
+        assert_eq!(v.anchor, None, "Esc lets go of the range, not of the diff");
+        v.line = 4;
+        key(&mut v, K::Char('v'));
+        assert_eq!(v.anchor, None, "no range from a thread");
+        assert_eq!(v.thread_here(&area()), Some("T1"));
+    }
+
+    #[test]
+    fn a_comment_goes_to_lines_of_one_side_only() {
+        let del = |n: u32| Spot::Line {
+            hunk: 0,
+            side: Side::Left,
+            number: n,
+            mark: '-',
+            text: format!("old {n}"),
+            new: None,
+        };
+        let spots = vec![
+            Spot::Hunk(0),
+            del(7),
+            added(0, 7),
+            added(0, 8),
+            Spot::Other { hunk: Some(0) },
+        ];
+        let one = target_at(&spots, 1, None).unwrap();
+        assert_eq!((one.side, one.line, one.start), (Side::Left, 7, None));
+        assert!(one.new.is_empty(), "a deleted line has no new text");
+        assert_eq!(one.context, [(7, '-', "old 7".to_string())]);
+        let range = target_at(&spots, 3, Some(2)).unwrap();
+        assert_eq!(
+            (range.side, range.line, range.start),
+            (Side::Right, 8, Some(7))
+        );
+        assert_eq!(range.new, ["new 7", "new 8"]);
+        assert_eq!(
+            target_at(&spots, 2, Some(1)),
+            Err("a range stays on one side")
+        );
+        assert_eq!(target_at(&spots, 0, None), Err("not on a line of the diff"));
+        assert_eq!(target_at(&spots, 4, None), Err("not on a line of the diff"));
+        assert_eq!(target_at(&spots, 9, None), Err("not on a line of the diff"));
     }
 
     #[test]
