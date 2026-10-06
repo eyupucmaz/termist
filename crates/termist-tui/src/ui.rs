@@ -2197,6 +2197,23 @@ mod tests {
     }
 
     #[test]
+    fn the_highlighted_item_has_its_bar_in_the_focus_colour() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 28);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let t = render(&mut app, 90, 28);
+        let layout = app.pr_layout.borrow().clone();
+        let y = layout.body.y + (layout.items[1].line - layout.scroll) as u16;
+        let buf = t.backend().buffer();
+        assert_eq!(buf[(0, y)].symbol(), "┃");
+        assert_eq!(buf[(0, y)].fg, app.theme.focus.fg.unwrap());
+        let other = layout.body.y + (layout.items[0].line - layout.scroll) as u16;
+        assert_ne!(buf[(0, other)].fg, app.theme.focus.fg.unwrap());
+    }
+
+    #[test]
     fn n_jumps_to_the_open_thread_after_a_frame() {
         let mut app = pr_fixture();
         open_detail(&mut app);
@@ -2204,9 +2221,13 @@ mod tests {
         render(&mut app, 90, 12);
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         let layout = app.pr_layout.borrow().clone();
-        let t1 = layout.threads.iter().find(|a| a.id == "T1").unwrap().line;
+        let t1 = layout
+            .items
+            .iter()
+            .position(|a| a.thread.as_deref() == Some("T1"))
+            .unwrap();
         let View::Prs(v) = &app.view else { panic!() };
-        assert_eq!(v.detail.as_ref().unwrap().scroll, t1.min(layout.end));
+        assert_eq!(v.detail.as_ref().unwrap().item, t1);
     }
 
     #[test]

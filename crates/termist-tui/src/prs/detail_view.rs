@@ -98,7 +98,22 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
         Some(x) => match d.tab {
             Tab::Overview => (overview(x, w, t), vec![], vec![]),
             Tab::Conversation => {
-                let (lines, anchors) = timeline::lines(x, w, &d.toggled, t, now);
+                let (mut lines, anchors) = timeline::lines(x, w, &d.toggled, t, now);
+                // The highlighted item: its bar in the focus colour.
+                if let Some(a) = anchors.get(d.item.min(anchors.len().saturating_sub(1))) {
+                    let end = anchors
+                        .iter()
+                        .map(|x| x.line)
+                        .find(|l| *l > a.line)
+                        .unwrap_or(lines.len());
+                    for l in &mut lines[a.line..end] {
+                        if let Some(bar) =
+                            l.spans.first_mut().filter(|s| s.content.starts_with('┃'))
+                        {
+                            bar.style = t.focus;
+                        }
+                    }
+                }
                 (lines, anchors, vec![])
             }
             Tab::Checks => {
@@ -135,7 +150,7 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     let mut layout = app.pr_layout.borrow_mut();
     layout.end = end;
     layout.page = page;
-    layout.threads = threads;
+    layout.items = threads;
     layout.checks = checks;
     layout.files = files;
     layout.tabs = places;
