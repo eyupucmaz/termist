@@ -168,7 +168,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `o` / `x` | open a project / close its tab (sessions keep running) |
 | `r` / `a` / `A` | rename / archive / show archived |
 | `d` | stop a session (asks first) |
-| `s` | settings: theme, colours, prefix, pane, keys |
+| `s` | settings: theme, colours, prefix, pane (right, left, bottom, top), keys |
 | `?` | help: every key as it is bound now |
 | `q` | quit the TUI; the agents keep running |
 
@@ -187,6 +187,11 @@ access to it; `m`, then `a`, picks another.
 `d`, or Enter on a file, opens the diff: the files as a tree beside one file's changes, with the line
 comments under their lines. `J` / `K` go from file to file, `s` shows old and new side by side, and
 `Ctrl+r` marks a file viewed on GitHub (as the checkbox there does) and goes to the next one.
+
+And you can write back. `c` comments: on the pull request, or in the diff on the line under the cursor
+(`v` chooses several lines, `Ctrl+s` turns them into a suggestion). Line comments wait in your review
+until `A` sends it with a comment, an approval or a change request. On a thread `r` replies and `x`
+resolves it; `e` and `D` edit and delete your own comments. Esc keeps what you wrote for later.
 
 ```toml
 [github]
