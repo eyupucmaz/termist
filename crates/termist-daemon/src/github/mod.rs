@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod poller;
 pub mod query;
 pub mod repos;
+pub mod write;
 
 use crate::session::ClientId;
 use crate::store::{Store, StoredRepo};
