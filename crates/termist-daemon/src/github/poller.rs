@@ -35,6 +35,9 @@ pub struct Beat {
     failures: u32,
     in_flight: bool,
     last_ok: Option<Instant>,
+    /// Hurried while a read was on its way: that read may predate what made the
+    /// hurry (a write), so read again as soon as it is back.
+    again: bool,
 }
 
 impl Beat {
@@ -61,12 +64,19 @@ impl Beat {
                 .min(MAX_BACKOFF)
                 .max(every)
         };
-        self.next = Some(now + wait);
+        self.next = Some(if std::mem::take(&mut self.again) {
+            now
+        } else {
+            now + wait
+        });
     }
 
-    /// Due now.
+    /// Due now; after the read on its way, if there is one.
     pub fn hurry(&mut self, now: Instant) {
         self.next = Some(now);
+        if self.in_flight {
+            self.again = true;
+        }
     }
 
     /// Due now if the last good read is older than `age`.
@@ -94,6 +104,20 @@ impl Beat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hurry_while_a_read_is_on_its_way_reads_again_after_it() {
+        let now = Instant::now();
+        let mut b = Beat::default();
+        b.start();
+        // A write lands while the read is out: that read may not see it.
+        b.hurry(now);
+        b.finish(now, true, DETAIL);
+        assert!(b.due(now), "read again at once, not in 20 s");
+        b.start();
+        b.finish(now, true, DETAIL);
+        assert!(!b.due(now), "once");
+    }
 
     const S: Duration = Duration::from_secs(1);
 

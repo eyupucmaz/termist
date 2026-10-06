@@ -380,7 +380,11 @@ impl DiffView {
                 }
                 return Some(DiffAction::Pr(PrAction::Viewed { pr, path, viewed }));
             }
-            KeyCode::Char('s') => return Some(DiffAction::Pr(PrAction::FlipLayout)),
+            KeyCode::Char('s') => {
+                // The other layout draws other rows where the range was.
+                self.anchor = None;
+                return Some(DiffAction::Pr(PrAction::FlipLayout));
+            }
             KeyCode::Char('A') => return Some(DiffAction::Pr(PrAction::Ask(Ask::Submit))),
             KeyCode::Char('c') if !ctrl && !tree => {
                 if self.thread_here(area).is_some() {
@@ -590,8 +594,10 @@ impl DiffView {
         }
     }
 
-    /// Unfolds a folded thread, folds an open one.
+    /// Unfolds a folded thread, folds an open one; a range is let go, as the rows
+    /// below the thread move.
     pub fn toggle(&mut self, id: &str) {
+        self.anchor = None;
         if !self.opened.remove(id) {
             self.opened.insert(id.to_string());
         }
@@ -780,6 +786,19 @@ mod tests {
         key(&mut v, K::Char('v'));
         assert_eq!(v.anchor, None, "no range from a thread");
         assert_eq!(v.thread_here(&area()), Some("T1"));
+    }
+
+    #[test]
+    fn a_range_is_let_go_when_the_lines_under_it_move() {
+        let mut v = DiffView::new(Some("src/App.tsx".into()));
+        v.line = 14;
+        key(&mut v, K::Char('v'));
+        key(&mut v, K::Char('s'));
+        assert_eq!(v.anchor, None, "the other layout draws other rows there");
+        key(&mut v, K::Char('v'));
+        assert_eq!(v.anchor, Some(14));
+        v.toggle("T1");
+        assert_eq!(v.anchor, None, "a thread folding moves the rows below it");
     }
 
     #[test]

@@ -1387,6 +1387,16 @@ impl App {
         if let Some(draft) = self.drafts.get(&(compose.pr, compose.target.clone())) {
             compose.input = crate::text_input::TextInput::with_text(draft, true);
         }
+        // Closed while its words were on their way: it opens still waiting for them.
+        let key = Some((compose.pr, compose.target.clone()));
+        if let Some(ticket) = self
+            .writes
+            .iter()
+            .find(|(_, k)| **k == key)
+            .map(|(t, _)| *t)
+        {
+            compose.state = Sending::Sending(ticket);
+        }
         self.overlays.push(Overlay::Compose(compose));
     }
 
@@ -6605,6 +6615,27 @@ mod tests {
             Some("half a thought"),
             "the words wait for another try"
         );
+    }
+
+    #[test]
+    fn a_box_reopened_while_its_words_are_on_their_way_does_not_send_them_twice() {
+        let (mut app, _) = app();
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        typed(&mut app, "lgtm");
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Esc));
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        assert_eq!(
+            top_compose(&app).map(|c| c.state.clone()),
+            Some(Sending::Sending(1)),
+            "it says it is still on its way"
+        );
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty(), "no second post");
+        app.on_event(ServerEvent::PrWritten {
+            pr: pr_212(),
+            ticket: 1,
+        });
+        assert!(top_compose(&app).is_none(), "the answer closes it");
     }
 
     #[test]
