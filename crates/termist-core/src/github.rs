@@ -144,9 +144,17 @@ pub struct RepoInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
+    /// GitHub's node id: what an edit or a delete names.
+    pub id: String,
     pub author: String,
     pub body: String,
     pub created_at: String,
+    /// You wrote it.
+    pub mine: bool,
+    pub can_edit: bool,
+    pub can_delete: bool,
+    /// In your review that is not sent yet: only you see it.
+    pub pending: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +189,8 @@ pub struct Thread {
     pub path: String,
     /// The line now, else the line it was written on.
     pub line: Option<u32>,
+    /// The first line of a comment on several lines; `None` on one line.
+    pub start_line: Option<u32>,
     pub side: Side,
     pub resolved: bool,
     pub outdated: bool,
@@ -189,6 +199,9 @@ pub struct Thread {
     pub comments: Vec<Comment>,
     /// Comments beyond those that came.
     pub more: u32,
+    pub can_reply: bool,
+    /// You may resolve it, or unresolve it if it is resolved.
+    pub can_resolve: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +241,10 @@ pub struct PrDetail {
     pub id: String,
     /// The head commit: a new one means a new diff.
     pub head_oid: String,
+    /// You opened it: GitHub takes no approval or change request from you on it.
+    pub mine: bool,
+    /// Your review not sent yet, if you have one.
+    pub pending_review: Option<String>,
     pub body: String,
     pub comments: Vec<Comment>,
     pub reviews: Vec<Review>,
@@ -271,6 +288,75 @@ pub struct PrDiff {
     pub files: Vec<DiffFile>,
     /// Changed files beyond those read.
     pub more: u32,
+}
+
+/// How a review is sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    #[default]
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl Verdict {
+    pub const ALL: [Verdict; 3] = [Verdict::Comment, Verdict::Approve, Verdict::RequestChanges];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Comment => "Comment",
+            Verdict::Approve => "Approve",
+            Verdict::RequestChanges => "Request changes",
+        }
+    }
+}
+
+/// A comment on the pull request itself, or one in a review thread: they are edited
+/// and deleted through different calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CommentKind {
+    Issue,
+    Review,
+}
+
+/// Something written to a pull request on GitHub.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrWrite {
+    /// A comment on the pull request, sent at once.
+    Comment {
+        body: String,
+    },
+    /// A reply in a thread: into your pending review if you have one, else sent at once.
+    Reply {
+        thread: String,
+        body: String,
+    },
+    /// A comment on a line, or on the lines from `start`, into your pending review.
+    LineComment {
+        path: String,
+        side: Side,
+        line: u32,
+        start: Option<u32>,
+        body: String,
+    },
+    /// Sends your review (the pending one, or a new one with only this body).
+    Submit {
+        verdict: Verdict,
+        body: String,
+    },
+    Resolve {
+        thread: String,
+        resolved: bool,
+    },
+    Edit {
+        comment: String,
+        kind: CommentKind,
+        body: String,
+    },
+    Delete {
+        comment: String,
+        kind: CommentKind,
+    },
 }
 
 /// Seconds since 1970 of `2026-10-02T15:33:44Z`; `None` for any other shape.

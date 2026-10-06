@@ -677,15 +677,23 @@ pub mod fixtures {
     /// Two threads (one resolved), a comment, an approval and an empty "commented"
     /// review, three checks, two files.
     pub fn detail(summary: PrSummary) -> PrDetail {
+        // Alice is you: her comments are yours to edit and delete.
         let c = |author: &str, body: &str, at: &str| Comment {
+            id: format!("C-{author}-{at}"),
             author: author.into(),
             body: body.into(),
             created_at: at.into(),
+            mine: author == "alice",
+            can_edit: author == "alice",
+            can_delete: author == "alice",
+            pending: false,
         };
         PrDetail {
             summary,
             id: "PR_212".into(),
             head_oid: "h1".into(),
+            mine: false,
+            pending_review: None,
             body: "Adds a dealer dropdown to the search page.\n\nCloses #198.".into(),
             comments: vec![c("bob", "Screenshots attached ![before](https://x.io/b.png)", "2026-10-02T09:00:00Z")],
             reviews: vec![
@@ -716,6 +724,9 @@ pub mod fixtures {
                         c("bob", "Good catch, will fix.", "2026-10-02T11:20:00Z"),
                     ],
                     more: 0,
+                    start_line: None,
+                    can_reply: true,
+                    can_resolve: true,
                 },
                 Thread {
                     id: "T2".into(),
@@ -727,6 +738,9 @@ pub mod fixtures {
                     hunk: "@@ -10 +10 @@\n-a\n+b".into(),
                     comments: vec![c("carol", "nit", "2026-10-02T08:00:00Z")],
                     more: 0,
+                    start_line: None,
+                    can_reply: true,
+                    can_resolve: true,
                 },
             ],
             checks: vec![

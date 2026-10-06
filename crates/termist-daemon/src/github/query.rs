@@ -148,9 +148,14 @@ fn left(v: &Value) -> u32 {
 
 fn comment(c: &Value) -> Comment {
     Comment {
+        id: String::new(),
         author: c["author"]["login"].as_str().unwrap_or("ghost").to_string(),
         body: text(&c["body"]),
         created_at: text(&c["createdAt"]),
+        mine: false,
+        can_edit: false,
+        can_delete: false,
+        pending: false,
     }
 }
 
@@ -323,6 +328,8 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
         summary,
         id: text(&p["id"]),
         head_oid: text(&p["headRefOid"]),
+        mine: false,
+        pending_review: None,
         body: text(&p["body"]),
         comments: nodes(&p["comments"]).map(comment).collect(),
         reviews: nodes(&p["reviews"])
@@ -352,6 +359,9 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
                 hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
                 comments: nodes(&t["comments"]).map(comment).collect(),
                 more: left(&t["comments"]),
+                start_line: None,
+                can_reply: false,
+                can_resolve: false,
             })
             .collect(),
         checks: nodes(contexts).filter_map(check).collect(),

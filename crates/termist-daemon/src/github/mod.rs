@@ -647,6 +647,7 @@ impl GitHub {
                         To::One(client),
                         ServerEvent::PrWriteFailed {
                             pr,
+                            ticket: None,
                             message: format!(
                                 "couldn't mark {} {} · not loaded yet",
                                 file_name(&path),
@@ -1217,6 +1218,7 @@ impl GitHub {
                     To::One(client),
                     ServerEvent::PrWriteFailed {
                         pr,
+                        ticket: None,
                         message: format!(
                             "couldn't mark {} {} · {}",
                             file_name(&path),
@@ -1964,6 +1966,8 @@ mod tests {
             .unwrap(),
             id: "PR_1".into(),
             head_oid: "h1".into(),
+            mine: false,
+            pending_review: None,
             body: "body".into(),
             comments: vec![],
             reviews: vec![],
@@ -2258,6 +2262,8 @@ mod tests {
             .unwrap(),
             id: "PR_212".into(),
             head_oid: head.into(),
+            mine: false,
+            pending_review: None,
             body: String::new(),
             comments: vec![],
             reviews: vec![],
@@ -2573,6 +2579,7 @@ mod tests {
                 To::One(w.client),
                 ServerEvent::PrWriteFailed {
                     pr,
+                    ticket: None,
                     message: "couldn't mark DealerFilter.tsx unviewed · Resource not accessible by integration".into(),
                 }
             )]

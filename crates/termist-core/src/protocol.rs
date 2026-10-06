@@ -1,4 +1,4 @@
-use crate::github::{GhState, PrDetail, PrDiff, PrRef, RepoId, RepoInfo, RepoPrs};
+use crate::github::{GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
     Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
     TermColors,
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -151,6 +151,13 @@ pub enum ClientRequest {
         path: String,
         viewed: bool,
     },
+    /// Writes to the pull request on GitHub; answered with `PrWritten` or
+    /// `PrWriteFailed` carrying the same `ticket`.
+    WritePr {
+        pr: PrRef,
+        ticket: u64,
+        write: PrWrite,
+    },
     Shutdown,
 }
 
@@ -210,9 +217,16 @@ pub enum ServerEvent {
         state: GhState,
         diff: Option<Box<PrDiff>>,
     },
-    /// Something this client asked to change on GitHub did not happen.
+    /// A `WritePr` of this client went through.
+    PrWritten {
+        pr: PrRef,
+        ticket: u64,
+    },
+    /// Something this client asked to change on GitHub did not happen: a `WritePr`
+    /// (its ticket) or a viewed mark (`None`).
     PrWriteFailed {
         pr: PrRef,
+        ticket: Option<u64>,
         message: String,
     },
     /// You were asked for a review since the last round.
@@ -230,7 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_8_since_the_diff() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+    fn the_protocol_is_9_since_writing_to_pull_requests() {
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 }

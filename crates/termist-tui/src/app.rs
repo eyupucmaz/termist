@@ -714,7 +714,8 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
-            ServerEvent::PrWriteFailed { pr, message } => {
+            ServerEvent::PrWritten { .. } => {}
+            ServerEvent::PrWriteFailed { pr, message, .. } => {
                 if let View::Prs(view) = &mut self.view
                     && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
                     && let Some(open) = &mut d.diff
@@ -6172,6 +6173,7 @@ mod tests {
         assert!(!open_diff(&app).unwrap().pending.is_empty());
         app.on_event(ServerEvent::PrWriteFailed {
             pr: pr_212(),
+            ticket: None,
             message: "couldn't mark b.rs viewed · no access".into(),
         });
         assert!(open_diff(&app).unwrap().pending.is_empty());

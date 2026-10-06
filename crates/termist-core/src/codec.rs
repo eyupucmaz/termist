@@ -252,6 +252,33 @@ mod tests {
                 path: "src/a \"b\".rs".into(),
                 viewed: true,
             },
+            ClientRequest::WritePr {
+                pr,
+                ticket: 7,
+                write: PrWrite::LineComment {
+                    path: "src/a.rs".into(),
+                    side: Side::Right,
+                    line: 42,
+                    start: Some(40),
+                    body: "a \"quoted\" word, a \\ backslash\nand a second line".into(),
+                },
+            },
+            ClientRequest::WritePr {
+                pr,
+                ticket: 8,
+                write: PrWrite::Submit {
+                    verdict: Verdict::RequestChanges,
+                    body: "two nits".into(),
+                },
+            },
+            ClientRequest::WritePr {
+                pr,
+                ticket: 9,
+                write: PrWrite::Delete {
+                    comment: "IC_1".into(),
+                    kind: CommentKind::Issue,
+                },
+            },
             ClientRequest::SetRepoAccount {
                 repo: RepoId(7),
                 account: None,
@@ -291,6 +318,8 @@ mod tests {
                     summary,
                     id: "PR_kw1".into(),
                     head_oid: "b4d4d37".into(),
+                    mine: true,
+                    pending_review: Some("PRR_1".into()),
                     body: "Closes #198.".into(),
                     comments: vec![],
                     reviews: vec![],
@@ -298,16 +327,24 @@ mod tests {
                         id: "T1".into(),
                         path: "src/a.rs".into(),
                         line: Some(42),
+                        start_line: Some(40),
                         side: Side::Left,
                         resolved: false,
                         outdated: false,
                         hunk: "@@ -1 +1 @@\n-a\n+b".into(),
                         comments: vec![Comment {
+                            id: "PRRC_1".into(),
                             author: "carol".into(),
                             body: "why?".into(),
                             created_at: "2026-10-02T09:00:00Z".into(),
+                            mine: false,
+                            can_edit: false,
+                            can_delete: false,
+                            pending: true,
                         }],
                         more: 0,
+                        can_reply: true,
+                        can_resolve: false,
                     }],
                     checks: vec![],
                     files: vec![FileChange {
@@ -352,8 +389,17 @@ mod tests {
             },
             ServerEvent::PrWriteFailed {
                 pr,
+                ticket: None,
                 message: "couldn't mark src/a.rs viewed: Resource not accessible".into(),
             },
+            ServerEvent::PrWriteFailed {
+                pr,
+                ticket: Some(7),
+                message:
+                    "couldn't post your comment · Review Can not approve your own pull request"
+                        .into(),
+            },
+            ServerEvent::PrWritten { pr, ticket: 7 },
             ServerEvent::ReviewRequested {
                 project: crate::ProjectId::new(),
                 pr,
