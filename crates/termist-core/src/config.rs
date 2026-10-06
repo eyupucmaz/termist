@@ -19,22 +19,41 @@ pub const SCENES: [&str; 6] = [
 pub enum PanePosition {
     #[default]
     Auto,
-    Bottom,
     Right,
+    Left,
+    Bottom,
+    Top,
 }
 
 impl PanePosition {
-    pub const ALL: [PanePosition; 3] = [
+    pub const ALL: [PanePosition; 5] = [
         PanePosition::Auto,
-        PanePosition::Bottom,
         PanePosition::Right,
+        PanePosition::Left,
+        PanePosition::Bottom,
+        PanePosition::Top,
     ];
 
     pub fn id(self) -> &'static str {
         match self {
             PanePosition::Auto => "auto",
-            PanePosition::Bottom => "bottom",
             PanePosition::Right => "right",
+            PanePosition::Left => "left",
+            PanePosition::Bottom => "bottom",
+            PanePosition::Top => "top",
+        }
+    }
+
+    /// The pane beside the cards to above or below them, and back, keeping its side:
+    /// right and bottom, left and top. `auto` is read as where it is drawn now.
+    pub fn turned(self, beside: bool) -> PanePosition {
+        match self {
+            PanePosition::Right => PanePosition::Bottom,
+            PanePosition::Bottom => PanePosition::Right,
+            PanePosition::Left => PanePosition::Top,
+            PanePosition::Top => PanePosition::Left,
+            PanePosition::Auto if beside => PanePosition::Bottom,
+            PanePosition::Auto => PanePosition::Right,
         }
     }
 }
@@ -663,6 +682,22 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_goes_to_any_side_and_turns_keeping_it() {
+        let (c, problems) = parse("pane_position = \"left\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(c.pane_position, PanePosition::Left);
+        assert_eq!(
+            parse("pane_position = \"top\"\n").0.pane_position,
+            PanePosition::Top
+        );
+        assert_eq!(PanePosition::Left.turned(true), PanePosition::Top);
+        assert_eq!(PanePosition::Top.turned(false), PanePosition::Left);
+        assert_eq!(PanePosition::Right.turned(true), PanePosition::Bottom);
+        assert_eq!(PanePosition::Auto.turned(true), PanePosition::Bottom);
+        assert_eq!(PanePosition::Auto.turned(false), PanePosition::Right);
+    }
+
+    #[test]
     fn the_diff_section_picks_the_layout() {
         let (c, problems) = parse("[diff]\nlayout = \"split\"\n");
         assert!(problems.is_empty(), "{problems:?}");
@@ -727,7 +762,7 @@ mod tests {
     /// The example config of the docs, every key at its default.
     const DOCUMENTED_DEFAULTS: &str = r#"
 prefix = "C-a"
-pane_position = "auto"          # auto | bottom | right
+pane_position = "auto"          # auto | right | left | bottom | top
 theme = "uskudar"
 animations = true
 # editor = "code"
@@ -837,7 +872,7 @@ default = "codex"
             r#"
 theme = "kadikoy"
 animations = "yes"
-pane_position = "left"
+pane_position = "middle"
 colors = 16
 [scenes]
 idle_minutes = -1

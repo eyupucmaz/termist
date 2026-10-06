@@ -160,7 +160,7 @@ pub struct App {
     /// `C-a z`: the pane's place until termist quits, over the configured one.
     pub pane_override: Option<PanePosition>,
     /// Where the last frame put the pane.
-    pub pane_right: bool,
+    pub pane_beside: bool,
     /// How far the help can scroll in the last frame: its last line at the bottom.
     pub help_end: std::cell::Cell<usize>,
     /// A scene over the screen: the splash, or the idle screen.
@@ -274,7 +274,7 @@ impl App {
             host_colors: None,
             local_settings: Vec::new(),
             pane_override: None,
-            pane_right: false,
+            pane_beside: false,
             help_end: std::cell::Cell::new(usize::MAX),
             showing: None,
             scene: "",
@@ -2235,11 +2235,7 @@ impl App {
                 .overlays
                 .push(Overlay::Settings(SettingsView::default())),
             KeyAction::TogglePane => {
-                self.pane_override = Some(if self.pane_right {
-                    PanePosition::Bottom
-                } else {
-                    PanePosition::Right
-                });
+                self.pane_override = Some(self.pane_position().turned(self.pane_beside));
             }
         }
         vec![]
@@ -5492,14 +5488,20 @@ mod tests {
             app.on_key(k(K::Char('j')));
         }
         let actions = app.on_key(k(K::Right));
-        assert_eq!(app.config.pane_position, PanePosition::Bottom);
-        assert_eq!(app.pane_position(), PanePosition::Bottom);
+        assert_eq!(app.config.pane_position, PanePosition::Right);
+        assert_eq!(app.pane_position(), PanePosition::Right);
         assert_eq!(
             writes(&actions),
             [&ConfigEdit::Set {
                 key: "pane_position",
-                value: "bottom".into()
+                value: "right".into()
             }]
+        );
+        app.on_key(k(K::Right));
+        assert_eq!(
+            app.config.pane_position,
+            PanePosition::Left,
+            "then left, bottom, top"
         );
     }
 

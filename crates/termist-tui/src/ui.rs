@@ -35,8 +35,8 @@ pub struct Areas {
     /// Not every card fits: the line above and the line below the cards count the
     /// hidden ones.
     pub scroll_lines: bool,
-    /// The pane is right of the cards, not under them.
-    pub pane_right: bool,
+    /// The pane is beside the cards (right or left), not above or below them.
+    pub pane_beside: bool,
 }
 
 /// From this many columns up, `auto` puts the pane right of the cards.
@@ -58,27 +58,32 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         height: area.height.saturating_sub(header.height + footer_h),
         ..area
     };
-    let pane_right = match position {
-        PanePosition::Right => true,
-        PanePosition::Bottom => false,
+    let beside = match position {
+        PanePosition::Right | PanePosition::Left => true,
+        PanePosition::Bottom | PanePosition::Top => false,
         PanePosition::Auto => area.width >= PANE_RIGHT_FROM,
     };
-    let (cards_zone, cards_per_row) = if pane_right {
-        // At most two fifths of the width, and always one column of cards.
-        let per_row = (body.width * 2 / 5 / CARD_W).max(1);
-        let zone = Rect {
-            width: (per_row * CARD_W).min(body.width),
-            ..body
+    // The pane first (left or above), the cards after it.
+    let pane_first = matches!(position, PanePosition::Left | PanePosition::Top);
+    let (cards_zone, cards_per_row) = if beside {
+        // One column of cards; the rest of the width is the pane's.
+        let width = CARD_W.min(body.width);
+        let x = if pane_first {
+            body.right() - width
+        } else {
+            body.x
         };
-        (zone, per_row as usize)
+        (Rect { x, width, ..body }, 1)
     } else {
         let per_row = (body.width / CARD_W).max(1) as usize;
         let card_rows = session_count.max(1).div_ceil(per_row) as u16;
-        let zone = Rect {
-            height: (card_rows * CARD_H).min(body.height / 2),
-            ..body
+        let height = (card_rows * CARD_H).min(body.height / 2);
+        let y = if pane_first {
+            body.bottom() - height
+        } else {
+            body.y
         };
-        (zone, per_row)
+        (Rect { y, height, ..body }, per_row)
     };
     let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
     let scroll_lines = card_rows * CARD_H > cards_zone.height;
@@ -99,18 +104,25 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
             card_rows,
         )
     };
-    let pane = if pane_right {
-        Rect {
+    let pane = match (beside, pane_first) {
+        (true, false) => Rect {
             x: cards_zone.right(),
             width: body.width - cards_zone.width,
             ..body
-        }
-    } else {
-        Rect {
-            y: body.y + cards_zone.height,
+        },
+        (true, true) => Rect {
+            width: body.width - cards_zone.width,
+            ..body
+        },
+        (false, false) => Rect {
+            y: cards_zone.bottom(),
             height: body.height - cards_zone.height,
             ..body
-        }
+        },
+        (false, true) => Rect {
+            height: body.height - cards_zone.height,
+            ..body
+        },
     };
     let pane_inner = Rect {
         x: pane.x + 1,
@@ -129,7 +141,7 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         cards_per_row,
         card_rows: visible_rows as usize,
         scroll_lines,
-        pane_right,
+        pane_beside: beside,
     }
 }
 
@@ -784,7 +796,7 @@ mod tests {
             app.project_sessions().len(),
             app.pane_position(),
         );
-        app.pane_right = areas.pane_right;
+        app.pane_beside = areas.pane_beside;
         app.set_card_window(areas.cards_per_row, areas.card_rows);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
@@ -1557,15 +1569,15 @@ mod tests {
     #[test]
     fn auto_puts_the_pane_on_the_right_from_180_columns() {
         let area = |w| Rect::new(0, 0, w, 40);
-        assert!(!layout(area(179), 3, PanePosition::Auto).pane_right);
+        assert!(!layout(area(179), 3, PanePosition::Auto).pane_beside);
         let wide = layout(area(180), 3, PanePosition::Auto);
-        assert!(wide.pane_right);
-        assert_eq!(wide.cards_per_row, 3, "two fifths of 180 is three cards");
-        assert_eq!(wide.pane.x, 72);
-        assert_eq!(wide.pane.width, 108);
+        assert!(wide.pane_beside);
+        assert_eq!(wide.cards_per_row, 1, "beside the pane, one column");
+        assert_eq!(wide.pane.x, 24);
+        assert_eq!(wide.pane.width, 156);
         assert_eq!(wide.pane.height, 38, "the whole body");
-        assert!(layout(area(100), 3, PanePosition::Right).pane_right);
-        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_right);
+        assert!(layout(area(100), 3, PanePosition::Right).pane_beside);
+        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_beside);
     }
 
     #[test]
@@ -1603,11 +1615,47 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_on_the_left_or_on_top() {
+        let area = Rect::new(0, 0, 100, 30);
+        let left = layout(area, 3, PanePosition::Left);
+        assert!(left.pane_beside);
+        assert_eq!((left.cards_zone.x, left.cards_zone.width), (76, 24));
+        assert_eq!((left.pane.x, left.pane.width), (0, 76));
+        assert_eq!(left.cards_per_row, 1);
+        let top = layout(area, 3, PanePosition::Top);
+        assert!(!top.pane_beside);
+        assert_eq!(top.pane.y, top.body.y, "the pane first");
+        assert_eq!(top.pane.bottom(), top.cards_zone.y);
+        assert_eq!(top.cards_zone.bottom(), top.body.bottom());
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Left;
+        insta::assert_snapshot!("pane_left", render(&mut app, 80, 12).backend());
+        app.config.pane_position = PanePosition::Top;
+        insta::assert_snapshot!("pane_top", render(&mut app, 60, 16).backend());
+    }
+
+    #[test]
+    fn prefix_z_keeps_the_pane_on_its_side() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Left;
+        render(&mut app, 100, 20);
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Top);
+        render(&mut app, 100, 20);
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Left);
+    }
+
+    #[test]
     fn prefix_z_moves_the_pane_until_termist_quits() {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
         render(&mut app, 100, 20);
-        assert!(!app.pane_right);
+        assert!(!app.pane_beside);
         app.on_key(key(K::Enter));
         app.on_key(ctrl('a'));
         app.on_key(key(K::Char('z')));
@@ -1617,7 +1665,7 @@ mod tests {
             t.backend().buffer()[(24, 1)].symbol() == "┌",
             "the pane starts right of the cards"
         );
-        app.pane_right = true;
+        app.pane_beside = true;
         app.on_key(ctrl('a'));
         app.on_key(key(K::Char('z')));
         assert_eq!(app.pane_position(), PanePosition::Bottom);

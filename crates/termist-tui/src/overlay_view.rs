@@ -451,8 +451,10 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         SettingRow::Pane => {
                             let place = match app.config.pane_position {
                                 PanePosition::Auto => "auto (right from 180 columns)",
-                                PanePosition::Bottom => "under the cards",
                                 PanePosition::Right => "right of the cards",
+                                PanePosition::Left => "left of the cards",
+                                PanePosition::Bottom => "under the cards",
+                                PanePosition::Top => "above the cards",
                             };
                             ("pane", format!("‹ {place} ›{}", local("pane_position")))
                         }
