@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Writing to pull requests from termist, and the pane on any side.
+
+### Added
+
+- **Comments and reviews.** In a pull request, `c` comments on it; in its diff, `c` comments on the line
+  under the new cursor, or on a range chosen with `v`, and `Ctrl+s` puts those lines in a suggestion.
+  Line comments wait in your review, marked *pending*, until `A` sends it as a comment, an approval or a
+  change request. On a thread `r` replies and `x` resolves it or opens it again; `e` and `D` edit and
+  delete your own comments. A box closed with Esc keeps its words; one GitHub refuses stays open and
+  says why.
+- **The pane on any side.** `pane_position` (and the settings, `s`) takes `left` and `top` too. Beside
+  the pane the cards stand in one column, so a wide screen gives the pane all the room. `Ctrl+a z`
+  moves it between beside and under (or above) the cards, keeping its side.
+
+### Changed
+
+- In a pull request's conversation `j` / `k` go from comment to comment; in its diff they move a line
+  cursor.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions
+can stop, `termist kill` and start `termist` again.
+
 ## 0.1.3 - 2026-10-05
 
 A pull request's diff in termist, and the mouse everywhere.

@@ -147,10 +147,16 @@ fn left(v: &Value) -> u32 {
 }
 
 fn comment(c: &Value) -> Comment {
+    let yes = |key: &str| c[key].as_bool().unwrap_or(false);
     Comment {
+        id: text(&c["id"]),
         author: c["author"]["login"].as_str().unwrap_or("ghost").to_string(),
         body: text(&c["body"]),
         created_at: text(&c["createdAt"]),
+        mine: yes("viewerDidAuthor"),
+        can_edit: yes("viewerCanUpdate"),
+        can_delete: yes("viewerCanDelete"),
+        pending: c["state"].as_str() == Some("PENDING"),
     }
 }
 
@@ -276,13 +282,17 @@ pub fn detail(owner: &str, name: &str, number: u32) -> String {
   repository(owner: {owner}, name: {name}) {{
     pullRequest(number: {number}) {{
       ...PrFields
-      id headRefOid
+      id headRefOid viewerDidAuthor
+      pending: reviews(states: PENDING, first: 1) {{ nodes {{ id }} }}
       body
-      comments(first: 100) {{ totalCount nodes {{ author {{ login }} body createdAt }} }}
+      comments(first: 100) {{ totalCount nodes {{ id author {{ login }} body createdAt
+        viewerDidAuthor viewerCanUpdate viewerCanDelete }} }}
       reviews(first: 50) {{ totalCount nodes {{ author {{ login }} state body submittedAt }} }}
       reviewThreads(first: 100) {{ totalCount nodes {{
-        id isResolved isOutdated path line originalLine diffSide
-        comments(first: 50) {{ totalCount nodes {{ author {{ login }} body createdAt diffHunk }} }}
+        id isResolved isOutdated path line originalLine startLine diffSide
+        viewerCanReply viewerCanResolve viewerCanUnresolve
+        comments(first: 50) {{ totalCount nodes {{ id author {{ login }} body createdAt diffHunk state
+          viewerDidAuthor viewerCanUpdate viewerCanDelete }} }}
       }} }}
       files(first: 100) {{ totalCount nodes {{ path additions deletions changeType viewerViewedState }} }}
       checks: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ totalCount nodes {{
@@ -323,6 +333,8 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
         summary,
         id: text(&p["id"]),
         head_oid: text(&p["headRefOid"]),
+        mine: p["viewerDidAuthor"].as_bool().unwrap_or(false),
+        pending_review: opt_text(&p["pending"]["nodes"][0]["id"]),
         body: text(&p["body"]),
         comments: nodes(&p["comments"]).map(comment).collect(),
         reviews: nodes(&p["reviews"])
@@ -336,22 +348,38 @@ pub fn parse_detail(v: &Value) -> Result<PrDetail, GhState> {
             })
             .collect(),
         threads: nodes(&p["reviewThreads"])
-            .map(|t| Thread {
-                id: text(&t["id"]),
-                path: text(&t["path"]),
-                line: t["line"]
+            .map(|t| {
+                let yes = |key: &str| t[key].as_bool().unwrap_or(false);
+                let resolved = yes("isResolved");
+                let line = t["line"]
                     .as_u64()
                     .or_else(|| t["originalLine"].as_u64())
-                    .map(|n| n as u32),
-                side: match t["diffSide"].as_str() {
-                    Some("LEFT") => Side::Left,
-                    _ => Side::Right,
-                },
-                resolved: t["isResolved"].as_bool().unwrap_or(false),
-                outdated: t["isOutdated"].as_bool().unwrap_or(false),
-                hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
-                comments: nodes(&t["comments"]).map(comment).collect(),
-                more: left(&t["comments"]),
+                    .map(|n| n as u32);
+                Thread {
+                    id: text(&t["id"]),
+                    path: text(&t["path"]),
+                    line,
+                    // GitHub repeats the line as the start of a one-line comment.
+                    start_line: t["startLine"]
+                        .as_u64()
+                        .map(|n| n as u32)
+                        .filter(|n| Some(*n) != line),
+                    side: match t["diffSide"].as_str() {
+                        Some("LEFT") => Side::Left,
+                        _ => Side::Right,
+                    },
+                    resolved,
+                    outdated: yes("isOutdated"),
+                    hunk: text(&t["comments"]["nodes"][0]["diffHunk"]),
+                    comments: nodes(&t["comments"]).map(comment).collect(),
+                    more: left(&t["comments"]),
+                    can_reply: yes("viewerCanReply"),
+                    can_resolve: if resolved {
+                        yes("viewerCanUnresolve")
+                    } else {
+                        yes("viewerCanResolve")
+                    },
+                }
             })
             .collect(),
         checks: nodes(contexts).filter_map(check).collect(),
@@ -484,23 +512,30 @@ pub mod tests {
         "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z",
         "headRefName":"feat/dealer","baseRefName":"main","additions":184,"deletions":32,"changedFiles":9,
         "id":"PR_kwDOAcme212","headRefOid":"b4d4d37695dfcb6005acbbc67a9c47a096fbea63",
+        "viewerDidAuthor":false,"pending":{"nodes":[{"id":"PRR_pending"}]},
         "mergeable":"MERGEABLE","reviewDecision":"APPROVED","author":{"login":"bob"},
         "reviewRequests":{"nodes":[]},
         "latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","author":{"login":"carol"}}]},
         "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]},
         "body":"Adds a dealer dropdown.\n\nCloses #198.",
-        "comments":{"totalCount":1,"nodes":[
-          {"author":{"login":"bob"},"body":"Screenshots attached","createdAt":"2026-10-01T10:05:00Z"}]},
+        "comments":{"totalCount":2,"nodes":[
+          {"id":"IC_1","author":{"login":"bob"},"body":"Screenshots attached","createdAt":"2026-10-01T10:05:00Z",
+           "viewerDidAuthor":false,"viewerCanUpdate":false,"viewerCanDelete":false},
+          {"id":"IC_2","author":{"login":"alice"},"body":"Thanks!","createdAt":"2026-10-01T10:06:00Z",
+           "viewerDidAuthor":true,"viewerCanUpdate":true,"viewerCanDelete":true}]},
         "reviews":{"totalCount":2,"nodes":[
           {"author":{"login":"carol"},"state":"APPROVED","body":"Looks good, one nit below.","submittedAt":"2026-10-02T09:00:00Z"},
           {"author":{"login":"carol"},"state":"COMMENTED","body":"","submittedAt":"2026-10-02T08:59:00Z"}]},
         "reviewThreads":{"totalCount":2,"nodes":[
-          {"id":"T1","isResolved":false,"isOutdated":false,"path":"src/search/DealerFilter.tsx","line":42,"originalLine":40,"diffSide":"RIGHT",
+          {"id":"T1","isResolved":false,"isOutdated":false,"path":"src/search/DealerFilter.tsx","line":42,"originalLine":40,"startLine":40,"diffSide":"RIGHT",
+           "viewerCanReply":true,"viewerCanResolve":true,"viewerCanUnresolve":false,
            "comments":{"totalCount":2,"nodes":[
              {"author":{"login":"carol"},"body":"This refetches on every mount.","createdAt":"2026-10-02T08:58:00Z",
               "diffHunk":"@@ -38,3 +38,5 @@\n   const dealers = useDealers();\n   const [sel, setSel] = useState<string>();\n+  useEffect(() => fetchAll(), []);"},
-             {"author":{"login":"bob"},"body":"Good catch, will fix.","createdAt":"2026-10-02T09:30:00Z","diffHunk":"x"}]}},
-          {"id":"T2","isResolved":true,"isOutdated":true,"path":"src/api/client.ts","line":null,"originalLine":10,"diffSide":"LEFT",
+             {"id":"PRRC_2","author":{"login":"alice"},"body":"Good catch, will fix.","createdAt":"2026-10-02T09:30:00Z","diffHunk":"x",
+              "state":"PENDING","viewerDidAuthor":true,"viewerCanUpdate":true,"viewerCanDelete":true}]}},
+          {"id":"T2","isResolved":true,"isOutdated":true,"path":"src/api/client.ts","line":null,"originalLine":10,"startLine":10,"diffSide":"LEFT",
+           "viewerCanReply":true,"viewerCanResolve":false,"viewerCanUnresolve":true,
            "comments":{"totalCount":3,"nodes":[
              {"author":null,"body":"old","createdAt":"2026-10-01T12:00:00Z","diffHunk":"@@ -10 +10 @@\n-a\n+b"}]}}]},
         "files":{"totalCount":101,"nodes":[
@@ -529,6 +564,11 @@ pub mod tests {
         for part in [
             "id headRefOid",
             "reviewThreads(first: 100)",
+            "viewerDidAuthor",
+            "pending: reviews(states: PENDING, first: 1)",
+            "viewerCanReply viewerCanResolve viewerCanUnresolve",
+            "diffHunk state",
+            "viewerCanUpdate viewerCanDelete",
             "diffSide",
             "viewerViewedState",
             "diffHunk",
@@ -546,10 +586,21 @@ pub mod tests {
         let d = parse_detail(&json(DETAIL)).unwrap();
         assert_eq!(d.summary.number, 212);
         assert_eq!(d.id, "PR_kwDOAcme212");
+        assert!(!d.mine);
+        assert_eq!(d.pending_review.as_deref(), Some("PRR_pending"));
+        let (bob, alice) = (&d.comments[0], &d.comments[1]);
+        assert_eq!(
+            (bob.id.as_str(), bob.mine, bob.can_edit),
+            ("IC_1", false, false)
+        );
+        assert_eq!(
+            (alice.mine, alice.can_edit, alice.can_delete, alice.pending),
+            (true, true, true, false)
+        );
         assert_eq!(d.head_oid, "b4d4d37695dfcb6005acbbc67a9c47a096fbea63");
         assert_eq!(d.summary.checks, Checks::Pending);
         assert_eq!(d.body, "Adds a dealer dropdown.\n\nCloses #198.");
-        assert_eq!(d.comments.len(), 1);
+        assert_eq!(d.comments.len(), 2);
         assert_eq!(d.reviews.len(), 2);
         assert_eq!(d.reviews[0].state, ReviewState::Approved);
 
@@ -567,6 +618,15 @@ pub mod tests {
         );
         assert_eq!(t2.comments[0].author, "ghost");
         assert_eq!((t1.side, t2.side), (Side::Right, Side::Left));
+        assert_eq!(
+            (t1.start_line, t2.start_line),
+            (Some(40), None),
+            "a start equal to the line is no range"
+        );
+        assert!(t1.can_reply && t1.can_resolve, "open: may be resolved");
+        assert!(t2.can_resolve, "resolved: may be unresolved");
+        assert!(t1.comments[1].pending && t1.comments[1].mine);
+        assert!(!t1.comments[0].pending);
 
         let changes: String = d.files.iter().map(|f| f.change).collect();
         assert_eq!(changes, "ADMR");

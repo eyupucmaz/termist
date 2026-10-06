@@ -275,7 +275,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 app.project_sessions().len(),
                 app.pane_position(),
             );
-            app.pane_right = areas.pane_right;
+            app.pane_beside = areas.pane_beside;
             app.pane_area = areas.pane_inner;
             app.screen = Rect::new(0, 0, size.width, size.height);
             app.set_card_window(areas.cards_per_row, areas.card_rows);

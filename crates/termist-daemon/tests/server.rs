@@ -1705,6 +1705,7 @@ case "$1 $2" in
     case "$body" in
       *viewerPermission*) echo '{"data":{"r0":{"viewerPermission":"WRITE"}}}' ;;
       *markFileAsViewed*) echo '{"data":{"markFileAsViewed":{"clientMutationId":null}}}' ;;
+      *addComment*) echo '{"data":{"addComment":{"clientMutationId":null}}}' ;;
       *reviewThreads*) printf '%s\n' '@DETAIL@' ;;
       *pageInfo*) printf '%s\n' '@VIEWED@' ;;
       *) echo 'INBOX' ;;
@@ -1867,6 +1868,92 @@ async fn a_pull_requests_diff_comes_through_gh_and_a_file_is_marked_viewed() {
     .unwrap();
     next_event(&mut c, |e| {
         matches!(e, ServerEvent::PrDiff { diff: Some(d), .. } if d.files[0].viewed == Viewed::Viewed)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_comment_goes_through_gh_and_the_pull_request_is_read_again() {
+    use termist_core::github::{PrRef, PrWrite};
+    let tmp = tempfile::tempdir().unwrap();
+    let site = tmp.path().join("site");
+    std::fs::create_dir(&site).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&site)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !git(&["init", "-q"]) {
+        return; // no git on this machine
+    }
+    assert!(git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/site.git"
+    ]));
+    let d = start(DaemonConfig {
+        gh_bin: Some(stub_gh(tmp.path())),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, site).await;
+    c.send(&ClientRequest::SetGitHub { enabled: true })
+        .await
+        .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::Prs { repos, .. } if repos.first().is_some_and(|r| !r.prs.is_empty()))
+    })
+    .await;
+    let ServerEvent::Prs { repos, .. } = ev else {
+        unreachable!()
+    };
+    let pr = PrRef {
+        repo: repos[0].repo,
+        number: 212,
+    };
+    c.send(&ClientRequest::SetPrFocus {
+        project: Some(project),
+        pr: Some(pr),
+        diff: false,
+    })
+    .await
+    .unwrap();
+    next_event(&mut c, |e| {
+        matches!(
+            e,
+            ServerEvent::PrDetail {
+                detail: Some(_),
+                ..
+            }
+        )
+    })
+    .await;
+    c.send(&ClientRequest::WritePr {
+        pr,
+        ticket: 1,
+        write: PrWrite::Comment {
+            body: "looks \"good\"".into(),
+        },
+    })
+    .await
+    .unwrap();
+    next_event(&mut c, |e| {
+        matches!(e, ServerEvent::PrWritten { ticket: 1, .. })
+    })
+    .await;
+    next_event(&mut c, |e| {
+        matches!(
+            e,
+            ServerEvent::PrDetail {
+                detail: Some(_),
+                ..
+            }
+        )
     })
     .await;
 }

@@ -56,6 +56,8 @@ pub enum Overlay {
         repo: RepoId,
         picker: ListPicker<Option<String>>,
     },
+    /// `c`, `r`, `e` and `A` in a pull request: a comment, a reply, an edit or a review.
+    Compose(crate::prs::compose::Compose),
 }
 
 pub fn repo_label(r: &RepoInfo) -> String {
@@ -161,6 +163,7 @@ impl Overlay {
             Overlay::ModelName(input)
             | Overlay::FollowUp { input, .. }
             | Overlay::Rename { input, .. } => Some(input),
+            Overlay::Compose(c) => Some(&mut c.input),
             _ => None,
         }
     }

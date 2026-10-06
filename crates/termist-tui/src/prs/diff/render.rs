@@ -175,6 +175,9 @@ mod tests {
             hunk: String::new(),
             comments: vec![],
             more: 0,
+            start_line: None,
+            can_reply: true,
+            can_resolve: true,
         }
     }
 

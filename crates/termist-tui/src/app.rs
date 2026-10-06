@@ -6,7 +6,8 @@ use crate::overlay::{
     self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
     QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
-use crate::prs::{self, PrAction, PrLayout, PrView, ProjectPrs};
+use crate::prs::compose::{Compose, ComposeAction, Sending, Target};
+use crate::prs::{self, Ask, Mine, PrAction, PrLayout, PrView, ProjectPrs, Subject};
 use crate::scene_view::{self, ShowKind, Showing};
 use crate::selection::Selection;
 use crate::settings::ConfigEdit;
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
-use termist_core::github::{GhState, PrDetail, PrDiff, PrRef, RepoInfo};
+use termist_core::github::{CommentKind, GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoInfo};
 use termist_core::{
     AgentStatus, ClientRequest, Harness, HarnessInfo, LaunchOptions, ModelInfo, ProjectId,
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
@@ -55,6 +56,8 @@ pub enum Mode {
     ConfirmClose(ProjectId),
     /// `a` was pressed on this session; `y` / Enter archives it.
     ConfirmArchive(SessionId),
+    /// `D` was pressed on a comment of yours (`App::deleting`); `y` / Enter deletes it.
+    ConfirmDelete,
 }
 
 /// What the body shows: the grid of cards, the archived cards, or pull requests.
@@ -160,7 +163,7 @@ pub struct App {
     /// `C-a z`: the pane's place until termist quits, over the configured one.
     pub pane_override: Option<PanePosition>,
     /// Where the last frame put the pane.
-    pub pane_right: bool,
+    pub pane_beside: bool,
     /// How far the help can scroll in the last frame: its last line at the bottom.
     pub help_end: std::cell::Cell<usize>,
     /// A scene over the screen: the splash, or the idle screen.
@@ -191,6 +194,13 @@ pub struct App {
     pub pr_details: HashMap<PrRef, (GhState, Option<PrDetail>)>,
     /// Each pull request's diff as last read, and how the newest read went.
     pub pr_diffs: HashMap<PrRef, (GhState, Option<PrDiff>)>,
+    /// Words written to a pull request and not sent yet, by what they go to.
+    pub drafts: HashMap<(PrRef, Target), String>,
+    /// Writes on their way, by ticket: the draft to forget once GitHub took them.
+    writes: HashMap<u64, Option<(PrRef, Target)>>,
+    /// The comment `D` asked to delete, waiting for a yes.
+    pub deleting: Option<(PrRef, String, CommentKind)>,
+    next_ticket: u64,
     /// Where the last frame put the PR view's rows and threads.
     pub pr_layout: RefCell<PrLayout>,
     /// What the last frame drew where, for the mouse.
@@ -274,7 +284,7 @@ impl App {
             host_colors: None,
             local_settings: Vec::new(),
             pane_override: None,
-            pane_right: false,
+            pane_beside: false,
             help_end: std::cell::Cell::new(usize::MAX),
             showing: None,
             scene: "",
@@ -289,6 +299,10 @@ impl App {
             repo_lists: HashMap::new(),
             pr_details: HashMap::new(),
             pr_diffs: HashMap::new(),
+            drafts: HashMap::new(),
+            writes: HashMap::new(),
+            deleting: None,
+            next_ticket: 0,
             pr_layout: RefCell::default(),
             hits: RefCell::default(),
             frozen_now: None,
@@ -714,7 +728,35 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
-            ServerEvent::PrWriteFailed { pr, message } => {
+            ServerEvent::PrWritten { ticket, .. } => {
+                if let Some(Some(target)) = self.writes.remove(&ticket) {
+                    self.drafts.remove(&target);
+                }
+                if matches!(self.overlays.last(), Some(Overlay::Compose(c)) if c.state == Sending::Sending(ticket))
+                {
+                    self.overlays.pop();
+                }
+            }
+            ServerEvent::PrWriteFailed {
+                ticket: Some(ticket),
+                message,
+                ..
+            } => {
+                self.writes.remove(&ticket);
+                match self.overlays.last_mut() {
+                    // The box still open says why, and keeps the words.
+                    Some(Overlay::Compose(c)) if c.state == Sending::Sending(ticket) => {
+                        let why = message.split(" · ").last().unwrap_or(&message).to_string();
+                        c.state = Sending::Failed(why);
+                    }
+                    _ => self.toasts.push(Toast {
+                        text: format!("✗ {message}"),
+                        kind: ToastKind::Failed,
+                        until: Instant::now() + toast::AGENT_FOR,
+                    }),
+                }
+            }
+            ServerEvent::PrWriteFailed { pr, message, .. } => {
                 if let View::Prs(view) = &mut self.view
                     && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
                     && let Some(open) = &mut d.diff
@@ -811,6 +853,16 @@ impl App {
                 self.mode = Mode::Grid;
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
                     return vec![Action::Send(ClientRequest::ArchiveSession { session })];
+                }
+                return vec![];
+            }
+            Mode::ConfirmDelete => {
+                self.mode = Mode::Grid;
+                let deleting = self.deleting.take();
+                if let Some((pr, comment, kind)) = deleting
+                    && matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+                {
+                    return self.write_now(pr, PrWrite::Delete { comment, kind });
                 }
                 return vec![];
             }
@@ -1198,6 +1250,190 @@ impl App {
         })]
     }
 
+    /// Sends a write that needs no words (resolving, deleting) under a new ticket.
+    fn write_now(&mut self, pr: PrRef, write: PrWrite) -> Vec<Action> {
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        self.writes.insert(ticket, None);
+        vec![Action::Send(ClientRequest::WritePr { pr, ticket, write })]
+    }
+
+    /// A write a key asked for, made whole with what the pull request's detail says:
+    /// who started a thread, what GitHub allows, your comment, your pending review.
+    fn ask(&mut self, ask: Ask) -> Vec<Action> {
+        let View::Prs(view) = &self.view else {
+            return vec![];
+        };
+        let Some(pr) = view.detail.as_ref().map(|d| d.pr) else {
+            return vec![];
+        };
+        let Some(detail) = self.pr_details.get(&pr).and_then(|(_, d)| d.as_ref()) else {
+            self.message = Some("the pull request is not read yet".into());
+            return vec![];
+        };
+        let thread = |id: &str| detail.threads.iter().find(|t| t.id == id).cloned();
+        // Your comment in question: the one named, or your last one in the thread.
+        let mine = |s: &Subject| match s {
+            Subject::Comment(m) => Some(m.clone()),
+            Subject::Thread(id) => {
+                thread(id)?
+                    .comments
+                    .iter()
+                    .rev()
+                    .find(|c| c.mine)
+                    .map(|c| Mine {
+                        id: c.id.clone(),
+                        kind: CommentKind::Review,
+                        body: c.body.clone(),
+                        can_edit: c.can_edit,
+                        can_delete: c.can_delete,
+                    })
+            }
+        };
+        let pending = detail
+            .threads
+            .iter()
+            .flat_map(|t| &t.comments)
+            .filter(|c| c.pending && c.mine)
+            .count();
+        let own = detail.mine;
+        let refuse = |app: &mut App, why: &str| {
+            app.message = Some(why.into());
+            vec![]
+        };
+        match ask {
+            Ask::Comment => self.open_compose(Compose::new(pr, Target::Comment, "")),
+            Ask::Submit => {
+                let mut c = Compose::new(pr, Target::Submit, "");
+                c.mine = own;
+                c.pending = pending;
+                self.open_compose(c);
+            }
+            Ask::Line { path, target } => {
+                let mut c = Compose::new(
+                    pr,
+                    Target::Line {
+                        path,
+                        side: target.side,
+                        line: target.line,
+                        start: target.start,
+                    },
+                    "",
+                );
+                c.context = target.context;
+                c.suggest = target.new;
+                self.open_compose(c);
+            }
+            Ask::Reply { thread: id } => {
+                let Some(th) = thread(&id) else {
+                    return refuse(self, "that thread is gone");
+                };
+                if !th.can_reply {
+                    return refuse(self, "GitHub does not let you reply here");
+                }
+                let to = th
+                    .comments
+                    .first()
+                    .map_or("the thread".to_string(), |c| c.author.clone());
+                self.open_compose(Compose::new(pr, Target::Reply { thread: id, to }, ""));
+            }
+            Ask::Resolve { thread: id } => {
+                let Some(th) = thread(&id) else {
+                    return refuse(self, "that thread is gone");
+                };
+                if !th.can_resolve {
+                    return refuse(self, "GitHub does not let you resolve this (yet)");
+                }
+                return self.write_now(
+                    pr,
+                    PrWrite::Resolve {
+                        thread: id,
+                        resolved: !th.resolved,
+                    },
+                );
+            }
+            Ask::Edit(subject) => {
+                let Some(m) = mine(&subject) else {
+                    return refuse(self, "not your comment");
+                };
+                if !m.can_edit {
+                    return refuse(self, "GitHub does not let you edit this");
+                }
+                self.open_compose(Compose::new(
+                    pr,
+                    Target::Edit {
+                        comment: m.id,
+                        kind: m.kind,
+                    },
+                    &m.body,
+                ));
+            }
+            Ask::Delete(subject) => {
+                let Some(m) = mine(&subject) else {
+                    return refuse(self, "not your comment");
+                };
+                if !m.can_delete {
+                    return refuse(self, "GitHub does not let you delete this");
+                }
+                self.deleting = Some((pr, m.id, m.kind));
+                self.mode = Mode::ConfirmDelete;
+            }
+        }
+        vec![]
+    }
+
+    /// Opens the box for `compose`, on the draft its target has if there is one.
+    pub fn open_compose(&mut self, mut compose: Compose) {
+        if let Some(draft) = self.drafts.get(&(compose.pr, compose.target.clone())) {
+            compose.input = crate::text_input::TextInput::with_text(draft, true);
+        }
+        // Closed while its words were on their way: it opens still waiting for them.
+        let key = Some((compose.pr, compose.target.clone()));
+        if let Some(ticket) = self
+            .writes
+            .iter()
+            .find(|(_, k)| **k == key)
+            .map(|(t, _)| *t)
+        {
+            compose.state = Sending::Sending(ticket);
+        }
+        self.overlays.push(Overlay::Compose(compose));
+    }
+
+    /// Keys in the box: Enter sends under a new ticket, Esc keeps the words.
+    fn compose_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Compose(c)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match c.key(key) {
+            ComposeAction::None => vec![],
+            ComposeAction::Close => {
+                let key = (c.pr, c.target.clone());
+                let text = c.input.text().to_string();
+                let sending = matches!(c.state, Sending::Sending(_));
+                self.overlays.pop();
+                if !sending {
+                    if text.trim().is_empty() {
+                        self.drafts.remove(&key);
+                    } else {
+                        self.drafts.insert(key, text);
+                    }
+                }
+                vec![]
+            }
+            ComposeAction::Send(write) => {
+                self.next_ticket += 1;
+                let ticket = self.next_ticket;
+                c.state = Sending::Sending(ticket);
+                let pr = c.pr;
+                let key = (pr, c.target.clone());
+                self.drafts.insert(key.clone(), c.input.text().to_string());
+                self.writes.insert(ticket, Some(key));
+                vec![Action::Send(ClientRequest::WritePr { pr, ticket, write })]
+            }
+        }
+    }
+
     /// Keys for the overlay on top of the stack.
     fn overlay_key(&mut self, key: KeyEvent) -> Vec<Action> {
         // A message stays up only until the next key.
@@ -1221,6 +1457,7 @@ impl App {
             Some(Overlay::KeyCapture(_)) => self.capture_key(key),
             Some(Overlay::Repos { .. }) => self.repos_key(key),
             Some(Overlay::RepoAccount { .. }) => self.repo_account_key(key),
+            Some(Overlay::Compose(_)) => self.compose_key(key),
             None => vec![],
         }
     }
@@ -2058,7 +2295,8 @@ impl App {
         };
         let typing =
             matches!(&self.view, View::Prs(v) if v.typing) || diff.is_some_and(|d| d.typing);
-        // In the diff `s` turns it unified or split; the settings stay a key away.
+        // In the diff `s` turns it unified or split and `v` chooses lines; the
+        // settings and the grid stay a key away.
         let settings = diff.is_none();
         if !typing {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -2066,7 +2304,7 @@ impl App {
                 return vec![];
             }
             match self.keymap.action(Context::Grid, &key) {
-                Some(KeyAction::Settings) if !settings => {}
+                Some(KeyAction::Settings | KeyAction::PullRequests) if !settings => {}
                 Some(
                     action @ (KeyAction::PullRequests
                     | KeyAction::RefreshGitHub
@@ -2111,6 +2349,11 @@ impl App {
                     path,
                     viewed,
                 })]
+            }
+            Some(PrAction::Ask(ask)) => self.ask(ask),
+            Some(PrAction::Note(why)) => {
+                self.message = Some(why.into());
+                vec![]
             }
             Some(PrAction::FlipLayout) => {
                 self.config.diff.layout = self.config.diff.layout.other();
@@ -2234,11 +2477,7 @@ impl App {
                 .overlays
                 .push(Overlay::Settings(SettingsView::default())),
             KeyAction::TogglePane => {
-                self.pane_override = Some(if self.pane_right {
-                    PanePosition::Bottom
-                } else {
-                    PanePosition::Right
-                });
+                self.pane_override = Some(self.pane_position().turned(self.pane_beside));
             }
         }
         vec![]
@@ -5491,14 +5730,20 @@ mod tests {
             app.on_key(k(K::Char('j')));
         }
         let actions = app.on_key(k(K::Right));
-        assert_eq!(app.config.pane_position, PanePosition::Bottom);
-        assert_eq!(app.pane_position(), PanePosition::Bottom);
+        assert_eq!(app.config.pane_position, PanePosition::Right);
+        assert_eq!(app.pane_position(), PanePosition::Right);
         assert_eq!(
             writes(&actions),
             [&ConfigEdit::Set {
                 key: "pane_position",
-                value: "bottom".into()
+                value: "right".into()
             }]
+        );
+        app.on_key(k(K::Right));
+        assert_eq!(
+            app.config.pane_position,
+            PanePosition::Left,
+            "then left, bottom, top"
         );
     }
 
@@ -6172,6 +6417,7 @@ mod tests {
         assert!(!open_diff(&app).unwrap().pending.is_empty());
         app.on_event(ServerEvent::PrWriteFailed {
             pr: pr_212(),
+            ticket: None,
             message: "couldn't mark b.rs viewed · no access".into(),
         });
         assert!(open_diff(&app).unwrap().pending.is_empty());
@@ -6275,6 +6521,121 @@ mod tests {
         }
         assert_eq!(open_diff(&app).map(|d| d.query.as_str()), Some("qv]s?"));
         assert!(app.overlays.is_empty() && app.mode == Mode::Grid);
+    }
+
+    fn typed(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_key(k(K::Char(c)));
+        }
+    }
+
+    fn top_compose(app: &App) -> Option<&Compose> {
+        match app.overlays.last() {
+            Some(Overlay::Compose(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_comment_goes_under_a_ticket_and_the_box_closes_once_written() {
+        let (mut app, _) = app();
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        typed(&mut app, "lgtm");
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::WritePr {
+                pr: pr_212(),
+                ticket: 1,
+                write: termist_core::github::PrWrite::Comment {
+                    body: "lgtm".into()
+                },
+            }]
+        );
+        assert_eq!(
+            top_compose(&app).map(|c| c.state.clone()),
+            Some(Sending::Sending(1))
+        );
+        app.on_event(ServerEvent::PrWritten {
+            pr: pr_212(),
+            ticket: 1,
+        });
+        assert!(top_compose(&app).is_none(), "closed");
+        assert!(app.drafts.is_empty(), "nothing left to keep");
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_box_and_its_words_and_says_why() {
+        let (mut app, _) = app();
+        app.open_compose(Compose::new(pr_212(), Target::Submit, ""));
+        app.on_key(k(K::Tab));
+        app.on_key(k(K::Enter));
+        app.on_event(ServerEvent::PrWriteFailed {
+            pr: pr_212(),
+            ticket: Some(1),
+            message: "couldn't send your review · Review Can not approve your own pull request"
+                .into(),
+        });
+        let c = top_compose(&app).unwrap();
+        assert_eq!(
+            c.state,
+            Sending::Failed("Review Can not approve your own pull request".into())
+        );
+        assert_eq!(app.toasts.items().count(), 0, "the box says it");
+    }
+
+    #[test]
+    fn esc_keeps_a_draft_for_the_same_target_and_a_late_refusal_is_a_toast() {
+        let (mut app, _) = app();
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        typed(&mut app, "half a thought");
+        app.on_key(k(K::Esc));
+        assert!(top_compose(&app).is_none());
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        assert_eq!(top_compose(&app).unwrap().input.text(), "half a thought");
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Esc));
+        assert!(
+            top_compose(&app).is_none(),
+            "Esc closes even while it is on its way"
+        );
+        app.on_event(ServerEvent::PrWriteFailed {
+            pr: pr_212(),
+            ticket: Some(1),
+            message: "couldn't post your comment · no access".into(),
+        });
+        assert_eq!(
+            app.toasts.items().next().map(|t| t.text.as_str()),
+            Some("✗ couldn't post your comment · no access")
+        );
+        assert_eq!(
+            app.drafts
+                .get(&(pr_212(), Target::Comment))
+                .map(String::as_str),
+            Some("half a thought"),
+            "the words wait for another try"
+        );
+    }
+
+    #[test]
+    fn a_box_reopened_while_its_words_are_on_their_way_does_not_send_them_twice() {
+        let (mut app, _) = app();
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        typed(&mut app, "lgtm");
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Esc));
+        app.open_compose(Compose::new(pr_212(), Target::Comment, ""));
+        assert_eq!(
+            top_compose(&app).map(|c| c.state.clone()),
+            Some(Sending::Sending(1)),
+            "it says it is still on its way"
+        );
+        assert!(sent(&app.on_key(k(K::Enter))).is_empty(), "no second post");
+        app.on_event(ServerEvent::PrWritten {
+            pr: pr_212(),
+            ticket: 1,
+        });
+        assert!(top_compose(&app).is_none(), "the answer closes it");
     }
 
     #[test]

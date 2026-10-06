@@ -1,6 +1,7 @@
 //! The pull request view: a project's open pull requests (the inbox) and one of them
 //! whole (the detail). This module keeps its state and keys; `inbox_view` and
 //! `detail_view` draw it.
+pub mod compose;
 pub mod detail_view;
 pub mod diff;
 pub mod inbox_view;
@@ -10,7 +11,7 @@ pub mod timeline;
 use crate::app::App;
 use crate::list_picker::matches;
 use crate::theme::Theme;
-use diff::{DiffAction, DiffArea, DiffView};
+use diff::{DiffAction, DiffArea, DiffView, LineTarget};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -20,7 +21,7 @@ use std::collections::HashSet;
 use termist_core::AgentStatus;
 use termist_core::ProjectId;
 use termist_core::github::{
-    Checks, GhState, Mergeable, PrDiff, PrRef, PrSummary, RepoPrs, ReviewDecision,
+    Checks, CommentKind, GhState, Mergeable, PrDiff, PrRef, PrSummary, RepoPrs, ReviewDecision,
 };
 
 /// A project's pull requests as the daemon last sent them.
@@ -113,6 +114,8 @@ pub struct Detail {
     pub check: usize,
     /// The highlighted file of the Files tab, by path.
     pub file: Option<String>,
+    /// The highlighted item of the Conversation tab.
+    pub item: usize,
     /// Mercek: the diff, over the pull request.
     pub diff: Option<DiffView>,
 }
@@ -127,6 +130,7 @@ impl Detail {
             toggled: HashSet::new(),
             check: 0,
             file: None,
+            item: 0,
             diff: None,
         }
     }
@@ -165,7 +169,8 @@ pub struct PrLayout {
     /// The detail body: how far it scrolls, and a page.
     pub end: usize,
     pub page: usize,
-    pub threads: Vec<ThreadAnchor>,
+    /// The conversation's items: comments, reviews and threads.
+    pub items: Vec<Item>,
     /// The checks' links, in the order shown.
     pub checks: Vec<Option<String>>,
     /// The Files tab's paths, in the order shown.
@@ -179,13 +184,30 @@ pub struct PrLayout {
     pub scroll: usize,
 }
 
-/// A thread's first line in the conversation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThreadAnchor {
+/// An item of the conversation, from its first line: what the keys can do on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Item {
     pub line: usize,
-    pub id: String,
-    /// Not resolved: `n` and `N` stop at it.
+    /// The thread's id when the item is a thread.
+    pub thread: Option<String>,
+    /// A thread not resolved: `n` and `N` stop at it.
     pub open: bool,
+    pub can_reply: bool,
+    pub can_resolve: bool,
+    pub resolved: bool,
+    /// Your comment there to edit or delete: the item itself, or in a thread the last
+    /// one you wrote.
+    pub mine: Option<Mine>,
+}
+
+/// A comment of yours, and what GitHub lets you do with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mine {
+    pub id: String,
+    pub kind: CommentKind,
+    pub body: String,
+    pub can_edit: bool,
+    pub can_delete: bool,
 }
 
 /// What a key in the view asks of the app.
@@ -205,6 +227,29 @@ pub enum PrAction {
     },
     /// The diff the other way: unified or split.
     FlipLayout,
+    /// Something to write to the pull request; the app finds the rest in its detail.
+    Ask(Ask),
+    /// Why a key did nothing, for the footer.
+    Note(&'static str),
+}
+
+/// A write asked for by a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Comment,
+    Line { path: String, target: LineTarget },
+    Reply { thread: String },
+    Resolve { thread: String },
+    Edit(Subject),
+    Delete(Subject),
+    Submit,
+}
+
+/// Whose comment: one named in the conversation, or your last one in a thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Subject {
+    Comment(Mine),
+    Thread(String),
 }
 
 /// A line of the inbox list.
@@ -421,10 +466,17 @@ impl PrView {
         let line = layout.scroll + (y - layout.body.y) as usize;
         match d.tab {
             Tab::Conversation => {
-                if let Some(a) = layout.threads.iter().find(|a| a.line == line)
-                    && !d.toggled.remove(&a.id)
-                {
-                    d.toggled.insert(a.id.clone());
+                if let Some(i) = layout.items.iter().rposition(|a| a.line <= line) {
+                    d.item = i;
+                    // A thread's head folds it.
+                    if let Some(id) = layout.items[i]
+                        .thread
+                        .as_ref()
+                        .filter(|_| layout.items[i].line == line)
+                        && !d.toggled.remove(id)
+                    {
+                        d.toggled.insert(id.clone());
+                    }
                 }
             }
             Tab::Checks if line < layout.checks.len() => d.check = line,
@@ -466,11 +518,42 @@ impl PrView {
         }
         let checks = d.tab == Tab::Checks;
         let files = d.tab == Tab::Files;
+        let talk = d.tab == Tab::Conversation && !layout.items.is_empty();
+        let last_item = layout.items.len().saturating_sub(1);
+        // The conversation's screen keeps its item's first line on it.
+        let show = |d: &mut Detail| {
+            if let Some(a) = layout.items.get(d.item) {
+                d.scroll = diff::follow(a.line, d.scroll, page).min(layout.end);
+            }
+        };
         let file_at = d
             .file
             .as_ref()
             .and_then(|f| layout.files.iter().position(|x| x == f));
+        let item = layout.items.get(d.item).filter(|_| talk);
         match key.code {
+            KeyCode::Char('c') if !ctrl => return Some(PrAction::Ask(Ask::Comment)),
+            KeyCode::Char('A') => return Some(PrAction::Ask(Ask::Submit)),
+            KeyCode::Char(c @ ('r' | 'x')) if !ctrl && talk => {
+                let Some(thread) = item.and_then(|i| i.thread.clone()) else {
+                    return Some(PrAction::Note("not on a thread"));
+                };
+                return Some(PrAction::Ask(if c == 'r' {
+                    Ask::Reply { thread }
+                } else {
+                    Ask::Resolve { thread }
+                }));
+            }
+            KeyCode::Char(c @ ('e' | 'D')) if talk => {
+                let Some(mine) = item.and_then(|i| i.mine.clone()) else {
+                    return Some(PrAction::Note("not your comment"));
+                };
+                return Some(PrAction::Ask(if c == 'e' {
+                    Ask::Edit(Subject::Comment(mine))
+                } else {
+                    Ask::Delete(Subject::Comment(mine))
+                }));
+            }
             KeyCode::Char('d') if !ctrl => d.open_diff(None, diff),
             KeyCode::Enter if files => {
                 let file = d.file.clone().or_else(|| layout.files.first().cloned());
@@ -499,32 +582,37 @@ impl PrView {
                 d.check = (d.check + 1).min(layout.checks.len().saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up if checks => d.check = d.check.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down if talk => {
+                d.item = (d.item + 1).min(last_item);
+                show(d);
+            }
+            KeyCode::Char('k') | KeyCode::Up if talk => {
+                d.item = d.item.saturating_sub(1);
+                show(d);
+            }
             KeyCode::Char('j') | KeyCode::Down => d.scroll = (d.scroll + 1).min(layout.end),
             KeyCode::Char('k') | KeyCode::Up => d.scroll = d.scroll.saturating_sub(1),
             KeyCode::Char('d') if ctrl => d.scroll = (d.scroll + half).min(layout.end),
             KeyCode::Char('u') if ctrl => d.scroll = d.scroll.saturating_sub(half),
             KeyCode::PageDown => d.scroll = (d.scroll + page).min(layout.end),
             KeyCode::PageUp => d.scroll = d.scroll.saturating_sub(page),
-            KeyCode::Char('n') => {
-                if let Some(a) = layout.threads.iter().find(|a| a.open && a.line > d.scroll) {
-                    d.scroll = a.line.min(layout.end);
+            KeyCode::Char('n') if talk => {
+                if let Some(i) = (d.item + 1..layout.items.len()).find(|i| layout.items[*i].open) {
+                    d.item = i;
+                    show(d);
                 }
             }
-            KeyCode::Char('N') => {
-                if let Some(a) = layout
-                    .threads
-                    .iter()
-                    .rev()
-                    .find(|a| a.open && a.line < d.scroll)
-                {
-                    d.scroll = a.line;
+            KeyCode::Char('N') if talk => {
+                if let Some(i) = (0..d.item).rev().find(|i| layout.items[*i].open) {
+                    d.item = i;
+                    show(d);
                 }
             }
-            KeyCode::Enter => {
-                if let Some(a) = layout.threads.iter().find(|a| a.line >= d.scroll)
-                    && !d.toggled.remove(&a.id)
+            KeyCode::Enter if talk => {
+                if let Some(id) = layout.items.get(d.item).and_then(|a| a.thread.as_ref())
+                    && !d.toggled.remove(id)
                 {
-                    d.toggled.insert(a.id.clone());
+                    d.toggled.insert(id.clone());
                 }
             }
             KeyCode::Char('b') => {
@@ -574,7 +662,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
                 termist_core::config::DiffLayout::Split => "unified",
             };
             return format!(
-                "#{} · Tab panel · J/K file · {{/}} hunk · n/N thread · ^R viewed · s {other} · / search · b browser · Esc back",
+                "#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · ^R viewed · s {other} · A review · Esc back",
+                d.pr.number
+            );
+        }
+        if d.tab == Tab::Conversation {
+            return format!(
+                "#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · A review · Esc list",
                 d.pr.number
             );
         }
@@ -586,7 +680,7 @@ pub fn hint(app: &App, view: &PrView) -> String {
             );
         }
         return format!(
-            "#{} · Tab section · j/k scroll · n/N next open thread · Enter fold · d diff · b browser · {} refresh · Esc list",
+            "#{} · Tab section · j/k scroll · d diff · c comment · A review · b browser · {} refresh · Esc list",
             d.pr.number,
             key(Action::RefreshGitHub)
         );
@@ -600,6 +694,18 @@ pub fn hint(app: &App, view: &PrView) -> String {
 
 fn fg(color: ratatui::style::Color) -> Style {
     Style::default().fg(color)
+}
+
+/// `✎ your review · 3 pending` while you have a review not sent yet.
+pub fn pending_mark(t: &Theme, d: &termist_core::github::PrDetail) -> Option<Span<'static>> {
+    let n = d
+        .threads
+        .iter()
+        .flat_map(|th| &th.comments)
+        .filter(|c| c.pending && c.mine)
+        .count();
+    (d.pending_review.is_some() || n > 0)
+        .then(|| Span::styled(format!("✎ your review · {n} pending"), t.warn))
 }
 
 /// `◇` asked of you, `✓` approved, `✗` changes requested, `·` no verdict.
@@ -677,15 +783,23 @@ pub mod fixtures {
     /// Two threads (one resolved), a comment, an approval and an empty "commented"
     /// review, three checks, two files.
     pub fn detail(summary: PrSummary) -> PrDetail {
+        // Alice is you: her comments are yours to edit and delete.
         let c = |author: &str, body: &str, at: &str| Comment {
+            id: format!("C-{author}-{at}"),
             author: author.into(),
             body: body.into(),
             created_at: at.into(),
+            mine: author == "alice",
+            can_edit: author == "alice",
+            can_delete: author == "alice",
+            pending: false,
         };
         PrDetail {
             summary,
             id: "PR_212".into(),
             head_oid: "h1".into(),
+            mine: false,
+            pending_review: None,
             body: "Adds a dealer dropdown to the search page.\n\nCloses #198.".into(),
             comments: vec![c("bob", "Screenshots attached ![before](https://x.io/b.png)", "2026-10-02T09:00:00Z")],
             reviews: vec![
@@ -716,6 +830,9 @@ pub mod fixtures {
                         c("bob", "Good catch, will fix.", "2026-10-02T11:20:00Z"),
                     ],
                     more: 0,
+                    start_line: None,
+                    can_reply: true,
+                    can_resolve: true,
                 },
                 Thread {
                     id: "T2".into(),
@@ -727,6 +844,9 @@ pub mod fixtures {
                     hunk: "@@ -10 +10 @@\n-a\n+b".into(),
                     comments: vec![c("carol", "nit", "2026-10-02T08:00:00Z")],
                     more: 0,
+                    start_line: None,
+                    can_reply: true,
+                    can_resolve: true,
                 },
             ],
             checks: vec![
@@ -918,47 +1038,45 @@ mod tests {
     }
 
     #[test]
-    fn in_the_detail_n_finds_the_next_open_thread_and_enter_folds() {
+    fn the_conversation_moves_item_by_item_and_n_stops_at_open_threads() {
         let d = data();
         let mut v = PrView::default();
         v.repair(&rows(&d, &v));
         v.key(k(K::Enter), &d, None, &PrLayout::default());
+        v.detail.as_mut().unwrap().tab = Tab::Conversation;
+        let thread = |line, id: &str, open| Item {
+            line,
+            thread: Some(id.into()),
+            open,
+            ..Item::default()
+        };
         let layout = PrLayout {
             end: 100,
             page: 10,
-            threads: vec![
-                ThreadAnchor {
-                    line: 4,
-                    id: "T1".into(),
-                    open: true,
-                },
-                ThreadAnchor {
-                    line: 12,
-                    id: "T2".into(),
-                    open: false,
-                },
-                ThreadAnchor {
-                    line: 20,
-                    id: "T3".into(),
-                    open: true,
-                },
+            items: vec![
+                Item::default(),
+                thread(4, "T1", true),
+                thread(12, "T2", false),
+                thread(20, "T3", true),
             ],
             ..PrLayout::default()
         };
+        let item = |v: &PrView| v.detail.as_ref().unwrap().item;
+        v.key(k(K::Char('j')), &d, None, &layout);
+        assert_eq!(item(&v), 1);
         v.key(k(K::Char('n')), &d, None, &layout);
-        assert_eq!(v.detail.as_ref().unwrap().scroll, 4);
-        v.key(k(K::Char('n')), &d, None, &layout);
-        assert_eq!(
-            v.detail.as_ref().unwrap().scroll,
-            20,
-            "resolved threads are passed"
-        );
+        assert_eq!(item(&v), 3, "a resolved thread is passed");
+        assert_eq!(v.detail.as_ref().unwrap().scroll, 11, "its line on screen");
         v.key(k(K::Char('N')), &d, None, &layout);
-        assert_eq!(v.detail.as_ref().unwrap().scroll, 4);
+        assert_eq!(item(&v), 1);
         v.key(k(K::Enter), &d, None, &layout);
         assert!(v.detail.as_ref().unwrap().toggled.contains("T1"));
         v.key(k(K::Enter), &d, None, &layout);
         assert!(v.detail.as_ref().unwrap().toggled.is_empty());
+        for _ in 0..9 {
+            v.key(k(K::Char('j')), &d, None, &layout);
+        }
+        assert_eq!(item(&v), 3, "held at the last");
         let b = v.key(k(K::Char('b')), &d, None, &layout);
         assert_eq!(
             b,

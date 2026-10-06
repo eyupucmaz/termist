@@ -1,12 +1,14 @@
 //! A pull request's conversation: comments, reviews and line threads, in time order.
-use super::ThreadAnchor;
 use super::markdown::{cut, render};
+use super::{Item, Mine};
 use crate::theme::Theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use termist_core::AgentStatus;
-use termist_core::github::{Comment, PrDetail, Review, ReviewState, Thread, age, unix_secs};
+use termist_core::github::{
+    Comment, CommentKind, PrDetail, Review, ReviewState, Thread, age, unix_secs,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Entry<'a> {
@@ -69,13 +71,24 @@ pub fn hunk_tail(hunk: &str, n: usize) -> Vec<(Option<u32>, char, String)> {
     out.split_off(keep)
 }
 
+/// `c` as yours to edit or delete, if it is.
+fn mine(c: &Comment, kind: CommentKind) -> Option<Mine> {
+    c.mine.then(|| Mine {
+        id: c.id.clone(),
+        kind,
+        body: c.body.clone(),
+        can_edit: c.can_edit,
+        can_delete: c.can_delete,
+    })
+}
+
 pub fn lines(
     d: &PrDetail,
     width: usize,
     toggled: &HashSet<String>,
     t: &Theme,
     now: i64,
-) -> (Vec<Line<'static>>, Vec<ThreadAnchor>) {
+) -> (Vec<Line<'static>>, Vec<Item>) {
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let green = Style::default().fg(t.status(AgentStatus::Unseen));
     let ago = |at: &str| {
@@ -97,6 +110,11 @@ pub fn lines(
     for entry in entries(d) {
         match entry {
             Entry::Comment(c) => {
+                anchors.push(Item {
+                    line: out.len(),
+                    mine: mine(c, CommentKind::Issue),
+                    ..Item::default()
+                });
                 out.push(Line::from(vec![
                     bar(),
                     Span::styled(c.author.clone(), bold),
@@ -111,6 +129,10 @@ pub fn lines(
                     ReviewState::Dismissed => ("·", "review dismissed", t.dim),
                     _ => ("·", "reviewed", t.dim),
                 };
+                anchors.push(Item {
+                    line: out.len(),
+                    ..Item::default()
+                });
                 out.push(Line::from(vec![
                     bar(),
                     Span::styled(format!("{mark} "), style),
@@ -137,10 +159,19 @@ pub fn lines(
                 };
                 let count = th.comments.len() as u32 + th.more;
                 let plural = if count == 1 { "" } else { "s" };
-                anchors.push(ThreadAnchor {
+                anchors.push(Item {
                     line: out.len(),
-                    id: th.id.clone(),
+                    thread: Some(th.id.clone()),
                     open: !th.resolved,
+                    can_reply: th.can_reply,
+                    can_resolve: th.can_resolve,
+                    resolved: th.resolved,
+                    mine: th
+                        .comments
+                        .iter()
+                        .rev()
+                        .find(|c| c.mine)
+                        .and_then(|c| mine(c, CommentKind::Review)),
                 });
                 let mut head = vec![
                     bar(),
@@ -172,12 +203,16 @@ pub fn lines(
                     ]));
                 }
                 for c in &th.comments {
-                    out.push(Line::from(vec![
+                    let mut head = vec![
                         bar(),
                         Span::raw("  "),
                         Span::styled(c.author.clone(), bold),
                         Span::styled(ago(&c.created_at), t.dim),
-                    ]));
+                    ];
+                    if c.pending {
+                        head.push(Span::styled(" · pending", t.warn));
+                    }
+                    out.push(Line::from(head));
                     body(&mut out, &c.body, "    ");
                 }
                 if th.more > 0 {
@@ -245,11 +280,16 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
-        assert_eq!(anchors.len(), 2);
-        assert_eq!((anchors[0].id.as_str(), anchors[0].open), ("T2", false));
-        assert!(text[anchors[0].line].contains("src/api/client.ts:10 · resolved · 1 comment"));
-        assert!(text[anchors[0].line].contains("▸ Enter"), "folded");
-        let t1 = &text[anchors[1].line];
+        // A comment, two threads, an approval; the empty "commented" review is not one.
+        let threads: Vec<&super::Item> = anchors.iter().filter(|a| a.thread.is_some()).collect();
+        assert_eq!((anchors.len(), threads.len()), (4, 2));
+        assert_eq!(
+            (threads[0].thread.as_deref(), threads[0].open),
+            (Some("T2"), false)
+        );
+        assert!(text[threads[0].line].contains("src/api/client.ts:10 · resolved · 1 comment"));
+        assert!(text[threads[0].line].contains("▸ Enter"), "folded");
+        let t1 = &text[threads[1].line];
         assert!(
             t1.contains("src/search/DealerFilter.tsx:42 · open · 2 comments"),
             "{t1}"

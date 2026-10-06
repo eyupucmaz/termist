@@ -35,8 +35,8 @@ pub struct Areas {
     /// Not every card fits: the line above and the line below the cards count the
     /// hidden ones.
     pub scroll_lines: bool,
-    /// The pane is right of the cards, not under them.
-    pub pane_right: bool,
+    /// The pane is beside the cards (right or left), not above or below them.
+    pub pane_beside: bool,
 }
 
 /// From this many columns up, `auto` puts the pane right of the cards.
@@ -58,27 +58,32 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         height: area.height.saturating_sub(header.height + footer_h),
         ..area
     };
-    let pane_right = match position {
-        PanePosition::Right => true,
-        PanePosition::Bottom => false,
+    let beside = match position {
+        PanePosition::Right | PanePosition::Left => true,
+        PanePosition::Bottom | PanePosition::Top => false,
         PanePosition::Auto => area.width >= PANE_RIGHT_FROM,
     };
-    let (cards_zone, cards_per_row) = if pane_right {
-        // At most two fifths of the width, and always one column of cards.
-        let per_row = (body.width * 2 / 5 / CARD_W).max(1);
-        let zone = Rect {
-            width: (per_row * CARD_W).min(body.width),
-            ..body
+    // The pane first (left or above), the cards after it.
+    let pane_first = matches!(position, PanePosition::Left | PanePosition::Top);
+    let (cards_zone, cards_per_row) = if beside {
+        // One column of cards; the rest of the width is the pane's.
+        let width = CARD_W.min(body.width);
+        let x = if pane_first {
+            body.right() - width
+        } else {
+            body.x
         };
-        (zone, per_row as usize)
+        (Rect { x, width, ..body }, 1)
     } else {
         let per_row = (body.width / CARD_W).max(1) as usize;
         let card_rows = session_count.max(1).div_ceil(per_row) as u16;
-        let zone = Rect {
-            height: (card_rows * CARD_H).min(body.height / 2),
-            ..body
+        let height = (card_rows * CARD_H).min(body.height / 2);
+        let y = if pane_first {
+            body.bottom() - height
+        } else {
+            body.y
         };
-        (zone, per_row)
+        (Rect { y, height, ..body }, per_row)
     };
     let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
     let scroll_lines = card_rows * CARD_H > cards_zone.height;
@@ -99,18 +104,25 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
             card_rows,
         )
     };
-    let pane = if pane_right {
-        Rect {
+    let pane = match (beside, pane_first) {
+        (true, false) => Rect {
             x: cards_zone.right(),
             width: body.width - cards_zone.width,
             ..body
-        }
-    } else {
-        Rect {
-            y: body.y + cards_zone.height,
+        },
+        (true, true) => Rect {
+            width: body.width - cards_zone.width,
+            ..body
+        },
+        (false, false) => Rect {
+            y: cards_zone.bottom(),
             height: body.height - cards_zone.height,
             ..body
-        }
+        },
+        (false, true) => Rect {
+            height: body.height - cards_zone.height,
+            ..body
+        },
     };
     let pane_inner = Rect {
         x: pane.x + 1,
@@ -129,7 +141,7 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         cards_per_row,
         card_rows: visible_rows as usize,
         scroll_lines,
-        pane_right,
+        pane_beside: beside,
     }
 }
 
@@ -587,6 +599,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 t.warn,
             )
         }
+        (_, Mode::ConfirmDelete) => (
+            "Delete your comment? GitHub keeps no copy.  y / Enter: delete · any key: keep it"
+                .into(),
+            t.warn,
+        ),
         (_, Mode::ConfirmArchive(id)) => {
             let session = app.state.sessions.iter().find(|s| s.id == id);
             let name = session.map_or("this session", |s| s.display_name());
@@ -784,7 +801,7 @@ mod tests {
             app.project_sessions().len(),
             app.pane_position(),
         );
-        app.pane_right = areas.pane_right;
+        app.pane_beside = areas.pane_beside;
         app.set_card_window(areas.cards_per_row, areas.card_rows);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
@@ -1557,15 +1574,15 @@ mod tests {
     #[test]
     fn auto_puts_the_pane_on_the_right_from_180_columns() {
         let area = |w| Rect::new(0, 0, w, 40);
-        assert!(!layout(area(179), 3, PanePosition::Auto).pane_right);
+        assert!(!layout(area(179), 3, PanePosition::Auto).pane_beside);
         let wide = layout(area(180), 3, PanePosition::Auto);
-        assert!(wide.pane_right);
-        assert_eq!(wide.cards_per_row, 3, "two fifths of 180 is three cards");
-        assert_eq!(wide.pane.x, 72);
-        assert_eq!(wide.pane.width, 108);
+        assert!(wide.pane_beside);
+        assert_eq!(wide.cards_per_row, 1, "beside the pane, one column");
+        assert_eq!(wide.pane.x, 24);
+        assert_eq!(wide.pane.width, 156);
         assert_eq!(wide.pane.height, 38, "the whole body");
-        assert!(layout(area(100), 3, PanePosition::Right).pane_right);
-        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_right);
+        assert!(layout(area(100), 3, PanePosition::Right).pane_beside);
+        assert!(!layout(area(200), 3, PanePosition::Bottom).pane_beside);
     }
 
     #[test]
@@ -1603,11 +1620,47 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_on_the_left_or_on_top() {
+        let area = Rect::new(0, 0, 100, 30);
+        let left = layout(area, 3, PanePosition::Left);
+        assert!(left.pane_beside);
+        assert_eq!((left.cards_zone.x, left.cards_zone.width), (76, 24));
+        assert_eq!((left.pane.x, left.pane.width), (0, 76));
+        assert_eq!(left.cards_per_row, 1);
+        let top = layout(area, 3, PanePosition::Top);
+        assert!(!top.pane_beside);
+        assert_eq!(top.pane.y, top.body.y, "the pane first");
+        assert_eq!(top.pane.bottom(), top.cards_zone.y);
+        assert_eq!(top.cards_zone.bottom(), top.body.bottom());
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Left;
+        insta::assert_snapshot!("pane_left", render(&mut app, 80, 12).backend());
+        app.config.pane_position = PanePosition::Top;
+        insta::assert_snapshot!("pane_top", render(&mut app, 60, 16).backend());
+    }
+
+    #[test]
+    fn prefix_z_keeps_the_pane_on_its_side() {
+        use ratatui::crossterm::event::KeyCode as K;
+        let mut app = fixture();
+        app.config.pane_position = PanePosition::Left;
+        render(&mut app, 100, 20);
+        app.on_key(key(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Top);
+        render(&mut app, 100, 20);
+        app.on_key(ctrl('a'));
+        app.on_key(key(K::Char('z')));
+        assert_eq!(app.pane_position(), PanePosition::Left);
+    }
+
+    #[test]
     fn prefix_z_moves_the_pane_until_termist_quits() {
         use ratatui::crossterm::event::KeyCode as K;
         let mut app = fixture();
         render(&mut app, 100, 20);
-        assert!(!app.pane_right);
+        assert!(!app.pane_beside);
         app.on_key(key(K::Enter));
         app.on_key(ctrl('a'));
         app.on_key(key(K::Char('z')));
@@ -1617,7 +1670,7 @@ mod tests {
             t.backend().buffer()[(24, 1)].symbol() == "┌",
             "the pane starts right of the cards"
         );
-        app.pane_right = true;
+        app.pane_beside = true;
         app.on_key(ctrl('a'));
         app.on_key(key(K::Char('z')));
         assert_eq!(app.pane_position(), PanePosition::Bottom);
@@ -2053,8 +2106,13 @@ mod tests {
         let cursor = open(&app).cursor;
         mouse_at(&mut app, Kind::ScrollDown, 5, 5);
         assert_eq!(open(&app).cursor, cursor + 1, "over the tree: its cursor");
+        let line = open(&app).line;
         mouse_at(&mut app, Kind::ScrollDown, 60, 5);
-        assert_eq!(open(&app).scroll, 3, "over the diff: three lines");
+        assert_eq!(
+            open(&app).line,
+            line + 3,
+            "over the diff: three lines, the cursor too"
+        );
         assert_eq!(
             open(&app).panel,
             Panel::Diff,
@@ -2092,6 +2150,255 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Reading the diff"));
+    }
+
+    #[test]
+    fn the_box_for_a_line_comment_and_for_a_review() {
+        use crate::prs::compose::{Compose, Target};
+        use termist_core::github::{PrRef, RepoId, Side};
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let mut c = Compose::new(
+            pr,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 42,
+                start: Some(40),
+            },
+            "This refetches on every mount, can we memoize?",
+        );
+        c.context = vec![
+            (40, '+', "useEffect(() => fetchAll(), []);".into()),
+            (41, '+', "const label = sel ?? 'All';".into()),
+            (42, '+', "\treturn label;".into()),
+        ];
+        app.open_compose(c);
+        insta::assert_snapshot!("compose_line", render(&mut app, 90, 20).backend());
+        app.overlays.pop();
+        let mut review = Compose::new(pr, Target::Submit, "Looks good overall, two nits.");
+        review.pending = 3;
+        app.open_compose(review);
+        insta::assert_snapshot!("compose_review", render(&mut app, 90, 16).backend());
+    }
+
+    fn press(app: &mut App, c: char) -> Vec<crate::app::Action> {
+        let mods = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char(c), mods))
+    }
+
+    fn compose(app: &App) -> Option<&crate::prs::compose::Compose> {
+        match app.overlays.last() {
+            Some(crate::overlay::Overlay::Compose(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn writes(actions: &[crate::app::Action]) -> Vec<termist_core::github::PrWrite> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::app::Action::Send(termist_core::ClientRequest::WritePr {
+                    write, ..
+                }) => Some(write.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 212 open whole, with a comment of yours (alice) at the end of the conversation.
+    fn detail_with_yours() -> App {
+        use termist_core::github::Comment;
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let pr = app.prs[&project].repos[0].prs[0].clone();
+        let mut detail = crate::prs::fixtures::detail(pr);
+        detail.comments.push(Comment {
+            id: "IC_mine".into(),
+            author: "alice".into(),
+            body: "Thanks, merging after CI.".into(),
+            created_at: "2026-10-02T11:50:00Z".into(),
+            mine: true,
+            can_edit: true,
+            can_delete: true,
+            pending: false,
+        });
+        app.on_event(ServerEvent::PrDetail {
+            pr: termist_core::github::PrRef {
+                repo: termist_core::github::RepoId(1),
+                number: 212,
+            },
+            state: GhState::Ok,
+            detail: Some(Box::new(detail)),
+        });
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn c_writes_on_the_pull_request_and_a_reviews_it() {
+        use crate::prs::compose::Target;
+        let mut app = detail_with_yours();
+        render(&mut app, 90, 28);
+        press(&mut app, 'c');
+        assert_eq!(
+            compose(&app).map(|c| c.target.clone()),
+            Some(Target::Comment)
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(&mut app, 'A');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            (c.target.clone(), c.mine, c.pending),
+            (Target::Submit, false, 0)
+        );
+    }
+
+    #[test]
+    fn on_a_thread_r_replies_and_x_resolves_and_only_your_comments_are_edited() {
+        use crate::prs::compose::Target;
+        use termist_core::github::{CommentKind, PrWrite};
+        let mut app = detail_with_yours();
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 40);
+        let layout = app.pr_layout.borrow().clone();
+        let t1 = layout
+            .items
+            .iter()
+            .position(|i| i.thread.as_deref() == Some("T1"))
+            .unwrap();
+        for _ in 0..t1 {
+            press(&mut app, 'j');
+        }
+        press(&mut app, 'r');
+        assert_eq!(
+            compose(&app).map(|c| c.target.clone()),
+            Some(Target::Reply {
+                thread: "T1".into(),
+                to: "carol".into()
+            })
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let actions = press(&mut app, 'x');
+        assert_eq!(
+            writes(&actions),
+            [PrWrite::Resolve {
+                thread: "T1".into(),
+                resolved: true
+            }]
+        );
+        press(&mut app, 'e');
+        assert_eq!(app.message.as_deref(), Some("not your comment"));
+        // Yours is the last item.
+        for _ in 0..9 {
+            press(&mut app, 'j');
+        }
+        render(&mut app, 90, 40);
+        press(&mut app, 'e');
+        let c = compose(&app).unwrap();
+        assert_eq!(c.input.text(), "Thanks, merging after CI.");
+        assert_eq!(
+            c.target,
+            Target::Edit {
+                comment: "IC_mine".into(),
+                kind: CommentKind::Issue
+            }
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(&mut app, 'D');
+        assert_eq!(app.mode, Mode::ConfirmDelete);
+        assert!(screen(&render(&mut app, 90, 40)).contains("Delete your comment?"));
+        let actions = press(&mut app, 'y');
+        assert_eq!(
+            writes(&actions),
+            [PrWrite::Delete {
+                comment: "IC_mine".into(),
+                kind: CommentKind::Issue
+            }]
+        );
+    }
+
+    #[test]
+    fn in_the_diff_c_comments_on_the_line_or_the_range_and_v_stays_in_the_diff() {
+        use crate::prs::compose::Target;
+        use termist_core::github::Side;
+        let mut app = mercek_fixture();
+        render(&mut app, 110, 18);
+        // The first lines: the hunk header, then line 38.
+        press(&mut app, 'j');
+        press(&mut app, 'c');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            c.target,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 38,
+                start: None
+            }
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // 39 (kept) and the deleted 40: two sides.
+        press(&mut app, 'j');
+        press(&mut app, 'v');
+        press(&mut app, 'j');
+        assert!(
+            matches!(app.view, View::Prs(_)),
+            "v chose a line, it did not leave"
+        );
+        press(&mut app, 'c');
+        assert!(compose(&app).is_none());
+        assert_eq!(app.message.as_deref(), Some("a range stays on one side"));
+        press(&mut app, 'v');
+        // The added 40 to 42.
+        press(&mut app, 'j');
+        press(&mut app, 'v');
+        press(&mut app, 'j');
+        press(&mut app, 'j');
+        press(&mut app, 'c');
+        let c = compose(&app).unwrap();
+        assert_eq!(
+            c.target,
+            Target::Line {
+                path: "src/search/DealerFilter.tsx".into(),
+                side: Side::Right,
+                line: 42,
+                start: Some(40)
+            }
+        );
+        assert_eq!(c.suggest.len(), 3, "their new lines, for C-s");
+        assert_eq!(c.context.first().map(|l| l.0), Some(40));
+    }
+
+    #[test]
+    fn a_review_not_sent_yet_shows_in_the_head_and_on_its_comments() {
+        let mut app = mercek_fixture();
+        let pr = termist_core::github::PrRef {
+            repo: termist_core::github::RepoId(1),
+            number: 212,
+        };
+        let (_, detail) = app.pr_details.get_mut(&pr).unwrap();
+        let detail = detail.as_mut().unwrap();
+        detail.pending_review = Some("PRR_1".into());
+        let mine = &mut detail.threads[0].comments[0];
+        (mine.pending, mine.mine) = (true, true);
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(text.contains("✎ your review · 1 pending"), "{text}");
+        assert!(text.contains("carol +1 · open · pending"), "{text}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 18));
+        assert!(
+            text.contains("✎ your review · 1 pending"),
+            "the detail too: {text}"
+        );
     }
 
     #[test]
@@ -2144,6 +2451,23 @@ mod tests {
     }
 
     #[test]
+    fn the_highlighted_item_has_its_bar_in_the_focus_colour() {
+        let mut app = pr_fixture();
+        open_detail(&mut app);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        render(&mut app, 90, 28);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let t = render(&mut app, 90, 28);
+        let layout = app.pr_layout.borrow().clone();
+        let y = layout.body.y + (layout.items[1].line - layout.scroll) as u16;
+        let buf = t.backend().buffer();
+        assert_eq!(buf[(0, y)].symbol(), "┃");
+        assert_eq!(buf[(0, y)].fg, app.theme.focus.fg.unwrap());
+        let other = layout.body.y + (layout.items[0].line - layout.scroll) as u16;
+        assert_ne!(buf[(0, other)].fg, app.theme.focus.fg.unwrap());
+    }
+
+    #[test]
     fn n_jumps_to_the_open_thread_after_a_frame() {
         let mut app = pr_fixture();
         open_detail(&mut app);
@@ -2151,9 +2475,13 @@ mod tests {
         render(&mut app, 90, 12);
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         let layout = app.pr_layout.borrow().clone();
-        let t1 = layout.threads.iter().find(|a| a.id == "T1").unwrap().line;
+        let t1 = layout
+            .items
+            .iter()
+            .position(|a| a.thread.as_deref() == Some("T1"))
+            .unwrap();
         let View::Prs(v) = &app.view else { panic!() };
-        assert_eq!(v.detail.as_ref().unwrap().scroll, t1.min(layout.end));
+        assert_eq!(v.detail.as_ref().unwrap().item, t1);
     }
 
     #[test]
