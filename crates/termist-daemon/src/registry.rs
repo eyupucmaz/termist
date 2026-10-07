@@ -327,10 +327,20 @@ impl Registry {
     /// Reads every open project's repos' worktrees on blocking threads; `worktrees_scanned`
     /// takes each answer.
     fn scan_worktrees(&mut self) {
-        let bases: HashMap<PathBuf, String> = self
-            .store
-            .worktrees()
-            .unwrap_or_default()
+        let kept = self.store.worktrees().unwrap_or_default();
+        // The pull requests kept worktrees were on: how the ones no longer open ended.
+        let prs: Vec<termist_core::github::PrRef> = kept
+            .iter()
+            .filter_map(|w| {
+                Some(termist_core::github::PrRef {
+                    repo: w.repo?,
+                    number: w.pr?,
+                })
+            })
+            .collect();
+        let fx = self.github.ask_pr_ends(&prs);
+        self.github_effects(fx);
+        let bases: HashMap<PathBuf, String> = kept
             .into_iter()
             .filter_map(|w| Some((w.path, w.base?)))
             .collect();
@@ -602,6 +612,10 @@ impl Registry {
             .into_iter()
             .filter(|w| w.project == project)
             .map(|w| termist_core::WorktreeInfo {
+                pr_end: w.repo.zip(w.pr).and_then(|(repo, number)| {
+                    let pr = termist_core::github::PrRef { repo, number };
+                    Some((number, self.github.pr_end(pr)?))
+                }),
                 stat: self.worktree_stats.get(&w.path).copied(),
                 path: w.path,
                 repo: w.repo,
@@ -609,7 +623,6 @@ impl Registry {
                 base: w.base,
                 made_by_termist: w.made_by_termist,
                 shown: w.shown,
-                pr_end: None,
             })
             .collect()
     }
@@ -646,7 +659,33 @@ impl Registry {
             }
         }
         for info in changed {
+            self.note_worktree_pr(&info);
             self.broadcast(ServerEvent::SessionUpdated(info));
+        }
+    }
+
+    /// A card on a kept worktree's branch names its pull request: kept, so the band can
+    /// say it merged once it is no longer open.
+    fn note_worktree_pr(&mut self, info: &SessionInfo) {
+        let Some((root, number)) = info
+            .place
+            .as_ref()
+            .and_then(|p| Some((p.root.clone(), p.pr?.number)))
+        else {
+            return;
+        };
+        let kept = self.store.worktrees().unwrap_or_default();
+        let Some(w) = kept
+            .iter()
+            .find(|w| place::resolved(&w.path) == place::resolved(&root))
+        else {
+            return;
+        };
+        if w.pr != Some(number) {
+            if let Err(e) = self.store.set_worktree_pr(&w.path, number) {
+                tracing::warn!(error = %e, "could not keep the worktree's pull request");
+            }
+            self.send_worktrees(w.project);
         }
     }
 
@@ -804,8 +843,17 @@ impl Registry {
             .done(done, std::time::Instant::now(), &self.store, &self.projects);
         self.github_effects(fx);
         self.github_tick();
-        // A new list of pull requests may name a session's branch.
+        // A new list of pull requests may name a session's branch, or end one.
         self.refresh_places(None);
+        let open: Vec<ProjectId> = self
+            .projects
+            .iter()
+            .filter(|p| p.open)
+            .map(|p| p.id)
+            .collect();
+        for project in open {
+            self.send_worktrees(project);
+        }
     }
 
     pub fn note(&mut self, note: SessionNote) {
@@ -2691,6 +2739,42 @@ mod tests {
             "its stopped cards archived"
         );
         assert!(reg.session(live.id).unwrap().info.archived);
+    }
+
+    #[test]
+    fn a_card_on_a_kept_worktree_names_its_pull_request_for_later() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let path = PathBuf::from("/w/site-worktrees/fix");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: path.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut card = stored(&p, "claude-1");
+        card.place = Some(Box::new(termist_core::Place {
+            root: path.clone(),
+            branch: Some("fix".into()),
+            commit: None,
+            repo: Some(repo.id),
+            pr: Some(termist_core::github::PrRef {
+                repo: repo.id,
+                number: 212,
+            }),
+            gone: false,
+        }));
+        reg.note_worktree_pr(&card);
+        assert_eq!(reg.store.worktrees().unwrap()[0].pr, Some(212));
     }
 
     #[test]
