@@ -543,7 +543,7 @@ impl Registry {
             ClientRequest::CreateSession {
                 project,
                 kind,
-                cwd: _,
+                cwd,
                 prompt,
                 model,
                 effort,
@@ -551,7 +551,7 @@ impl Registry {
                 rows,
             } => {
                 if let Err(e) =
-                    self.create_session(project, kind, prompt, model, effort, (cols, rows))
+                    self.create_session(project, kind, cwd, prompt, model, effort, (cols, rows))
                 {
                     self.send(
                         client,
@@ -1180,16 +1180,23 @@ impl Registry {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_session(
         &mut self,
         project: ProjectId,
         kind: SessionKind,
+        cwd: Option<PathBuf>,
         prompt: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         (cols, rows): (u16, u16),
     ) -> anyhow::Result<()> {
-        let Some(proj) = self.projects.iter().find(|p| p.id == project) else {
+        let Some(root) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.path.clone())
+        else {
             bail!("unknown project")
         };
         // A shell has no model or effort; an agent only takes an effort its CLI knows,
@@ -1210,7 +1217,10 @@ impl Registry {
                 (model, effort)
             }
         };
-        let cwd = proj.path.clone();
+        let cwd = match cwd {
+            None => root,
+            Some(dir) => self.folder_of(project, &root, dir)?,
+        };
         let id = SessionId::new();
         let launch = self.launcher.launch(LaunchRequest {
             id,
@@ -1250,6 +1260,34 @@ impl Registry {
         self.broadcast(ServerEvent::SessionUpdated(info));
         self.read_place(cwd);
         Ok(())
+    }
+
+    /// `dir` when a session of the project may run there: a folder in the project, or a
+    /// worktree of one of its repos (a sibling folder, as termist opens them).
+    fn folder_of(
+        &mut self,
+        project: ProjectId,
+        root: &Path,
+        dir: PathBuf,
+    ) -> anyhow::Result<PathBuf> {
+        if !dir.is_dir() {
+            bail!("{} is not a folder", dir.display());
+        }
+        if place::resolved(&dir).starts_with(place::resolved(root)) {
+            return Ok(dir);
+        }
+        let facts = place::read(&dir, &self.git);
+        let ours = facts.as_ref().is_some_and(|f| {
+            self.github
+                .repo_views(project)
+                .iter()
+                .any(|r| r.path == f.main)
+        });
+        if !ours {
+            bail!("{} is not a folder of this project", dir.display());
+        }
+        self.git_facts.insert(dir.clone(), facts);
+        Ok(dir)
     }
 
     /// The model is in the cached catalog of its CLI and lists this effort.
@@ -1583,6 +1621,7 @@ mod tests {
                     agent(harness),
                     None,
                     None,
+                    None,
                     Some(effort.into()),
                     (80, 24),
                 )
@@ -1615,6 +1654,7 @@ mod tests {
                 harness: Harness::Codex,
             },
             None,
+            None,
             Some("gpt-x".into()),
             Some("xhigh".into()),
             (80, 24),
@@ -1642,6 +1682,7 @@ mod tests {
                 harness: Harness::Codex,
             },
             None,
+            None,
             Some("gpt-x".into()),
             Some("xhigh".into()),
             (80, 24),
@@ -1665,6 +1706,7 @@ mod tests {
                     harness: Harness::Codex,
                 },
                 None,
+                None,
                 Some("gpt-x".into()),
                 Some("turbo".into()),
                 (80, 24),
@@ -1686,6 +1728,7 @@ mod tests {
                 .create_session(
                     p.id,
                     codex(),
+                    None,
                     None,
                     Some(model.into()),
                     Some("xhigh".into()),
@@ -2010,6 +2053,73 @@ mod tests {
         assert_eq!(reg.places_round, Some(t0), "not before the round is up");
         reg.places_tick(t0 + PLACES_ROUND);
         assert_eq!(reg.places_round, Some(t0 + PLACES_ROUND));
+    }
+
+    /// Runs git in `dir` for a test, as a nameless author; panics when it fails.
+    #[cfg(unix)]
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_starts_in_a_project_folder_or_a_worktree_of_its_repo_and_nowhere_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("src")).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        run_git(
+            &site,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix/login",
+                "../site-worktrees/fix/login",
+            ],
+        );
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.clone(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        store.upsert_repo(p.id, &site, "acme", "site").unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher
+            .programs
+            .set(Harness::Claude, "/usr/bin/true".into());
+        let claude = || SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        let start = |reg: &mut Registry, dir: PathBuf| {
+            reg.create_session(p.id, claude(), Some(dir), None, None, None, (80, 24))
+        };
+        let worktree = tmp.path().join("site-worktrees/fix/login");
+        start(&mut reg, site.join("src")).unwrap();
+        start(&mut reg, worktree.clone()).unwrap();
+        let cwds: Vec<PathBuf> = reg.sessions.iter().map(|s| s.info.cwd.clone()).collect();
+        assert_eq!(cwds, [site.join("src"), worktree]);
+        std::fs::create_dir(tmp.path().join("elsewhere")).unwrap();
+        let refused = start(&mut reg, tmp.path().join("elsewhere")).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("is not a folder of this project")
+        );
+        let refused = start(&mut reg, tmp.path().join("missing")).unwrap_err();
+        assert!(refused.to_string().contains("is not a folder"));
+        assert_eq!(reg.sessions.len(), 2, "nothing started for a refusal");
     }
 
     fn cancelled_by_title(reg: &mut Registry, p: &ProjectInfo) -> SessionId {
