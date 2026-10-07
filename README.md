@@ -154,8 +154,10 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 
 | Key | Does |
 |---|---|
-| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, from the list each CLI offers, `^P` project |
-| `n` / `t` | new agent session / new shell |
+| `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, from the list each CLI offers, `^P` project, `^T` where it starts, `^N` a new worktree |
+| `P` | new task like the selected card: its agent, model and worktree |
+| `n` / `t` | new agent session / new shell, in the selected card's worktree |
+| `W` / `X` | the worktrees: show, hide, remove / remove the selected one (asks; the branch stays) |
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | `.` / `,` | next / previous session that needs you, across all projects |
@@ -179,6 +181,23 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 `termist kill` stops the daemon and every session.
 
 </details>
+
+### Worktrees
+
+Agents that work in parallel are better off in worktrees of their own. In the new-task prompt `Ctrl+N`
+makes one: a branch named from the prompt (`fix the login redirect` → `fix-the-login-redirect`) off the
+repo's default branch, beside the repo at `<repo>-worktrees/<branch>`, and the agent starts in it.
+`Ctrl+T` picks where a task starts: the project's folder, any worktree, or a new one. Cards stand in
+bands, one per worktree, under the branch, what it changed since it left its base
+(`3 files +60 −28`, `●` while some of it is not committed) and its pull request; a band whose pull
+request merged says so. `X` removes a worktree once its cards are stopped (it asks, and asks again if
+it has uncommitted changes; the branch stays). `W` lists every worktree of the project's repos, those
+made outside termist too, to show one as a band or hide it.
+
+```toml
+[agents]
+new_worktree_by_default = false   # the new-task prompt starts with Ctrl+N on
+```
 
 ### Pull requests
 
