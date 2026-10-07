@@ -1,3 +1,4 @@
+use crate::bands::Slot;
 use crate::browse::Listing;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
@@ -104,6 +105,10 @@ pub struct App {
     pub state: StateSnapshot,
     pub project: Option<ProjectId>,
     pub selected: Option<SessionId>,
+    /// The stand-in of a band with no cards, selected when no card is (its folder).
+    pub empty: Option<PathBuf>,
+    /// Each project's worktrees, as the daemon last sent them.
+    pub worktrees: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
     pub mode: Mode,
     pub screens: HashMap<SessionId, Snapshot>,
     pub attached: Option<SessionId>,
@@ -254,6 +259,8 @@ impl App {
             state: StateSnapshot::default(),
             project: None,
             selected: None,
+            empty: None,
+            worktrees: HashMap::new(),
             mode: Mode::Grid,
             screens: HashMap::new(),
             attached: None,
@@ -741,8 +748,11 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
-            ServerEvent::Worktrees { .. }
-            | ServerEvent::WorktreeMade { .. }
+            ServerEvent::Worktrees { project, list } => {
+                self.worktrees.insert(project, list);
+                self.repair_selection();
+            }
+            ServerEvent::WorktreeMade { .. }
             | ServerEvent::WorktreeNotMade { .. }
             | ServerEvent::RemoveRefused { .. }
             | ServerEvent::WorktreeRemoved { .. }
@@ -1042,14 +1052,25 @@ impl App {
                 if self.overlays.is_empty()
                     && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
                 {
-                    let (card, more, band_pr) = {
+                    let (card, more, band_pr, empty) = {
                         let hits = self.hits.borrow();
                         (
                             hits.card_at(ev.column, ev.row),
                             hits.more_at(ev.column, ev.row),
                             hits.band_pr_at(ev.column, ev.row),
+                            hits.empty_at(ev.column, ev.row),
                         )
                     };
+                    if let Some(path) = empty {
+                        // A second click on a band's stand-in starts a task there.
+                        let again = self.selected.is_none() && self.empty.as_ref() == Some(&path);
+                        self.mode = Mode::Grid;
+                        self.set_slot(Slot::Empty(path));
+                        if again {
+                            return self.start_in_empty();
+                        }
+                        return self.sync_attachment();
+                    }
                     if let (Some(pr), Some(project)) = (band_pr, self.project) {
                         return self.reveal_pr(project, pr);
                     }
@@ -2312,16 +2333,66 @@ impl App {
 
     fn move_by(&mut self, delta: isize) {
         // In the order drawn: band by band.
-        let ids: Vec<SessionId> = self.grid_rows().into_iter().flat_map(|r| r.cards).collect();
-        if ids.is_empty() {
+        let slots: Vec<Slot> = self.grid_rows().into_iter().flat_map(|r| r.slots).collect();
+        if slots.is_empty() {
             return;
         }
-        let pos = self
-            .selected
-            .and_then(|id| ids.iter().position(|x| *x == id))
+        let here = self.slot();
+        let pos = here
+            .and_then(|s| slots.iter().position(|x| *x == s))
             .unwrap_or(0) as isize;
-        let next = (pos + delta).clamp(0, ids.len() as isize - 1) as usize;
-        self.selected = Some(ids[next]);
+        let next = (pos + delta).clamp(0, slots.len() as isize - 1) as usize;
+        self.set_slot(slots[next].clone());
+    }
+
+    /// The selected band stand-in's worktree, with its branch (or folder) name.
+    pub fn empty_worktree(&self) -> Option<(PathBuf, String)> {
+        let path = self.empty.clone().filter(|_| self.selected.is_none())?;
+        let w = self.project_worktrees().iter().find(|w| w.path == path)?;
+        let name = w.branch.clone().unwrap_or_else(|| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        Some((path, name))
+    }
+
+    /// Enter on a band's stand-in: the quick prompt, for its worktree.
+    fn start_in_empty(&mut self) -> Vec<Action> {
+        let (Some(project), Some(worktree)) = (self.project, self.empty_worktree()) else {
+            return vec![];
+        };
+        self.quick_prompt_in(project, "", Some(worktree))
+    }
+
+    /// What is selected in the grid: a card, else a band's stand-in.
+    pub fn slot(&self) -> Option<Slot> {
+        match (self.selected, &self.empty) {
+            (Some(id), _) => Some(Slot::Card(id)),
+            (None, Some(path)) => Some(Slot::Empty(path.clone())),
+            (None, None) => None,
+        }
+    }
+
+    fn set_slot(&mut self, slot: Slot) {
+        match slot {
+            Slot::Card(id) => {
+                self.selected = Some(id);
+                self.empty = None;
+            }
+            Slot::Empty(path) => {
+                self.selected = None;
+                self.empty = Some(path);
+            }
+        }
+    }
+
+    /// The current project's worktrees.
+    pub fn project_worktrees(&self) -> &[termist_core::WorktreeInfo] {
+        self.project
+            .and_then(|p| self.worktrees.get(&p))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Seconds since 1970, for the ages of pull requests.
@@ -2709,6 +2780,7 @@ impl App {
         match action {
             KeyAction::Quit => self.mode = Mode::ConfirmQuit,
             KeyAction::Focus if self.selected.is_some() => return self.enter(),
+            KeyAction::Focus if self.empty.is_some() => return self.start_in_empty(),
             KeyAction::Focus => {}
             KeyAction::Grid => self.mode = Mode::Grid,
             KeyAction::NewSession => return self.open_picker(),
@@ -3226,7 +3298,7 @@ impl App {
 
     /// The bands of `sessions` and whether they get headers; the archive is one band.
     pub fn grid_bands<'a>(
-        &self,
+        &'a self,
         sessions: &[&'a SessionInfo],
     ) -> (Vec<crate::bands::Band<'a>>, bool) {
         let path = self
@@ -3241,10 +3313,11 @@ impl App {
                 root: path,
                 place: None,
                 cards: sessions.to_vec(),
+                worktree: None,
             };
             return (vec![all], false);
         }
-        let bands = crate::bands::bands(&path, sessions);
+        let bands = crate::bands::bands(&path, sessions, self.project_worktrees());
         let headers = crate::bands::headers(&bands);
         (bands, headers)
     }
@@ -3254,14 +3327,15 @@ impl App {
         let sessions = self.project_sessions();
         let (bands, headers) = self.grid_bands(&sessions);
         crate::ui::Shape {
-            counts: bands.iter().map(|b| b.cards.len()).collect(),
+            // A band with no cards has its stand-in.
+            counts: bands.iter().map(|b| b.cards.len().max(1)).collect(),
             headers,
         }
     }
 
     fn selected_row(&self, rows: &[crate::bands::Row]) -> Option<usize> {
-        let id = self.selected?;
-        rows.iter().position(|r| r.cards.contains(&id))
+        let here = self.slot()?;
+        rows.iter().position(|r| r.slots.contains(&here))
     }
 
     /// `delta` rows down (up when negative), in the same column as far as the row goes;
@@ -3271,26 +3345,29 @@ impl App {
         if rows.is_empty() {
             return;
         }
+        let here = self.slot();
         let (r, col) = match self.selected_row(&rows) {
             Some(r) => (
                 r,
-                rows[r]
-                    .cards
-                    .iter()
-                    .position(|id| Some(*id) == self.selected),
+                rows[r].slots.iter().position(|s| Some(s) == here.as_ref()),
             ),
             None => (0, Some(0)),
         };
         let to = r as isize + delta;
         let last = rows.len() as isize - 1;
-        self.selected = Some(match to {
-            ..0 => rows[0].cards[0],
-            _ if to > last => *rows[last as usize].cards.last().expect("rows have cards"),
+        let slot = match to {
+            ..0 => rows[0].slots[0].clone(),
+            _ if to > last => rows[last as usize]
+                .slots
+                .last()
+                .expect("rows have slots")
+                .clone(),
             _ => {
-                let row = &rows[to as usize].cards;
-                row[col.unwrap_or(0).min(row.len() - 1)]
+                let row = &rows[to as usize].slots;
+                row[col.unwrap_or(0).min(row.len() - 1)].clone()
             }
-        });
+        };
+        self.set_slot(slot);
     }
 
     /// Ctrl+D / Ctrl+U: half a screen of cards down or up, selection and view together.
@@ -3384,7 +3461,21 @@ impl App {
         let valid = self
             .selected
             .is_some_and(|id| self.project_sessions().iter().any(|s| s.id == id));
-        if !valid {
+        // A band's stand-in stays selected while its worktree is shown with no cards.
+        let empty = self.selected.is_none()
+            && self.empty.as_ref().is_some_and(|path| {
+                self.project_worktrees()
+                    .iter()
+                    .any(|w| &w.path == path && w.shown)
+                    && !self
+                        .project_sessions()
+                        .iter()
+                        .any(|s| s.place.as_deref().map_or(&s.cwd, |p| &p.root) == path)
+            });
+        if !empty {
+            self.empty = None;
+        }
+        if !valid && !empty {
             self.selected = self.project_sessions().first().map(|s| s.id);
             if matches!(self.mode, Mode::Focus | Mode::FocusPrefix) {
                 self.mode = Mode::Grid;

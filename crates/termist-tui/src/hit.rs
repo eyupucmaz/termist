@@ -11,6 +11,8 @@ pub struct Hits {
     pub tabs: Vec<(ProjectId, u16, u16)>,
     pub header: Rect,
     pub cards: Vec<(SessionId, Rect)>,
+    /// The stand-ins of bands with no cards: their worktrees' folders.
+    pub empties: Vec<(std::path::PathBuf, Rect)>,
     /// Where cards go: the wheel moves through them here.
     pub cards_zone: Rect,
     /// `↑ n more` and `↓ n more`.
@@ -36,6 +38,13 @@ impl Hits {
             .iter()
             .find(|(_, r)| r.contains(Position::new(x, y)))
             .map(|(pr, _)| *pr)
+    }
+
+    pub fn empty_at(&self, x: u16, y: u16) -> Option<std::path::PathBuf> {
+        self.empties
+            .iter()
+            .find(|(_, r)| r.contains(Position::new(x, y)))
+            .map(|(p, _)| p.clone())
     }
 
     pub fn card_at(&self, x: u16, y: u16) -> Option<SessionId> {
@@ -71,6 +80,7 @@ mod tests {
             tabs: vec![(a, 10, 16), (b, 17, 24)],
             header: Rect::new(0, 0, 80, 1),
             cards: vec![(card, Rect::new(0, 1, 24, 4))],
+            empties: vec![],
             cards_zone: Rect::new(0, 1, 80, 6),
             above: None,
             below: Some(Rect::new(0, 5, 24, 1)),

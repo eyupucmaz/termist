@@ -2,7 +2,7 @@
 //! they are drawn in.
 use crate::ui::CARD_H;
 use std::path::{Path, PathBuf};
-use termist_core::{Place, SessionId, SessionInfo};
+use termist_core::{Place, SessionId, SessionInfo, WorktreeInfo};
 
 /// The cards that run in one worktree (or one folder outside any repo).
 #[derive(Debug)]
@@ -11,6 +11,8 @@ pub struct Band<'a> {
     /// The first card's place, once the daemon read it.
     pub place: Option<&'a Place>,
     pub cards: Vec<&'a SessionInfo>,
+    /// The worktree as the daemon keeps it, when it is one: its summary, its end.
+    pub worktree: Option<&'a WorktreeInfo>,
 }
 
 /// Where a card's band is: its worktree, or its folder until that is known.
@@ -23,7 +25,11 @@ fn root_of(s: &SessionInfo) -> &Path {
 
 /// The project's cards by worktree: the project folder's band first, then the others
 /// in the order their first cards came.
-pub fn bands<'a>(project: &Path, sessions: &[&'a SessionInfo]) -> Vec<Band<'a>> {
+pub fn bands<'a>(
+    project: &Path,
+    sessions: &[&'a SessionInfo],
+    worktrees: &'a [WorktreeInfo],
+) -> Vec<Band<'a>> {
     let mut bands: Vec<Band<'a>> = vec![];
     for s in sessions {
         let root = root_of(s);
@@ -36,7 +42,22 @@ pub fn bands<'a>(project: &Path, sessions: &[&'a SessionInfo]) -> Vec<Band<'a>> 
                 root: root.to_path_buf(),
                 place: s.place.as_deref(),
                 cards: vec![s],
+                worktree: None,
             }),
+        }
+    }
+    for band in &mut bands {
+        band.worktree = worktrees.iter().find(|w| w.path == band.root);
+    }
+    // Worktrees shown with no card in them: a band each, after the others.
+    for w in worktrees.iter().filter(|w| w.shown) {
+        if !bands.iter().any(|b| b.root == w.path) {
+            bands.push(Band {
+                root: w.path.clone(),
+                place: None,
+                cards: vec![],
+                worktree: Some(w),
+            });
         }
     }
     // The band holding the project's folder (its repo, or the folder itself) leads.
@@ -56,12 +77,21 @@ pub fn headers(bands: &[Band]) -> bool {
             .any(|b| b.place.is_some_and(|p| p.pr.is_some()))
 }
 
-/// A row of the grid: maybe a band's header line, then up to a row of cards.
+/// A place in the grid that can be selected: a card, or the stand-in of a band with
+/// no cards (its worktree's folder).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Slot {
+    Card(SessionId),
+    Empty(PathBuf),
+}
+
+/// A row of the grid: maybe a band's header line, then up to a row of cards (or the
+/// stand-in of a band with none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     /// The band whose header is drawn above the cards: its index.
     pub header: Option<usize>,
-    pub cards: Vec<SessionId>,
+    pub slots: Vec<Slot>,
 }
 
 impl Row {
@@ -75,10 +105,17 @@ pub fn rows(bands: &[Band], per_row: usize, headers: bool) -> Vec<Row> {
     let per_row = per_row.max(1);
     let mut rows = vec![];
     for (i, band) in bands.iter().enumerate() {
+        if band.cards.is_empty() {
+            rows.push(Row {
+                header: headers.then_some(i),
+                slots: vec![Slot::Empty(band.root.clone())],
+            });
+            continue;
+        }
         for (n, chunk) in band.cards.chunks(per_row).enumerate() {
             rows.push(Row {
                 header: (headers && n == 0).then_some(i),
-                cards: chunk.iter().map(|s| s.id).collect(),
+                slots: chunk.iter().map(|s| Slot::Card(s.id)).collect(),
             });
         }
     }
@@ -145,7 +182,7 @@ mod tests {
         );
         let d = card("d", "/w/site", None); // not read yet: its folder
         let all = [&a, &b, &c, &d];
-        let bands = bands(Path::new("/w/site"), &all);
+        let bands = bands(Path::new("/w/site"), &all, &[]);
         let names: Vec<Vec<&str>> = bands
             .iter()
             .map(|b| b.cards.iter().map(|s| s.name.as_str()).collect())
@@ -158,11 +195,11 @@ mod tests {
     fn one_band_without_a_pull_request_has_no_header() {
         let a = card("a", "/w/site", Some(("/w/site", None)));
         let b = card("b", "/w/site", None);
-        let bands = bands(Path::new("/w/site"), &[&a, &b]);
+        let bands = bands(Path::new("/w/site"), &[&a, &b], &[]);
         assert_eq!(bands.len(), 1);
         assert!(!headers(&bands));
         let a = card("a", "/w/site", Some(("/w/site", Some(212))));
-        assert!(headers(&super::bands(Path::new("/w/site"), &[&a])));
+        assert!(headers(&super::bands(Path::new("/w/site"), &[&a], &[])));
     }
 
     #[test]
@@ -174,10 +211,10 @@ mod tests {
             })
             .collect();
         let all: Vec<&SessionInfo> = cards.iter().collect();
-        let bands = bands(Path::new("/w/site"), &all);
+        let bands = bands(Path::new("/w/site"), &all, &[]);
         let rows = rows(&bands, 2, true);
         let shape: Vec<(Option<usize>, usize)> =
-            rows.iter().map(|r| (r.header, r.cards.len())).collect();
+            rows.iter().map(|r| (r.header, r.slots.len())).collect();
         assert_eq!(shape, [(Some(0), 2), (None, 1), (Some(1), 2)]);
         assert_eq!(rows[0].height(), CARD_H + 1);
         assert_eq!(height(&[3, 2], 2, true), 3 * CARD_H + 2);
