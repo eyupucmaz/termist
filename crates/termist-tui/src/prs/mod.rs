@@ -671,6 +671,11 @@ pub fn hint(app: &App, view: &PrView) -> String {
         return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
     }
     if let Some(d) = &view.detail {
+        // Threads marked for an agent come first, with how to send them.
+        let marked = match app.marks.get(&d.pr).map_or(0, |m| m.len()) {
+            0 => String::new(),
+            n => format!("◆ {n} marked · a agent · "),
+        };
         if let Some(open) = &d.diff {
             if open.typing {
                 return "type to search the paths · ↑/↓ choose · Enter keep · Esc clear".into();
@@ -680,13 +685,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
                 termist_core::config::DiffLayout::Split => "unified",
             };
             return format!(
-                "#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · ^R viewed · s {other} · A review · Esc back",
+                "{marked}#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · Space mark · ^R viewed · s {other} · A review · w worktree · Esc back",
                 d.pr.number
             );
         }
         if d.tab == Tab::Conversation {
             return format!(
-                "#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · A review · Esc list",
+                "{marked}#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · Space mark · A review · w worktree · Esc list",
                 d.pr.number
             );
         }
@@ -698,13 +703,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
             );
         }
         return format!(
-            "#{} · Tab section · j/k scroll · d diff · c comment · A review · b browser · {} refresh · Esc list",
+            "{marked}#{} · Tab section · j/k scroll · d diff · c comment · A review · w worktree · b browser · {} refresh · Esc list",
             d.pr.number,
             key(Action::RefreshGitHub)
         );
     }
     format!(
-        "pull requests · Enter open · / search · f {} · m repos · b browser · {} refresh · Esc grid",
+        "pull requests · Enter open · / search · f {} · m repos · w worktree · b browser · {} refresh · Esc grid",
         view.filter.next().label(),
         key(Action::RefreshGitHub)
     )

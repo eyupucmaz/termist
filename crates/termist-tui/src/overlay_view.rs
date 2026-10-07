@@ -993,6 +993,9 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("x", "on a thread: resolve, or unresolve"),
         ("e / D", "on a comment of yours: edit / delete"),
         ("A", "send your review: comment, approve, request changes"),
+        ("w", "a worktree on its branch, and an agent there"),
+        ("Space", "on a thread: mark it for an agent"),
+        ("a", "the marked threads (or this one) to an agent"),
         ("Esc", "back"),
     ] {
         lines.push(row(key.into(), what));
@@ -1016,6 +1019,7 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("← →", "move long lines sideways"),
         ("/", "search the paths"),
         ("b", "the file on GitHub"),
+        ("Space / a", "mark the thread / the marked ones to an agent"),
         ("Esc", "back to the pull request"),
     ] {
         lines.push(row(key.into(), what));

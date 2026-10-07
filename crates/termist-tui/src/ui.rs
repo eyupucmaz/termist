@@ -2524,7 +2524,9 @@ mod tests {
         press(&mut app, ' ');
         assert_eq!(app.marks[&pr].iter().collect::<Vec<_>>(), ["T1"]);
         assert!(screen_text(&render(&mut app, 90, 40)).contains("src/search/DealerFilter.tsx:"));
-        assert!(screen_text(&render(&mut app, 90, 40)).contains(" ◆ · open"));
+        let screen = screen_text(&render(&mut app, 90, 40));
+        assert!(screen.contains(" ◆ · open"));
+        assert!(screen.contains("◆ 1 marked · a agent · #212 · j/k item"));
         // No card on its branch: a new agent, in its worktree.
         let actions = press(&mut app, 'a');
         assert!(actions.contains(&crate::app::Action::Send(
