@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+"""A stand-in GitHub CLI for recording termist's pull request screens.
+
+termist's daemon runs it as `gh` (TERMIST_GH_BIN). It answers the few commands termist
+uses, `auth status`, `auth token`, `api graphql` and the REST files list, and
+`pr checkout` in a worktree, with made-up data: the repos acme/site and acme/api, the
+people alice, bob, carol and deniz (who is "you"). What you write to acme/site#212 is
+kept in $TERMIST_HOME/demo-gh.json, so it shows up as it would on GitHub. It never
+touches the network.
+"""
+import datetime
+import difflib
+import json
+import os
+import re
+import subprocess
+import sys
+
+VIEWER = "deniz"
+NOW = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+STATE = os.path.join(os.environ.get("TERMIST_HOME", "/tmp"), "demo-gh.json")
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"comments": [], "threads": [], "replies": {}, "resolved": [], "reviews": []}
+
+
+def save(state):
+    with open(STATE, "w") as f:
+        json.dump(state, f)
+
+
+def ago(**delta):
+    return (NOW - datetime.timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --- the changes of the pull request that is shown in full: acme/site#212 -------------
+
+REDIRECT_OLD = """\
+use crate::auth::session::Session;
+use axum::http::Uri;
+
+/// Where to send you after you sign in: `asked` is the page
+/// the login page stopped you on, if any.
+pub fn return_to(s: &mut Session, asked: Option<&Uri>) -> Uri {
+    let target = asked
+        .cloned()
+        .unwrap_or_else(|| Uri::from_static("/"));
+    s.clear();
+    if target.path() == "/login" {
+        return Uri::from_static("/");
+    }
+    target
+}
+
+/// The login page's own address, with where to go next.
+pub fn login_url(next: &Uri) -> String {
+    format!("/login?next={}", urlencoding::encode(&next.to_string()))
+}
+"""
+
+REDIRECT_NEW = """\
+use crate::auth::session::Session;
+use crate::auth::url::same_origin;
+use axum::http::Uri;
+
+/// Where to send you after you sign in: `asked` is the page
+/// the login page stopped you on, if any.
+pub fn return_to(s: &mut Session, asked: Option<&Uri>) -> Uri {
+    let target = match asked {
+        Some(u) if same_origin(u) && !is_login(u) => u.clone(),
+        _ => Uri::from_static("/"),
+    };
+    // Build the redirect first: clearing the session dropped
+    // `return_to`, and login sent you back to itself.
+    let redirect = target.clone();
+    s.rotate();
+    redirect
+}
+
+fn is_login(uri: &Uri) -> bool {
+    uri.path().trim_end_matches('/') == "/login"
+}
+
+/// The login page's own address, with where to go next.
+pub fn login_url(next: &Uri) -> String {
+    format!("/login?next={}", urlencoding::encode(&next.to_string()))
+}
+"""
+
+SESSION_OLD = """\
+use std::time::{Duration, SystemTime};
+
+pub struct Session {
+    pub id: SessionId,
+    pub user: Option<UserId>,
+    pub return_to: Option<String>,
+    pub expires: SystemTime,
+}
+
+impl Session {
+    /// Signs the user out and forgets everything about them.
+    pub fn clear(&mut self) {
+        self.user = None;
+        self.return_to = None;
+        self.id = SessionId::random();
+    }
+
+    pub fn is_expired(&self) -> bool {
+        SystemTime::now() > self.expires
+    }
+}
+"""
+
+SESSION_NEW = """\
+use std::time::{Duration, SystemTime};
+
+/// How long a session lives without a request.
+pub const IDLE: Duration = Duration::from_secs(30 * 60);
+
+pub struct Session {
+    pub id: SessionId,
+    pub user: Option<UserId>,
+    pub return_to: Option<String>,
+    pub expires: SystemTime,
+}
+
+impl Session {
+    /// Signs the user out and forgets everything about them.
+    pub fn clear(&mut self) {
+        self.user = None;
+        self.return_to = None;
+        self.id = SessionId::random();
+    }
+
+    /// A new id for the same session, as after a sign-in:
+    /// what it holds stays, an old id stops working.
+    pub fn rotate(&mut self) {
+        self.id = SessionId::random();
+        self.expires = SystemTime::now() + IDLE;
+    }
+
+    pub fn is_expired(&self) -> bool {
+        SystemTime::now() > self.expires
+    }
+}
+"""
+
+TEST_NEW = """\
+use site::auth::redirect::return_to;
+use site::auth::session::Session;
+
+#[test]
+fn the_login_page_never_sends_you_back_to_itself() {
+    let mut s = Session::signed_out();
+    let to = return_to(&mut s, Some(&"/login/".parse().unwrap()));
+    assert_eq!(to, "/");
+}
+
+#[test]
+fn the_page_you_asked_for_survives_the_sign_in() {
+    let mut s = Session::signed_out();
+    let to = return_to(&mut s, Some(&"/settings/billing".parse().unwrap()));
+    assert_eq!(to, "/settings/billing");
+}
+
+#[test]
+fn another_site_is_never_a_place_to_return_to() {
+    let mut s = Session::signed_out();
+    let to = return_to(&mut s, Some(&"https://evil.example/".parse().unwrap()));
+    assert_eq!(to, "/");
+}
+"""
+
+URL_NEW = """\
+use axum::http::Uri;
+
+/// A relative address, or one on this site: never another host.
+pub fn same_origin(uri: &Uri) -> bool {
+    uri.host().is_none() && uri.path().starts_with('/') && !uri.path().starts_with("//")
+}
+"""
+
+CHANGELOG_OLD = """\
+# Changelog
+
+## Unreleased
+
+- Uploads show their progress.
+"""
+
+CHANGELOG_NEW = """\
+# Changelog
+
+## Unreleased
+
+- Signing in from a page you were sent away from takes you back to it,
+  instead of to the login page again.
+- Uploads show their progress.
+"""
+
+
+def patch(old, new):
+    lines = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=3)
+    return "\n".join(list(lines)[2:])
+
+
+FILES_212 = [
+    ("src/auth/redirect.rs", "modified", REDIRECT_OLD, REDIRECT_NEW),
+    ("src/auth/session.rs", "modified", SESSION_OLD, SESSION_NEW),
+    ("src/auth/url.rs", "added", "", URL_NEW),
+    ("tests/auth_redirect.rs", "added", "", TEST_NEW),
+    ("CHANGELOG.md", "modified", CHANGELOG_OLD, CHANGELOG_NEW),
+]
+
+
+def counts(text):
+    plus = sum(1 for l in text.splitlines() if l.startswith("+"))
+    minus = sum(1 for l in text.splitlines() if l.startswith("-"))
+    return plus, minus
+
+
+def rest_files(files):
+    out = []
+    for path, status, old, new in files:
+        p = patch(old, new)
+        plus, minus = counts(p)
+        out.append({"filename": path, "status": status, "additions": plus,
+                    "deletions": minus, "changes": plus + minus, "patch": p})
+    return out
+
+
+def line_of(text, part):
+    return next(i for i, l in enumerate(text.splitlines(), 1) if part in l)
+
+
+def hunk_to(path, line):
+    """GitHub's diffHunk for a comment on new line `line` of `path`: its hunk, cut there."""
+    for p, _, old, new in FILES_212:
+        if p != path:
+            continue
+        out, n = [], 0
+        for l in patch(old, new).splitlines():
+            if l.startswith("@@"):
+                out = [l]
+                n = int(re.search(r"\+(\d+)", l).group(1)) - 1
+                continue
+            out.append(l)
+            if not l.startswith("-"):
+                n += 1
+            if n == line:
+                return "\n".join(out)
+    return ""
+
+
+# --- the pull requests --------------------------------------------------------------
+
+def pr(repo, number, title, author, head, plus, minus, files, *, draft=False, hours=1,
+       mergeable="MERGEABLE", decision="REVIEW_REQUIRED", requested=(), verdicts=(),
+       checks="SUCCESS"):
+    return {
+        "number": number, "title": title, "url": f"https://github.com/{repo}/pull/{number}",
+        "isDraft": draft, "state": "OPEN", "createdAt": ago(hours=hours + 30),
+        "updatedAt": ago(hours=hours), "headRefName": head,
+        "headRepository": {"nameWithOwner": repo}, "baseRefName": "main",
+        "additions": plus, "deletions": minus, "changedFiles": files,
+        "mergeable": mergeable, "reviewDecision": decision, "author": {"login": author},
+        "reviewRequests": {"nodes": [
+            {"requestedReviewer": {"__typename": "User", "login": r}} for r in requested]},
+        "latestOpinionatedReviews": {"nodes": [
+            {"state": s, "author": {"login": who}} for who, s in verdicts]},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": checks and {"state": checks}}}]},
+    }
+
+
+f212 = rest_files(FILES_212)
+PRS = {
+    "acme/site": [
+        pr("acme/site", 212, "Fix the login redirect loop", "bob", "fix/login",
+           sum(f["additions"] for f in f212), sum(f["deletions"] for f in f212), len(f212),
+           hours=0.4, requested=[VIEWER]),
+        pr("acme/site", 211, "Rate limit uploads per API key", "carol", "feat/upload-limits",
+           142, 18, 6, hours=3, decision="CHANGES_REQUESTED",
+           verdicts=[("alice", "CHANGES_REQUESTED")], checks="FAILURE"),
+        pr("acme/site", 207, "Invoice totals round half to even", "alice", "fix/invoice-rounding",
+           36, 9, 3, hours=7, decision="APPROVED", verdicts=[("bob", "APPROVED")],
+           checks="PENDING"),
+        pr("acme/site", 203, "Dark mode for the dashboard", "bob", "feat/dark-dashboard",
+           388, 121, 23, draft=True, hours=26, mergeable="CONFLICTING", decision=None),
+        pr("acme/site", 199, "Bump vite from 5.4.8 to 5.4.10", "carol", "deps/vite-5.4.10",
+           12, 12, 2, hours=50, decision="APPROVED", verdicts=[(VIEWER, "APPROVED")]),
+        pr("acme/site", 196, "Search: filter dealers on the map", "alice", "feat/map-filter",
+           233, 40, 8, hours=75),
+    ],
+    "acme/api": [
+        pr("acme/api", 87, "Split the session store into two tables", "carol",
+           "refactor/session-store", 214, 167, 11, hours=1.5, requested=[VIEWER]),
+        pr("acme/api", 85, "Paginate /v1/invoices", "alice", "feat/invoice-pages",
+           97, 14, 5, hours=20),
+        pr("acme/api", 84, "Health check reports the queue depth", "bob", "feat/health-queue",
+           41, 3, 2, hours=29, decision="APPROVED", verdicts=[("alice", "APPROVED")]),
+    ],
+}
+
+
+def comment(cid, who, body, hours, mine=False, hunk=None):
+    c = {"id": cid, "author": {"login": who}, "body": body, "createdAt": ago(hours=hours),
+         "viewerDidAuthor": mine, "viewerCanUpdate": mine, "viewerCanDelete": mine}
+    if hunk is not None:
+        c["diffHunk"] = hunk
+    return c
+
+
+def check(name, workflow, conclusion="SUCCESS", minutes=40, took=(1, 12)):
+    status = "COMPLETED" if conclusion else "IN_PROGRESS"
+    return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
+            "detailsUrl": "https://github.com/acme/site/actions/runs/1",
+            "startedAt": ago(minutes=minutes),
+            "completedAt": ago(minutes=minutes - took[0], seconds=-took[1]) if conclusion else None,
+            "checkSuite": {"workflowRun": {"workflow": {"name": workflow}}}}
+
+
+def detail(repo, number):
+    summary = next((p for p in PRS.get(repo, []) if p["number"] == number), None)
+    if summary is None:
+        return {"data": {"viewer": {"login": VIEWER}, "repository": {"pullRequest": None}}}
+    p = dict(summary)
+    p.update({"id": f"PR_{number}", "headRefOid": "9f3c2a1e7b5d4c6a8e0f1b2c3d4e5f6a7b8c9d0e",
+              "viewerDidAuthor": False, "pending": {"nodes": []}})
+    if repo == "acme/site" and number == 212:
+        p["body"] = (
+            "Signing in from a page you were sent away from took you to the login page again, "
+            "forever: `return_to` was read after the session was cleared.\n\n"
+            "Now the redirect is built first, and the session gets a new id instead of being "
+            "cleared. Only addresses on this site are returned to.\n\nCloses #188.")
+        p["comments"] = {"totalCount": 2, "nodes": [
+            comment("IC_1", "bob", "Repro before: sign out, open /settings/billing, sign in. "
+                    "You land on /login again.", 20),
+            comment("IC_2", "alice", "Confirmed on staging, and fixed with this branch.", 3),
+        ]}
+        p["reviews"] = {"totalCount": 1, "nodes": [
+            {"author": {"login": "carol"}, "state": "COMMENTED",
+             "body": "Nice find. Two things below, then it is good to go.",
+             "submittedAt": ago(hours=2)}]}
+        l1 = line_of(REDIRECT_NEW, "Some(u) if")
+        l2 = line_of(SESSION_NEW, "self.expires = SystemTime")
+        t1 = hunk_to("src/auth/redirect.rs", l1)
+        t2 = hunk_to("src/auth/session.rs", l2)
+        p["reviewThreads"] = {"totalCount": 2, "nodes": [
+            {"id": "T1", "isResolved": False, "isOutdated": False, "path": "src/auth/redirect.rs",
+             "line": l1, "originalLine": l1, "startLine": None, "diffSide": "RIGHT",
+             "viewerCanReply": True, "viewerCanResolve": True, "viewerCanUnresolve": False,
+             "comments": {"totalCount": 2, "nodes": [
+                 comment("RC_1", "carol", "`/login?next=/login` still loops: the query is kept "
+                         "and the login page reads `next` again. Can we drop the query too?",
+                         2, hunk=t1),
+                 comment("RC_2", "bob", "Good catch, a test for it as well.", 1.5, hunk=t1)]}},
+            {"id": "T2", "isResolved": False, "isOutdated": False, "path": "src/auth/session.rs",
+             "line": l2, "originalLine": l2, "startLine": l2 - 2, "diffSide": "RIGHT",
+             "viewerCanReply": True, "viewerCanResolve": True, "viewerCanUnresolve": False,
+             "comments": {"totalCount": 1, "nodes": [
+                 comment("RC_3", "carol", "`rotate` should keep the CSRF token in step with the "
+                         "new id, or the next form post fails.", 2, hunk=t2)]}},
+        ]}
+        files = f212
+        written(p, load())
+        p["checks"] = {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+            "totalCount": 5, "nodes": [
+                check("build", "CI", minutes=30, took=(2, 41)),
+                check("test", "CI", minutes=30, took=(4, 8)),
+                check("clippy", "CI", minutes=30, took=(1, 55)),
+                check("e2e (chromium)", "E2E", minutes=30, took=(6, 30)),
+                {"__typename": "StatusContext", "context": "preview", "state": "SUCCESS",
+                 "targetUrl": "https://preview.example/site/212", "createdAt": ago(minutes=24)},
+            ]}}}}]}
+    else:
+        p["body"] = "Synthetic pull request for the demo."
+        p["comments"] = {"totalCount": 0, "nodes": []}
+        p["reviews"] = {"totalCount": 0, "nodes": []}
+        p["reviewThreads"] = {"totalCount": 0, "nodes": []}
+        files = rest_files([("README.md", "modified", "# site\n", "# site\n\nA demo.\n")])
+        p["checks"] = {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
+            "totalCount": 2, "nodes": [check("build", "CI"), check("test", "CI")]}}}}]}
+    p["files"] = {"totalCount": len(files), "nodes": [
+        {"path": f["filename"], "additions": f["additions"], "deletions": f["deletions"],
+         "changeType": {"added": "ADDED", "removed": "DELETED"}.get(f["status"], "MODIFIED"),
+         "viewerViewedState": "VIEWED" if f["filename"] == "CHANGELOG.md" else "UNVIEWED"}
+        for f in files]}
+    return {"data": {"viewer": {"login": VIEWER},
+                     "rateLimit": {"remaining": 4970, "resetAt": ago(minutes=-40)},
+                     "repository": {"pullRequest": p}}}
+
+
+def files_of(repo, number):
+    if repo == "acme/site" and number == 212:
+        return f212
+    return rest_files([("README.md", "modified", "# site\n", "# site\n\nA demo.\n")])
+
+
+def repos_asked(query):
+    return re.findall(r'(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)', query)
+
+
+def written(p, state):
+    """What you wrote, in the pull request as GitHub would show it."""
+    def mine(c, pending=False):
+        out = comment(c["id"], VIEWER, c["body"], 0, mine=True)
+        out["createdAt"] = c["at"]
+        if pending:
+            out["state"] = "PENDING"
+        return out
+    p["comments"]["nodes"] += [mine(c) for c in state["comments"]]
+    p["reviews"]["nodes"] += [
+        {"author": {"login": VIEWER}, "state": r["state"], "body": r["body"], "submittedAt": r["at"]}
+        for r in state["reviews"]]
+    for t in state["threads"]:
+        hunk = hunk_to(t["path"], t["line"])
+        first = dict(mine(t, t["pending"]), diffHunk=hunk)
+        p["reviewThreads"]["nodes"].append({
+            "id": t["id"], "isResolved": False, "isOutdated": False, "path": t["path"],
+            "line": t["line"], "originalLine": t["line"], "startLine": t["start"],
+            "diffSide": t["side"], "viewerCanReply": True, "viewerCanResolve": True,
+            "viewerCanUnresolve": False, "comments": {"totalCount": 1, "nodes": [first]}})
+    for t in p["reviewThreads"]["nodes"]:
+        replies = [dict(mine(c), diffHunk="") for c in state["replies"].get(t["id"], [])]
+        t["comments"]["nodes"] += replies
+        t["comments"]["totalCount"] += len(replies)
+        if t["id"] in state["resolved"]:
+            t.update(isResolved=True, viewerCanUnresolve=True)
+    p["comments"]["totalCount"] = len(p["comments"]["nodes"])
+    p["reviews"]["totalCount"] = len(p["reviews"]["nodes"])
+    p["reviewThreads"]["totalCount"] = len(p["reviewThreads"]["nodes"])
+    if any(t["pending"] for t in state["threads"]):
+        p["pending"] = {"nodes": [{"id": "PRR_demo"}]}
+
+
+def arg(query, key):
+    m = re.search(key + r': ("(?:[^"\\]|\\.)*"|\d+|[A-Z_]+)', query)
+    if not m:
+        return None
+    v = m.group(1)
+    return json.loads(v) if v.startswith('"') else int(v) if v.isdigit() else v
+
+
+def write(query):
+    field = re.search(r"mutation \{ (\w+)", query).group(1)
+    state = load()
+    at = ago(seconds=0)
+    n = sum(len(v) if isinstance(v, list) else 1 for v in state.values())
+    if field == "addComment":
+        state["comments"].append({"id": f"IC_d{n}", "body": arg(query, "body"), "at": at})
+    elif field == "addPullRequestReviewThread":
+        state["threads"].append({
+            "id": f"T_d{n}", "body": arg(query, "body"), "at": at, "path": arg(query, "path"),
+            "line": arg(query, "line"), "start": arg(query, "startLine"),
+            "side": arg(query, "side") or "RIGHT", "pending": True})
+    elif field == "addPullRequestReviewThreadReply":
+        thread = arg(query, "pullRequestReviewThreadId")
+        state["replies"].setdefault(thread, []).append(
+            {"id": f"RC_d{n}", "body": arg(query, "body"), "at": at})
+    elif field in ("resolveReviewThread", "unresolveReviewThread"):
+        thread = arg(query, "threadId")
+        state["resolved"] = [t for t in state["resolved"] if t != thread]
+        if field == "resolveReviewThread":
+            state["resolved"].append(thread)
+    elif field in ("submitPullRequestReview", "addPullRequestReview"):
+        event = arg(query, "event")
+        state["reviews"].append({
+            "state": {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
+                event, "COMMENTED"),
+            "body": arg(query, "body") or "", "at": at})
+        for t in state["threads"]:
+            t["pending"] = False
+    save(state)
+    return {"data": {field: {"clientMutationId": None}}}
+
+
+def graphql(query):
+    one = re.search(r'repository\(owner: "([^"]+)", name: "([^"]+)"\) \{\s*pullRequest\(number: (\d+)\)',
+                    query)
+    if query.lstrip().startswith("mutation"):
+        return write(query)
+    if "viewerPermission" in query:
+        return {"data": {a: {"viewerPermission": "WRITE"} for a, o, n in repos_asked(query)}}
+    if "reviewThreads" in query:
+        return detail(f"{one.group(1)}/{one.group(2)}", int(one.group(3)))
+    if "pageInfo" in query:
+        repo, number = f"{one.group(1)}/{one.group(2)}", int(one.group(3))
+        nodes = [{"path": f["filename"],
+                  "viewerViewedState": "VIEWED" if f["filename"] == "CHANGELOG.md" else "UNVIEWED"}
+                 for f in files_of(repo, number)]
+        return {"data": {"repository": {"pullRequest": {"files": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}}
+    if "states: PENDING" in query:
+        pending = [{"id": "PRR_demo"}] if any(t["pending"] for t in load()["threads"]) else []
+        return {"data": {"repository": {"pullRequest": {"reviews": {"nodes": pending}}}}}
+    data = {"viewer": {"login": VIEWER},
+            "rateLimit": {"remaining": 4980, "resetAt": ago(minutes=-40)}}
+    for alias, owner, name in repos_asked(query):
+        prs = PRS.get(f"{owner}/{name}")
+        if prs is None:
+            data[alias] = None
+        elif "first: 50" in query:
+            data[alias] = {"pullRequests": {"totalCount": len(prs), "nodes": prs}}
+        else:
+            data[alias] = {"pullRequests": {"totalCount": len(prs)}}
+    return {"data": data}
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:2] == ["auth", "status"]:
+        print(json.dumps({"hosts": {"github.com": [
+            {"login": VIEWER, "active": True, "state": "success"}]}}))
+    elif args[:2] == ["auth", "token"]:
+        print("demo-token")
+    elif args[:2] == ["api", "graphql"]:
+        query = json.loads(sys.stdin.read() or "{}").get("query", "")
+        print(json.dumps(graphql(query)))
+    elif args[:1] == ["api"]:
+        m = re.search(r"repos/([^/]+)/([^/]+)/pulls/(\d+)/files\?.*page=(\d+)", args[-1])
+        if not m:
+            sys.exit(1)
+        repo, number, page = f"{m.group(1)}/{m.group(2)}", int(m.group(3)), int(m.group(4))
+        print(json.dumps(files_of(repo, number) if page == 1 else []))
+    elif args[:2] == ["pr", "checkout"]:
+        number, repo = int(args[2]), args[args.index("-R") + 1]
+        head = next(p["headRefName"] for p in PRS[repo] if p["number"] == number)
+        sys.exit(subprocess.run(["git", "checkout", "-q", "-b", head]).returncode)
+    else:
+        print(f"demo gh: unknown command {' '.join(args)}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

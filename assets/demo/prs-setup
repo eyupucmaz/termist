@@ -1,0 +1,19 @@
+#!/bin/sh
+# Makes the folder of repos the pull request recordings run in: $TERMIST_HOME/code/acme
+# with two small git repos, site and api, whose origins name acme/site and acme/api on
+# GitHub. Nothing is pushed or fetched: the stand-in gh (demo-gh) answers for GitHub.
+set -e
+: "${TERMIST_HOME:?}"
+rm -rf "$TERMIST_HOME"
+mkdir -p "$TERMIST_HOME/config"
+cp "$(dirname "$0")/config.toml" "$TERMIST_HOME/config/"
+for repo in site api; do
+  dir="$TERMIST_HOME/code/acme/$repo"
+  mkdir -p "$dir/src/auth"
+  printf '# %s\n' "$repo" > "$dir/README.md"
+  printf 'pub mod redirect;\npub mod session;\n' > "$dir/src/auth/mod.rs"
+  git -C "$dir" init -q -b main
+  git -C "$dir" add -A
+  git -C "$dir" -c user.name=demo -c user.email=demo@example.com commit -q -m "first"
+  git -C "$dir" remote add origin "https://github.com/acme/$repo.git"
+done

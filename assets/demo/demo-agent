@@ -86,6 +86,16 @@ def work(steps):
 
 
 SCENES = {
+    # threads of a pull request handed over with `a` (assets/demo/prs.tape)
+    "review comments": ("Fix review on #212", [
+        ("Read", "src/auth/redirect.rs"),
+        ("Think", "`next` keeps its query, so /login?next=/login loops"),
+        ("Edit", "src/auth/redirect.rs  +6 −2"),
+        ("Read", "src/auth/session.rs"),
+        ("Edit", "src/auth/session.rs  +3 −0  rotate keeps the CSRF token"),
+        ("Write", "tests/auth_redirect.rs  +14"),
+        ("Run", "cargo test auth::"),
+    ]),
     "login": ("Fix login redirect", [
         ("Read", "src/auth/session.rs"),
         ("Read", "src/auth/redirect.rs"),

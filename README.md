@@ -236,7 +236,8 @@ directory, never through files in your project.
 Issues and pull requests are welcome. Please read the [code of conduct](CODE_OF_CONDUCT.md) first.
 
 The demos are recorded with stand-in agents: `vhs assets/demo/demo.tape` after
-`cargo build --release -p termist`, and `vhs assets/demo/look.tape` for the themes, settings and help.
+`cargo build --release -p termist`, `vhs assets/demo/look.tape` for the themes, settings and help, and
+`vhs assets/demo/prs.tape` for the pull requests, with a stand-in `gh` and made-up repos.
 The banner is drawn from the Galata scene by `python3 tools/build-banner.py`.
 
 ## Credits
