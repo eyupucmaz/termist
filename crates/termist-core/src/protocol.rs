@@ -1,7 +1,7 @@
 use crate::github::{GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
     Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
-    TermColors,
+    TermColors, WorktreeInfo,
 };
 use crate::screen::{ScreenUpdate, Scroll};
 use crate::{ProjectId, SessionId};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -166,6 +166,25 @@ pub enum ClientRequest {
     OpenWorktree {
         pr: PrRef,
     },
+    /// A new worktree of `repo` on `branch` (made from the repo's default branch when it
+    /// is new). Answered with `WorktreeMade` or `WorktreeNotMade` carrying `ticket`.
+    CreateWorktree {
+        project: ProjectId,
+        repo: RepoId,
+        branch: String,
+        ticket: u64,
+    },
+    /// Draw the worktree as a band even with no cards, or not.
+    SetWorktreeShown {
+        path: PathBuf,
+        shown: bool,
+    },
+    /// Removes the worktree (the branch stays). Without `force` a worktree with
+    /// uncommitted changes is answered with `RemoveRefused`.
+    RemoveWorktree {
+        path: PathBuf,
+        force: bool,
+    },
     Shutdown,
 }
 
@@ -235,6 +254,36 @@ pub enum ServerEvent {
         pr: PrRef,
         message: String,
     },
+    /// A project's worktrees, after every change; to every client.
+    Worktrees {
+        project: ProjectId,
+        list: Vec<WorktreeInfo>,
+    },
+    /// The worktree a `CreateWorktree` of this client asked for; `note` says what was
+    /// not as asked (made from the local branch when fetching failed).
+    WorktreeMade {
+        ticket: u64,
+        path: PathBuf,
+        branch: String,
+        note: Option<String>,
+    },
+    WorktreeNotMade {
+        ticket: u64,
+        message: String,
+    },
+    /// The worktree has uncommitted changes in `files` files: removing it needs `force`.
+    RemoveRefused {
+        path: PathBuf,
+        files: u32,
+    },
+    WorktreeRemoved {
+        path: PathBuf,
+    },
+    /// A `RemoveWorktree` of this client did not happen.
+    RemoveFailed {
+        path: PathBuf,
+        message: String,
+    },
     /// A `WritePr` of this client went through.
     PrWritten {
         pr: PrRef,
@@ -262,7 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_10_since_worktrees_for_pull_requests() {
-        assert_eq!(PROTOCOL_VERSION, 10);
+    fn the_protocol_is_11_since_worktrees_of_their_own() {
+        assert_eq!(PROTOCOL_VERSION, 11);
     }
 }

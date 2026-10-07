@@ -741,6 +741,12 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
+            ServerEvent::Worktrees { .. }
+            | ServerEvent::WorktreeMade { .. }
+            | ServerEvent::WorktreeNotMade { .. }
+            | ServerEvent::RemoveRefused { .. }
+            | ServerEvent::WorktreeRemoved { .. }
+            | ServerEvent::RemoveFailed { .. } => {}
             ServerEvent::WorktreeReady { pr, path, .. } => {
                 // Only the one asked for; another client's answer leaves it waiting.
                 if self

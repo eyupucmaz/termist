@@ -481,4 +481,78 @@ mod tests {
             assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
         }
     }
+
+    #[test]
+    fn the_worktrees_of_their_own_round_trip() {
+        use crate::github::RepoId;
+        use crate::model::{PrEnd, Stat, WorktreeInfo};
+        let mut dec = FrameDecoder::default();
+        let project = crate::ProjectId::new();
+        let requests = [
+            ClientRequest::CreateWorktree {
+                project,
+                repo: RepoId(7),
+                branch: "fix-login-redirect".into(),
+                ticket: 3,
+            },
+            ClientRequest::SetWorktreeShown {
+                path: "/w/site-worktrees/fix".into(),
+                shown: true,
+            },
+            ClientRequest::RemoveWorktree {
+                path: "/w/site-worktrees/fix".into(),
+                force: false,
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let worktree = WorktreeInfo {
+            path: "/w/site-worktrees/fix".into(),
+            repo: Some(RepoId(7)),
+            branch: Some("fix".into()),
+            base: Some("main".into()),
+            made_by_termist: true,
+            shown: true,
+            stat: Some(Stat {
+                files: 3,
+                added: 60,
+                removed: 28,
+                dirty: true,
+            }),
+            pr_end: Some((212, PrEnd::Merged)),
+        };
+        let events = [
+            ServerEvent::Worktrees {
+                project,
+                list: vec![worktree],
+            },
+            ServerEvent::WorktreeMade {
+                ticket: 3,
+                path: "/w/site-worktrees/fix-login-redirect".into(),
+                branch: "fix-login-redirect".into(),
+                note: Some("made from local main: fetch failed".into()),
+            },
+            ServerEvent::WorktreeNotMade {
+                ticket: 4,
+                message: "not a branch name: a..b".into(),
+            },
+            ServerEvent::RemoveRefused {
+                path: "/w/site-worktrees/fix".into(),
+                files: 3,
+            },
+            ServerEvent::WorktreeRemoved {
+                path: "/w/site-worktrees/fix".into(),
+            },
+            ServerEvent::RemoveFailed {
+                path: "/w/site-worktrees/fix".into(),
+                message: "stop its cards first".into(),
+            },
+        ];
+        for ev in events {
+            dec.push(&encode_frame(&ev).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        }
+    }
 }

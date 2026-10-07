@@ -12,8 +12,8 @@ pub mod status;
 
 pub use ids::{ProjectId, SessionId};
 pub use model::{
-    EFFORT_LEVELS, Harness, HarnessInfo, LaunchOptions, ModelInfo, Place, ProjectInfo, SessionInfo,
-    SessionKind, StateSnapshot, TermColors,
+    EFFORT_LEVELS, Harness, HarnessInfo, LaunchOptions, ModelInfo, Place, PrEnd, ProjectInfo,
+    SessionInfo, SessionKind, Stat, StateSnapshot, TermColors, WorktreeInfo,
 };
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 pub use screen::{

@@ -706,6 +706,10 @@ impl Registry {
                 self.github_effects(fx);
                 self.github_tick();
             }
+            // Worktrees of their own come with the next steps of this change.
+            ClientRequest::CreateWorktree { .. }
+            | ClientRequest::SetWorktreeShown { .. }
+            | ClientRequest::RemoveWorktree { .. } => {}
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
