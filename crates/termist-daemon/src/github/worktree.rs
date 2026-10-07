@@ -129,7 +129,7 @@ pub fn folder(repo: &Path, branch: &str) -> PathBuf {
 }
 
 /// `dir`, or `dir-2`, `dir-3`… when something is there already.
-fn free(dir: &Path) -> PathBuf {
+pub fn free(dir: &Path) -> PathBuf {
     if !dir.exists() {
         return dir.to_path_buf();
     }

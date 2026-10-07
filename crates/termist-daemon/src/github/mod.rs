@@ -882,6 +882,32 @@ impl GitHub {
     }
 
     /// Answers every client waiting for `pr`'s worktree.
+    /// A worktree made for `pr` is termist's: kept, shown, with its pull request.
+    fn keep_worktree(&self, pr: PrRef, path: &Path, store: &Store) {
+        let Some(r) = self.repo(pr.repo) else {
+            return;
+        };
+        let branch = r
+            .prs
+            .iter()
+            .find(|p| p.number == pr.number)
+            .or_else(|| self.cached(pr).map(|d| &d.summary))
+            .map(|p| p.head.clone());
+        let made = crate::store::StoredWorktree {
+            project: r.stored.project,
+            repo: Some(pr.repo),
+            path: path.to_path_buf(),
+            branch,
+            base: None,
+            pr: Some(pr.number),
+            made_by_termist: true,
+            shown: true,
+        };
+        if let Err(e) = store.upsert_worktree(&made) {
+            tracing::warn!(error = %e, "could not keep a worktree");
+        }
+    }
+
     fn worktree_done(
         &mut self,
         pr: PrRef,
@@ -1374,7 +1400,12 @@ impl GitHub {
                 };
                 self.to_diff_watchers(pr, event, &mut fx);
             }
-            Done::Worktree { pr, reply } => self.worktree_done(pr, reply, &mut fx),
+            Done::Worktree { pr, reply } => {
+                if let Ok((path, true)) = &reply {
+                    self.keep_worktree(pr, path, store);
+                }
+                self.worktree_done(pr, reply, &mut fx);
+            }
             Done::Written {
                 pr,
                 client,
@@ -2919,6 +2950,18 @@ mod tests {
             pr,
             reply: Ok((path.clone(), true)),
         });
+        let kept = w.store.worktrees().unwrap();
+        assert_eq!(
+            (
+                kept[0].path.clone(),
+                kept[0].pr,
+                kept[0].made_by_termist,
+                kept[0].shown
+            ),
+            (path.clone(), Some(212), true, true),
+            "termist's, with its pull request"
+        );
+        assert_eq!(kept[0].branch.as_deref(), Some("fix/login"));
         let ready = ServerEvent::WorktreeReady {
             pr,
             path,

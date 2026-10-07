@@ -138,6 +138,93 @@ pub fn scan(
     )
 }
 
+/// A new worktree of the repo at `repo` on `branch`: the branch as it is when it exists
+/// (or the worktree that already has it), else a new branch from the default one,
+/// fetched first when `fetch` can (else the local one, and the note says so). Returns
+/// the folder, the base branch and the note.
+pub fn create(
+    repo: &Path,
+    branch: &str,
+    git: Git,
+    fetch: Git,
+) -> Result<(PathBuf, String, Option<String>), String> {
+    if git(repo, &["check-ref-format", "--branch", branch]).is_err() || branch.starts_with('-') {
+        return Err(format!("not a branch name: {branch}"));
+    }
+    let default = default_branch(repo, git);
+    let exists = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok();
+    if exists {
+        let list = git(repo, &["worktree", "list", "--porcelain"])?;
+        if let Some(open) = parse_list(&list)
+            .into_iter()
+            .find(|w| w.branch.as_deref() == Some(branch))
+        {
+            return Ok((
+                open.path,
+                default,
+                Some("the branch was open there already".into()),
+            ));
+        }
+    }
+    let dest = crate::github::worktree::free(&crate::github::worktree::folder(repo, branch));
+    let dest_text = dest.to_string_lossy().into_owned();
+    if exists {
+        git(repo, &["worktree", "add", &dest_text, branch])?;
+        return Ok((dest, default, None));
+    }
+    let fetched = fetch(repo, &["fetch", "--quiet", "origin", &default]).is_ok();
+    let origin = format!("origin/{default}");
+    let has_origin = git(repo, &["rev-parse", "--verify", "--quiet", &origin]).is_ok();
+    let (start, note) = match (fetched, has_origin) {
+        (true, true) => (origin, None),
+        (false, true) => (
+            origin,
+            Some(format!(
+                "made from the last fetched {default}: fetch failed"
+            )),
+        ),
+        _ => (
+            default.clone(),
+            Some(format!("made from local {default}: no fetch from origin")),
+        ),
+    };
+    git(repo, &["worktree", "add", "-b", branch, &dest_text, &start])?;
+    Ok((dest, default, note))
+}
+
+/// `git fetch`, given 15 s: a network that does not answer must not hold a new worktree.
+pub fn fetch(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut all = vec!["-C".to_string(), dir.to_string_lossy().into_owned()];
+    all.extend(args.iter().map(|a| a.to_string()));
+    let all: Vec<&str> = all.iter().map(String::as_str).collect();
+    let out = termist_platform::process::run(
+        Path::new("git"),
+        &all,
+        &[("GIT_TERMINAL_PROMPT", "0")],
+        None,
+        std::time::Duration::from_secs(15),
+    )
+    .map_err(|e| format!("could not run git: {e:?}"))?;
+    match out.success {
+        true => Ok(out.stdout),
+        false => Err(out
+            .stderr
+            .lines()
+            .next()
+            .unwrap_or("fetch failed")
+            .to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +283,51 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_worktree_takes_a_new_branch_from_the_default_or_the_branch_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run(&site, &["init", "-q", "-b", "main"]);
+        run(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        run(&site, &["branch", "old"]);
+        let git = crate::github::worktree::git;
+        let no_net = |_: &Path, _: &[&str]| Err::<String, String>("no network".into());
+        let (path, base, note) = create(&site, "fix-login", &git, &no_net).unwrap();
+        assert_eq!(path, tmp.path().join("site-worktrees").join("fix-login"));
+        assert_eq!(base, "main");
+        assert_eq!(
+            note.as_deref(),
+            Some("made from local main: no fetch from origin")
+        );
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "fix-login");
+        // The branch is open there now: asked again, that folder.
+        let (again, _, note) = create(&site, "fix-login", &git, &no_net).unwrap();
+        let resolved = crate::place::resolved;
+        assert_eq!((resolved(&again), note.is_some()), (resolved(&path), true));
+        // A branch that exists but is open nowhere: as it is, no new branch.
+        let (old, _, note) = create(&site, "old", &git, &no_net).unwrap();
+        assert_eq!(
+            (old, note),
+            (tmp.path().join("site-worktrees").join("old"), None)
+        );
+        assert_eq!(
+            create(&site, "a..b", &git, &no_net),
+            Err("not a branch name: a..b".into())
+        );
+        assert_eq!(
+            create(&site, "-x", &git, &no_net),
+            Err("not a branch name: -x".into())
+        );
     }
 
     #[cfg(unix)]
