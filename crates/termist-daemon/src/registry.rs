@@ -4,8 +4,9 @@ use crate::github::{self, Done, Effects, GitHub, To};
 use crate::launch::{LaunchRequest, Launcher};
 use crate::place::{self, GitFacts};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
-use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession};
+use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession, StoredWorktree};
 use crate::transcript::TranscriptTail;
+use crate::worktrees::Listed;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
 use serde_json::Value;
@@ -35,6 +36,14 @@ const PLACES_ROUND: Duration = Duration::from_secs(30);
 
 /// What git said about a session folder, read on a blocking thread.
 pub struct PlaceRead(pub PathBuf, pub Option<GitFacts>);
+
+/// A repo's worktrees as a scan found them, each with what its branch changed; `None`
+/// when git could not list them.
+pub struct WorktreeScan {
+    pub project: ProjectId,
+    pub repo: termist_core::github::RepoId,
+    pub found: Option<Vec<(Listed, Option<termist_core::Stat>)>>,
+}
 
 /// A rescan for missing CLIs can start a login shell; one per this window is enough.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -145,6 +154,14 @@ pub struct Registry {
     places_round: Option<std::time::Instant>,
     /// Runs git (a stand-in in tests).
     git: fn(&Path, &[&str]) -> Option<String>,
+    scans_tx: UnboundedSender<WorktreeScan>,
+    scans_rx: Option<UnboundedReceiver<WorktreeScan>>,
+    /// Repos whose worktrees are being read.
+    scanning: HashSet<termist_core::github::RepoId>,
+    /// What each worktree's branch changed, as last read.
+    worktree_stats: HashMap<PathBuf, termist_core::Stat>,
+    /// Each project's worktrees as last sent.
+    worktrees_sent: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
 }
 
 impl Registry {
@@ -180,6 +197,7 @@ impl Registry {
         let github = GitHub::new(&store);
         let (github_tx, github_rx) = tokio::sync::mpsc::unbounded_channel();
         let (places_tx, places_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (scans_tx, scans_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
         let locate: Locate = Arc::new(move || {
             let program = gh_bin
@@ -223,6 +241,11 @@ impl Registry {
             places_reading: HashSet::new(),
             places_round: None,
             git: crate::github::repos::git,
+            scans_tx,
+            scans_rx: Some(scans_rx),
+            scanning: HashSet::new(),
+            worktree_stats: HashMap::new(),
+            worktrees_sent: HashMap::new(),
         }
     }
 
@@ -263,6 +286,121 @@ impl Registry {
         for cwd in cwds {
             self.read_place(cwd);
         }
+        self.scan_worktrees();
+    }
+
+    /// Reads every open project's repos' worktrees on blocking threads; `worktrees_scanned`
+    /// takes each answer.
+    fn scan_worktrees(&mut self) {
+        let bases: HashMap<PathBuf, String> = self
+            .store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|w| Some((w.path, w.base?)))
+            .collect();
+        for p in self.projects.iter().filter(|p| p.open) {
+            for view in self.github.repo_views(p.id) {
+                if !self.scanning.insert(view.id) {
+                    continue;
+                }
+                let (tx, bases, own) = (self.scans_tx.clone(), bases.clone(), p.path.clone());
+                let (project, repo, path) = (p.id, view.id, view.path.clone());
+                tokio::task::spawn_blocking(move || {
+                    let base = |w: &Path| bases.get(w).cloned();
+                    let found =
+                        crate::worktrees::scan(&path, &own, &base, &crate::github::worktree::git);
+                    let _ = tx.send(WorktreeScan {
+                        project,
+                        repo,
+                        found,
+                    });
+                });
+            }
+        }
+    }
+
+    /// Keeps what a scan found: new worktrees are added (shown when an open pull request
+    /// has their branch), ones git no longer lists are dropped.
+    pub fn worktrees_scanned(&mut self, scan: WorktreeScan) {
+        self.scanning.remove(&scan.repo);
+        let Some(found) = scan.found else {
+            return;
+        };
+        let kept: Vec<StoredWorktree> = self
+            .store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| w.project == scan.project && w.repo == Some(scan.repo))
+            .collect();
+        let open: HashSet<String> = self
+            .github
+            .repo_views(scan.project)
+            .into_iter()
+            .filter(|v| v.id == scan.repo)
+            .flat_map(|v| v.prs.into_iter().map(|(_, head, _)| head))
+            .collect();
+        for (listed, stat) in &found {
+            let known = kept.iter().any(|w| w.path == listed.path);
+            let fresh = StoredWorktree {
+                project: scan.project,
+                repo: Some(scan.repo),
+                path: listed.path.clone(),
+                branch: listed.branch.clone(),
+                base: None,
+                pr: None,
+                made_by_termist: false,
+                shown: !known && listed.branch.as_ref().is_some_and(|b| open.contains(b)),
+            };
+            if let Err(e) = self.store.upsert_worktree(&fresh) {
+                tracing::warn!(error = %e, "could not keep a worktree");
+            }
+            match stat {
+                Some(stat) => self.worktree_stats.insert(listed.path.clone(), *stat),
+                None => self.worktree_stats.remove(&listed.path),
+            };
+        }
+        for gone in kept
+            .iter()
+            .filter(|w| !found.iter().any(|(l, _)| l.path == w.path))
+        {
+            if let Err(e) = self.store.delete_worktree(&gone.path) {
+                tracing::warn!(error = %e, "could not forget a worktree");
+            }
+            self.worktree_stats.remove(&gone.path);
+        }
+        self.send_worktrees(scan.project);
+    }
+
+    /// The project's worktrees as kept, with what each changed.
+    fn worktree_infos(&self, project: ProjectId) -> Vec<termist_core::WorktreeInfo> {
+        self.store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| w.project == project)
+            .map(|w| termist_core::WorktreeInfo {
+                stat: self.worktree_stats.get(&w.path).copied(),
+                path: w.path,
+                repo: w.repo,
+                branch: w.branch,
+                base: w.base,
+                made_by_termist: w.made_by_termist,
+                shown: w.shown,
+                pr_end: None,
+            })
+            .collect()
+    }
+
+    /// Sends the project's worktrees to every client when they changed.
+    fn send_worktrees(&mut self, project: ProjectId) {
+        let list = self.worktree_infos(project);
+        if self.worktrees_sent.get(&project) == Some(&list) {
+            return;
+        }
+        self.worktrees_sent.insert(project, list.clone());
+        self.broadcast(ServerEvent::Worktrees { project, list });
     }
 
     /// Each session's place from what git said and the pull requests last read (those
@@ -530,6 +668,20 @@ impl Registry {
                 }
                 let fx = self.github.snapshot(To::One(client), &self.projects);
                 self.github_effects(fx);
+                // A new client knows of no worktree: only projects that have some.
+                for p in &self.projects {
+                    let list = self.worktree_infos(p.id);
+                    if list.is_empty() {
+                        continue;
+                    }
+                    self.send(
+                        client,
+                        ServerEvent::Worktrees {
+                            project: p.id,
+                            list,
+                        },
+                    );
+                }
             }
             ClientRequest::AddProject { path } => match self.add_project(path) {
                 Ok(()) => self.broadcast(ServerEvent::State(self.state())),
@@ -1397,6 +1549,7 @@ pub async fn run(
     let mut catalogs = reg.catalog_rx.take().expect("a registry runs once");
     let mut github = reg.github_rx.take().expect("a registry runs once");
     let mut places = reg.places_rx.take().expect("a registry runs once");
+    let mut scans = reg.scans_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
     github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -1410,6 +1563,7 @@ pub async fn run(
             Some(c) = catalogs.recv() => reg.catalog_read(c, std::time::Instant::now()),
             Some(done) = github.recv() => reg.github_done(done),
             Some(read) = places.recv() => reg.place_read(read),
+            Some(scan) = scans.recv() => reg.worktrees_scanned(scan),
             _ = github_beat.tick() => {
                 reg.github_tick();
                 reg.places_tick(std::time::Instant::now());
@@ -2040,6 +2194,93 @@ mod tests {
             reg.git_facts[&worktree].clone(),
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_scan_keeps_new_worktrees_drops_gone_ones_and_says_so_once() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let made = PathBuf::from("/w/site-worktrees/fix");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: made.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        let listed = |path: &PathBuf, branch: &str| Listed {
+            path: path.clone(),
+            branch: Some(branch.into()),
+            main: false,
+        };
+        let outside = PathBuf::from("/w/site/.claude/worktrees/x");
+        let stat = termist_core::Stat {
+            files: 3,
+            added: 60,
+            removed: 28,
+            dirty: true,
+        };
+        let scan = |found: Vec<(Listed, Option<termist_core::Stat>)>| WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            found: Some(found),
+        };
+        reg.worktrees_scanned(scan(vec![
+            (listed(&made, "fix"), Some(stat)),
+            (listed(&outside, "x"), None),
+        ]));
+        let sent = |rx: &mut UnboundedReceiver<ServerEvent>| {
+            let mut out = vec![];
+            while let Ok(ServerEvent::Worktrees { list, .. }) = rx.try_recv() {
+                out.push(list);
+            }
+            out
+        };
+        let lists = sent(&mut rx);
+        assert_eq!(lists.len(), 1);
+        let list = &lists[0];
+        assert_eq!(
+            (
+                list[0].path.clone(),
+                list[0].made_by_termist,
+                list[0].shown,
+                list[0].stat
+            ),
+            (made.clone(), true, true, Some(stat))
+        );
+        assert_eq!(
+            (list[1].path.clone(), list[1].made_by_termist, list[1].shown),
+            (outside.clone(), false, false),
+            "found outside termist: hidden"
+        );
+        reg.worktrees_scanned(scan(vec![
+            (listed(&made, "fix"), Some(stat)),
+            (listed(&outside, "x"), None),
+        ]));
+        assert!(sent(&mut rx).is_empty(), "nothing changed: nothing sent");
+        reg.worktrees_scanned(scan(vec![(listed(&made, "fix"), Some(stat))]));
+        let lists = sent(&mut rx);
+        assert_eq!(lists[0].len(), 1, "the one git no longer lists is gone");
+        assert_eq!(reg.store.worktrees().unwrap().len(), 1);
+        reg.worktrees_scanned(WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            found: None,
+        });
+        assert_eq!(
+            reg.store.worktrees().unwrap().len(),
+            1,
+            "a failed scan forgets nothing"
+        );
     }
 
     #[test]
