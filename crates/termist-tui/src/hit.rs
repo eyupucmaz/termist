@@ -2,6 +2,7 @@
 //! the lines that count the cards out of sight. Drawing writes it; `App::on_mouse`
 //! reads it, so a click lands on what was on screen.
 use ratatui::layout::{Position, Rect};
+use termist_core::github::PrRef;
 use termist_core::{ProjectId, SessionId};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub struct Hits {
     /// `↑ n more` and `↓ n more`.
     pub above: Option<Rect>,
     pub below: Option<Rect>,
+    /// The `#n` of each band header: a click opens that pull request.
+    pub band_prs: Vec<(PrRef, Rect)>,
 }
 
 impl Hits {
@@ -26,6 +29,13 @@ impl Hits {
             .iter()
             .find(|(_, from, to)| (*from..*to).contains(&x))
             .map(|(id, ..)| *id)
+    }
+
+    pub fn band_pr_at(&self, x: u16, y: u16) -> Option<PrRef> {
+        self.band_prs
+            .iter()
+            .find(|(_, r)| r.contains(Position::new(x, y)))
+            .map(|(pr, _)| *pr)
     }
 
     pub fn card_at(&self, x: u16, y: u16) -> Option<SessionId> {
@@ -64,7 +74,16 @@ mod tests {
             cards_zone: Rect::new(0, 1, 80, 6),
             above: None,
             below: Some(Rect::new(0, 5, 24, 1)),
+            band_prs: vec![(
+                PrRef {
+                    repo: termist_core::github::RepoId(7),
+                    number: 212,
+                },
+                Rect::new(30, 5, 4, 1),
+            )],
         };
+        assert_eq!(hits.band_pr_at(33, 5).map(|pr| pr.number), Some(212));
+        assert_eq!(hits.band_pr_at(34, 5), None);
         assert_eq!(hits.tab_at(10, 0), Some(a));
         assert_eq!(hits.tab_at(16, 0), None, "the space between");
         assert_eq!(hits.tab_at(20, 0), Some(b));

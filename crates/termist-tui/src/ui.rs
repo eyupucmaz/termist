@@ -13,11 +13,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use std::time::Instant;
 use termist_core::config::PanePosition;
+use termist_core::github::PrRef;
 use termist_core::{AgentStatus, Snapshot, cell_flags};
 use termist_scenes::TimeOfDay;
 
 const CARD_W: u16 = 24;
-const CARD_H: u16 = 4;
+pub const CARD_H: u16 = 4;
 
 pub struct Areas {
     pub header: Rect,
@@ -30,8 +31,8 @@ pub struct Areas {
     pub pane_inner: Rect,
     pub footer: Rect,
     pub cards_per_row: usize,
-    /// Rows of cards that fit.
-    pub card_rows: usize,
+    /// Lines the cards (and their bands' headers) may take on screen.
+    pub card_lines: u16,
     /// Not every card fits: the line above and the line below the cards count the
     /// hidden ones.
     pub scroll_lines: bool,
@@ -42,7 +43,35 @@ pub struct Areas {
 /// From this many columns up, `auto` puts the pane right of the cards.
 pub const PANE_RIGHT_FROM: u16 = 180;
 
-pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas {
+/// What the cards take: how many there are in each band, and whether the bands have
+/// header lines. A plain count is one band without one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Shape {
+    pub counts: Vec<usize>,
+    pub headers: bool,
+}
+
+impl From<usize> for Shape {
+    fn from(n: usize) -> Shape {
+        Shape {
+            counts: vec![n],
+            headers: false,
+        }
+    }
+}
+
+impl Shape {
+    /// Lines with `per_row` cards to a row; one row's worth when there are no cards.
+    fn height(&self, per_row: usize) -> u16 {
+        match self.counts.iter().sum::<usize>() {
+            0 => CARD_H,
+            _ => crate::bands::height(&self.counts, per_row, self.headers),
+        }
+    }
+}
+
+pub fn layout(area: Rect, shape: impl Into<Shape>, position: PanePosition) -> Areas {
+    let shape = shape.into();
     let header = Rect {
         height: area.height.min(1),
         ..area
@@ -76,8 +105,7 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         (Rect { x, width, ..body }, 1)
     } else {
         let per_row = (body.width / CARD_W).max(1) as usize;
-        let card_rows = session_count.max(1).div_ceil(per_row) as u16;
-        let height = (card_rows * CARD_H).min(body.height / 2);
+        let height = shape.height(per_row).min(body.height / 2);
         let y = if pane_first {
             body.bottom() - height
         } else {
@@ -85,24 +113,24 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         };
         (Rect { y, height, ..body }, per_row)
     };
-    let card_rows = session_count.max(1).div_ceil(cards_per_row) as u16;
-    let scroll_lines = card_rows * CARD_H > cards_zone.height;
-    let (cards, visible_rows) = if scroll_lines {
-        let rows = (cards_zone.height.saturating_sub(2) / CARD_H).max(1);
-        let cards = Rect {
+    let total = shape.height(cards_per_row);
+    let scroll_lines = total > cards_zone.height;
+    // With lines above and below for what is out of sight.
+    let cards = if scroll_lines {
+        Rect {
             y: cards_zone.y + 1,
-            height: (rows * CARD_H).min(cards_zone.height.saturating_sub(1)),
+            height: cards_zone
+                .height
+                .saturating_sub(2)
+                .max(CARD_H)
+                .min(cards_zone.height.saturating_sub(1)),
             ..cards_zone
-        };
-        (cards, rows)
+        }
     } else {
-        (
-            Rect {
-                height: card_rows * CARD_H,
-                ..cards_zone
-            },
-            card_rows,
-        )
+        Rect {
+            height: total,
+            ..cards_zone
+        }
     };
     let pane = match (beside, pane_first) {
         (true, false) => Rect {
@@ -139,7 +167,7 @@ pub fn layout(area: Rect, session_count: usize, position: PanePosition) -> Areas
         pane_inner,
         footer,
         cards_per_row,
-        card_rows: visible_rows as usize,
+        card_lines: cards.height,
         scroll_lines,
         pane_beside: beside,
     }
@@ -257,39 +285,57 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         };
         f.render_widget(Paragraph::new(text).style(app.theme.dim), areas.body);
     } else {
-        let per_row = areas.cards_per_row.max(1);
-        let first = app.card_scroll;
-        for (i, s) in sessions.iter().enumerate() {
-            let row = i / per_row;
-            if row < first || row >= first + areas.card_rows {
-                continue;
+        let (bands, headers) = app.grid_bands(&sessions);
+        let rows = crate::bands::rows(&bands, areas.cards_per_row, headers);
+        let first = app.card_scroll.min(rows.len());
+        let mut y = areas.cards.y;
+        let mut shown = first;
+        for row in &rows[first..] {
+            if y + row.height() > areas.cards.bottom() {
+                break;
             }
-            let rect = Rect {
-                x: areas.cards.x + (i % per_row) as u16 * CARD_W,
-                y: areas.cards.y + (row - first) as u16 * CARD_H,
-                width: CARD_W,
-                height: CARD_H,
-            };
-            if rect.bottom() > areas.cards.bottom() || rect.right() > areas.cards.right() {
-                continue;
+            if let Some(b) = row.header {
+                let line = Rect {
+                    y,
+                    height: 1,
+                    ..areas.cards
+                };
+                draw_band_header(f, app, &bands[b], line);
+                y += 1;
             }
-            draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
-            app.hits.borrow_mut().cards.push((s.id, rect));
+            for (col, id) in row.cards.iter().enumerate() {
+                let rect = Rect {
+                    x: areas.cards.x + col as u16 * CARD_W,
+                    y,
+                    width: CARD_W,
+                    height: CARD_H,
+                };
+                let Some(s) = sessions.iter().find(|s| s.id == *id) else {
+                    continue;
+                };
+                if rect.right() > areas.cards.right() {
+                    continue;
+                }
+                draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
+                app.hits.borrow_mut().cards.push((s.id, rect));
+            }
+            y += CARD_H;
+            shown += 1;
         }
         app.hits.borrow_mut().cards_zone = areas.cards_zone;
         if areas.scroll_lines {
-            let above = first * per_row;
-            let below = sessions
-                .len()
-                .saturating_sub((first + areas.card_rows) * per_row);
+            let count = |rows: &[crate::bands::Row]| rows.iter().map(|r| r.cards.len()).sum();
+            let above: usize = count(&rows[..first]);
+            let below: usize = count(&rows[shown..]);
             let line = |y: u16| Rect {
                 y,
                 height: 1,
                 ..areas.cards
             };
+            // Below the last row drawn, which may end above the bottom of the cards.
             for (n, arrow, rect) in [
                 (above, '↑', line(areas.cards.y.saturating_sub(1))),
-                (below, '↓', line(areas.cards.bottom())),
+                (below, '↓', line(y)),
             ] {
                 if n > 0 && rect.y >= areas.cards_zone.y && rect.y < areas.cards_zone.bottom() {
                     f.render_widget(
@@ -421,6 +467,107 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             },
         );
     }
+}
+
+/// A band's header: the worktree's branch, and the pull request on it with its title
+/// (cut to fit), checks, conflict and open threads.
+fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: Rect) {
+    let t = &app.theme;
+    let folder = band
+        .root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prs = app.project.and_then(|p| app.prs.get(&p));
+    let mut left = vec![Span::styled(" ⎇ ", t.dim)];
+    let mut pr_parts: Option<(PrRef, String, String, Vec<Span<'static>>)> = None;
+    match band.place {
+        Some(place) if place.gone => {
+            left.push(Span::styled(format!("{folder} (gone)"), t.dim));
+        }
+        Some(place) => {
+            // `repo@branch` where a project holds several repos.
+            let repo = place
+                .repo
+                .and_then(|id| {
+                    prs.filter(|p| p.repos.len() > 1)?
+                        .repos
+                        .iter()
+                        .find(|r| r.repo == id)
+                })
+                .map(|r| format!("{}@", r.name))
+                .unwrap_or_default();
+            let label = place
+                .branch
+                .clone()
+                .or_else(|| place.commit.clone())
+                .unwrap_or_else(|| folder.clone());
+            left.push(Span::styled(
+                format!("{repo}{label}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            let summary = place.pr.and_then(|pr| {
+                prs?.repos
+                    .iter()
+                    .find(|r| r.repo == pr.repo)?
+                    .prs
+                    .iter()
+                    .find(|s| s.number == pr.number)
+            });
+            if let (Some(pr), Some(summary)) = (place.pr, summary) {
+                let mut marks = vec![
+                    Span::raw(" "),
+                    crate::prs::checks_mark(t, summary.checks),
+                    crate::prs::conflict_mark(t, summary),
+                ];
+                let open = app
+                    .pr_details
+                    .get(&pr)
+                    .and_then(|(_, d)| d.as_ref())
+                    .map(|d| d.threads.iter().filter(|th| !th.resolved).count())
+                    .unwrap_or(0);
+                if open > 0 {
+                    marks.push(Span::styled(format!("●{open}"), t.warn));
+                }
+                pr_parts = Some((pr, format!("#{}", pr.number), summary.title.clone(), marks));
+            }
+        }
+        None => left.push(Span::styled(folder, t.dim)),
+    }
+    let mut spans = left;
+    if let Some((pr, number, title, marks)) = pr_parts {
+        let used: usize = spans.iter().map(|s| s.width()).sum::<usize>()
+            + 3
+            + number.chars().count()
+            + 1
+            + marks.iter().map(|s| s.width()).sum::<usize>();
+        let room = (area.width as usize).saturating_sub(used);
+        let title = match title.chars().count() <= room {
+            true => title,
+            false if room == 0 => String::new(),
+            false => {
+                let mut cut: String = title.chars().take(room - 1).collect();
+                cut.push('…');
+                cut
+            }
+        };
+        let at = spans.iter().map(|s| s.width()).sum::<usize>() as u16 + 3;
+        app.hits.borrow_mut().band_prs.push((
+            pr,
+            Rect {
+                x: area.x + at,
+                width: number.chars().count() as u16,
+                height: 1,
+                y: area.y,
+            },
+        ));
+        spans.push(Span::styled(" · ", t.dim));
+        spans.push(Span::styled(number, t.accent));
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(title));
+        spans.extend(marks);
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_card(
@@ -796,13 +943,9 @@ mod tests {
 
     fn render(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        let areas = layout(
-            Rect::new(0, 0, w, h),
-            app.project_sessions().len(),
-            app.pane_position(),
-        );
+        let areas = layout(Rect::new(0, 0, w, h), app.card_shape(), app.pane_position());
         app.pane_beside = areas.pane_beside;
-        app.set_card_window(areas.cards_per_row, areas.card_rows);
+        app.set_card_window(areas.cards_per_row, areas.card_lines);
         app.pane_resized(areas.pane_inner.width, areas.pane_inner.height);
         t.draw(|f| draw(f, app, &areas)).unwrap();
         t
@@ -1050,6 +1193,104 @@ mod tests {
             ratatui::crossterm::event::KeyCode::Char(c),
             ratatui::crossterm::event::KeyModifiers::CONTROL,
         )
+    }
+
+    /// A project with its own band (main) and a worktree band on pull request #212,
+    /// and a card whose folder is gone. `repos` more repos make it a folder of repos.
+    fn banded(repos: usize) -> App {
+        use termist_core::Place;
+        use termist_core::github::{GhState, PrRef, RepoId};
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let pr = PrRef {
+            repo: RepoId(7),
+            number: 212,
+        };
+        let mk =
+            |name: &str, root: &str, branch: Option<&str>, pr: Option<PrRef>, gone| SessionInfo {
+                id: SessionId::new(),
+                project: p.id,
+                kind: SessionKind::Shell,
+                name: name.into(),
+                status: AgentStatus::Finished,
+                agent_session_id: None,
+                title: None,
+                last_activity_ms: 0,
+                model: None,
+                effort: None,
+                user_named: false,
+                archived: false,
+                cwd: root.into(),
+                place: Some(Box::new(Place {
+                    root: root.into(),
+                    branch: branch.map(str::to_string),
+                    commit: None,
+                    repo: Some(RepoId(7)),
+                    pr,
+                    gone,
+                })),
+            };
+        let sessions = vec![
+            mk("shell-1", "/w/site", Some("main"), None, false),
+            mk(
+                "shell-2",
+                "/w/site-worktrees/fix/login",
+                Some("fix/login"),
+                Some(pr),
+                false,
+            ),
+            mk("shell-3", "/w/site", Some("main"), None, false),
+            mk("shell-4", "/w/site-worktrees/old", None, None, true),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p.clone()],
+            sessions,
+            ..StateSnapshot::default()
+        }));
+        let mut summary =
+            crate::prs::fixtures::summary(212, "Login redirect loses the query string", "bob");
+        summary.checks = termist_core::github::Checks::Passing;
+        let mut all = vec![crate::prs::fixtures::repo(7, "site", vec![summary])];
+        for i in 0..repos {
+            all.push(crate::prs::fixtures::repo(8 + i as i64, "api", vec![]));
+        }
+        app.on_event(ServerEvent::Prs {
+            project: p.id,
+            state: GhState::Ok,
+            discovered: all.len() as u32,
+            repos: all,
+        });
+        app
+    }
+
+    #[test]
+    fn bands_beside_the_pane() {
+        let mut app = banded(0);
+        insta::assert_snapshot!(render(&mut app, 190, 22).backend());
+    }
+
+    #[test]
+    fn bands_above_the_pane() {
+        let mut app = banded(0);
+        insta::assert_snapshot!(render(&mut app, 80, 24).backend());
+    }
+
+    #[test]
+    fn a_band_in_a_folder_of_repos_names_its_repo_and_a_long_title_is_cut() {
+        let mut app = banded(1);
+        let t = render(&mut app, 60, 30);
+        let text = screen_text(&t);
+        assert!(text.contains(" ⎇ site@fix/login · #212 Login redirect loses the query … ✓ "));
+        assert!(text.contains(" ⎇ site@main "));
+        assert!(text.contains("↓ 1 more"), "the gone band is below");
+        let hit = app.hits.borrow().band_prs.clone();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].0.number, 212);
     }
 
     fn screen_text(t: &Terminal<TestBackend>) -> String {

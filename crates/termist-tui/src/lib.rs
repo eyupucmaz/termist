@@ -1,5 +1,6 @@
 //! The termist terminal UI.
 pub mod app;
+pub mod bands;
 pub mod browse;
 pub mod encode;
 pub mod hit;

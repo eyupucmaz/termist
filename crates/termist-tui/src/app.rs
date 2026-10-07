@@ -120,7 +120,8 @@ pub struct App {
     /// The last press landed on a toast: its drag and release are not a selection.
     toast_down: bool,
     pub cards_per_row: usize,
-    /// Rows of cards that fit on screen, and the first one shown.
+    /// Lines the cards may take on screen; the rows of them shown from the first one.
+    pub card_lines: u16,
     pub card_rows: usize,
     pub card_scroll: usize,
     /// The grid, the archive, or the pull requests.
@@ -255,6 +256,7 @@ impl App {
             toast_down: false,
             scrolling: false,
             cards_per_row: 1,
+            card_lines: crate::ui::CARD_H,
             card_rows: 1,
             card_scroll: 0,
             view: View::Grid,
@@ -1007,7 +1009,7 @@ impl App {
                     }
                     if let Some(rows) = more {
                         self.mode = Mode::Grid;
-                        self.move_by(rows * self.cards_per_row.max(1) as isize);
+                        self.move_rows(rows);
                         return self.sync_attachment();
                     }
                 }
@@ -1043,8 +1045,7 @@ impl App {
         if !self.takes_mouse(ev) {
             let cards = self.hits.borrow().over_cards(ev.column, ev.row);
             if cards && self.overlays.is_empty() && self.mode == Mode::Grid {
-                let row = self.cards_per_row.max(1) as isize;
-                self.move_by(if up { -row } else { row });
+                self.move_rows(if up { -1 } else { 1 });
                 return self.sync_attachment();
             }
             return vec![];
@@ -2114,8 +2115,8 @@ impl App {
             }
             'h' => self.move_by(-1),
             'l' => self.move_by(1),
-            'j' => self.move_by(self.cards_per_row.max(1) as isize),
-            'k' => self.move_by(-(self.cards_per_row.max(1) as isize)),
+            'j' => self.move_rows(1),
+            'k' => self.move_rows(-1),
             _ => {}
         }
         vec![]
@@ -2230,7 +2231,8 @@ impl App {
     }
 
     fn move_by(&mut self, delta: isize) {
-        let ids: Vec<SessionId> = self.project_sessions().iter().map(|s| s.id).collect();
+        // In the order drawn: band by band.
+        let ids: Vec<SessionId> = self.grid_rows().into_iter().flat_map(|r| r.cards).collect();
         if ids.is_empty() {
             return;
         }
@@ -2904,35 +2906,116 @@ impl App {
         actions
     }
 
-    /// Each frame's layout: cards per row and rows that fit. Scrolls just enough to
-    /// keep the selected card on screen.
-    pub fn set_card_window(&mut self, per_row: usize, rows: usize) {
+    /// Each frame's layout: cards per row and the lines they may take. Scrolls just
+    /// enough to keep the selected card on screen.
+    pub fn set_card_window(&mut self, per_row: usize, lines: u16) {
         self.cards_per_row = per_row.max(1);
-        self.card_rows = rows.max(1);
-        let sessions = self.project_sessions();
-        let total_rows = sessions.len().div_ceil(self.cards_per_row);
-        if let Some(pos) = sessions.iter().position(|s| Some(s.id) == self.selected) {
-            let row = pos / self.cards_per_row;
-            if row < self.card_scroll {
-                self.card_scroll = row;
-            } else if row >= self.card_scroll + self.card_rows {
-                self.card_scroll = row + 1 - self.card_rows;
+        self.card_lines = lines.max(1);
+        let rows = self.grid_rows();
+        let span = |rows: &[crate::bands::Row]| rows.iter().map(|r| r.height()).sum::<u16>();
+        if let Some(r) = self.selected_row(&rows) {
+            self.card_scroll = self.card_scroll.min(r);
+            while self.card_scroll < r && span(&rows[self.card_scroll..=r]) > self.card_lines {
+                self.card_scroll += 1;
             }
         }
-        self.card_scroll = self
-            .card_scroll
-            .min(total_rows.saturating_sub(self.card_rows));
+        // No room left empty below the last row.
+        let mut first = rows.len();
+        while first > 0 && span(&rows[first - 1..]) <= self.card_lines {
+            first -= 1;
+        }
+        self.card_scroll = self.card_scroll.min(first);
+        self.card_rows = (self.card_scroll..rows.len())
+            .take_while(|&i| span(&rows[self.card_scroll..=i]) <= self.card_lines)
+            .count()
+            .max(1);
+    }
+
+    /// The rows of the grid as drawn now: the cards by band, `cards_per_row` to a row.
+    pub fn grid_rows(&self) -> Vec<crate::bands::Row> {
+        let sessions = self.project_sessions();
+        let (bands, headers) = self.grid_bands(&sessions);
+        crate::bands::rows(&bands, self.cards_per_row, headers)
+    }
+
+    /// The bands of `sessions` and whether they get headers; the archive is one band.
+    pub fn grid_bands<'a>(
+        &self,
+        sessions: &[&'a SessionInfo],
+    ) -> (Vec<crate::bands::Band<'a>>, bool) {
+        let path = self
+            .state
+            .projects
+            .iter()
+            .find(|p| Some(p.id) == self.project)
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
+        if self.archive_view() {
+            let all = crate::bands::Band {
+                root: path,
+                place: None,
+                cards: sessions.to_vec(),
+            };
+            return (vec![all], false);
+        }
+        let bands = crate::bands::bands(&path, sessions);
+        let headers = crate::bands::headers(&bands);
+        (bands, headers)
+    }
+
+    /// What the cards take, for the layout.
+    pub fn card_shape(&self) -> crate::ui::Shape {
+        let sessions = self.project_sessions();
+        let (bands, headers) = self.grid_bands(&sessions);
+        crate::ui::Shape {
+            counts: bands.iter().map(|b| b.cards.len()).collect(),
+            headers,
+        }
+    }
+
+    fn selected_row(&self, rows: &[crate::bands::Row]) -> Option<usize> {
+        let id = self.selected?;
+        rows.iter().position(|r| r.cards.contains(&id))
+    }
+
+    /// `delta` rows down (up when negative), in the same column as far as the row goes;
+    /// past the last row (or the first) to the last card (or the first).
+    fn move_rows(&mut self, delta: isize) {
+        let rows = self.grid_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let (r, col) = match self.selected_row(&rows) {
+            Some(r) => (
+                r,
+                rows[r]
+                    .cards
+                    .iter()
+                    .position(|id| Some(*id) == self.selected),
+            ),
+            None => (0, Some(0)),
+        };
+        let to = r as isize + delta;
+        let last = rows.len() as isize - 1;
+        self.selected = Some(match to {
+            ..0 => rows[0].cards[0],
+            _ if to > last => *rows[last as usize].cards.last().expect("rows have cards"),
+            _ => {
+                let row = &rows[to as usize].cards;
+                row[col.unwrap_or(0).min(row.len() - 1)]
+            }
+        });
     }
 
     /// Ctrl+D / Ctrl+U: half a screen of cards down or up, selection and view together.
     fn half_page(&mut self, direction: isize) {
         let half = (self.card_rows / 2).max(1);
-        self.move_by(direction * (half * self.cards_per_row) as isize);
+        self.move_rows(direction * half as isize);
         self.card_scroll = self
             .card_scroll
             .saturating_add_signed(direction * half as isize);
-        let (per_row, rows) = (self.cards_per_row, self.card_rows);
-        self.set_card_window(per_row, rows);
+        let (per_row, lines) = (self.cards_per_row, self.card_lines);
+        self.set_card_window(per_row, lines);
     }
 
     fn switch_project(&mut self, delta: isize) {
@@ -3106,7 +3189,7 @@ mod tests {
         ];
         let mut app = App::new();
         app.pane_resized(80, 20);
-        app.set_card_window(2, 4);
+        app.set_card_window(2, 4 * crate::ui::CARD_H);
         app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![api, web],
             sessions: s.clone(),
@@ -5265,7 +5348,7 @@ mod tests {
             sessions: s.clone(),
             ..StateSnapshot::default()
         }));
-        app.set_card_window(2, rows);
+        app.set_card_window(2, rows as u16 * crate::ui::CARD_H);
         (app, s)
     }
 
@@ -5275,14 +5358,67 @@ mod tests {
         for _ in 0..3 {
             app.on_key(k(K::Char('j')));
         }
-        app.set_card_window(2, 2);
+        app.set_card_window(2, 2 * crate::ui::CARD_H);
         assert_eq!(app.selected, Some(s[6].id));
         assert_eq!(app.card_scroll, 2, "row 3 is the last row on screen");
         for _ in 0..3 {
             app.on_key(k(K::Char('k')));
         }
-        app.set_card_window(2, 2);
+        app.set_card_window(2, 2 * crate::ui::CARD_H);
         assert_eq!(app.card_scroll, 0);
+    }
+
+    #[test]
+    fn j_and_k_go_band_by_band_and_l_goes_in_the_order_drawn() {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let at = |name: &str, root: &str| {
+            let mut s = session(p.id, name, AgentStatus::Finished);
+            s.cwd = root.into();
+            s.place = Some(Box::new(termist_core::Place {
+                root: root.into(),
+                branch: Some("b".into()),
+                commit: None,
+                repo: None,
+                pr: None,
+                gone: false,
+            }));
+            s
+        };
+        // Started in this order; drawn as main: m1 m2 m3, then the worktree: w1.
+        let s = vec![
+            at("m1", "/w/site"),
+            at("w1", "/w/site-worktrees/fix"),
+            at("m2", "/w/site"),
+            at("m3", "/w/site"),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        app.set_card_window(2, 2 * (crate::ui::CARD_H + 1));
+        app.select(s[0].id);
+        for (key, want) in [
+            ('l', 2),
+            ('l', 3),
+            ('l', 1),
+            ('k', 3),
+            ('k', 0),
+            ('j', 3),
+            ('j', 1),
+        ] {
+            app.on_key(k(K::Char(key)));
+            assert_eq!(app.selected, Some(s[want].id), "{key} to {}", s[want].name);
+        }
+        let (per_row, lines) = (app.cards_per_row, app.card_lines);
+        app.set_card_window(per_row, lines);
+        assert_eq!(app.card_scroll, 1, "the worktree's row is on screen");
     }
 
     #[test]
