@@ -282,7 +282,7 @@
   <h1 class="name">termist</h1>
   <p class="gloss">terminal istanbul</p>
   <p class="pitch">Mission control for your coding agents. Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.</p>
-  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.0</a>: from a pull request to an agent: <kbd>w</kbd> opens a worktree on its branch, <kbd>Space</kbd> and <kbd>a</kbd> hand its review comments to the agent, and cards stand in bands by worktree; with 0.1.4's comments and reviews and 0.1.3's diff. <code>termist update</code> keeps it current.</p>
+  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.0</a>: <a href="#prs">pull requests next to your agents</a>. Read them, review them, and hand their review comments to an agent on their branch. <code>termist update</code> keeps it current.</p>
 
   <h2 id="install">Install</h2>
   <dl class="install">
@@ -297,6 +297,36 @@
     <img src="demo.gif" width="1400" height="800" alt="termist in a terminal: the Galata Tower at dusk for a moment, then three agents as cards, one running, one waiting for an answer, one done; the user jumps to the waiting one, answers it, starts a new task and finds a session by name.">
     <figcaption>Three agents at work. <kbd>.</kbd> jumps to the one waiting for you, <kbd>p</kbd> starts a new task, <kbd>/</kbd> finds any session.</figcaption>
   </figure>
+
+  <h2 id="prs">Pull requests next to your agents</h2>
+  <p>New in 0.2. <kbd>v</kbd> shows a project's open pull requests, read through the <a href="https://cli.github.com">GitHub CLI</a>: one repo, or every repo in a folder of repos, each read with the account that has the most access to it. Read one whole, review it, and when the review asks for changes, hand them to an agent on its branch.</p>
+  <figure>
+    <img src="prs.gif" width="1400" height="800" loading="lazy" alt="termist's pull request list for a folder of two repos. The user opens #212, Fix the login redirect loop, reads its conversation and marks its two review threads, opens the diff unified and then side by side, comments on two lines of the next file, and sends a review that requests changes. Then the marked threads go to a new Claude Code agent in a worktree on the pull request's branch, and the grid shows its card in a band of its own under the branch and #212.">
+    <figcaption>From the list to an agent: <kbd>v</kbd>, <kbd>Enter</kbd>, <kbd>Space</kbd> on two threads, <kbd>d</kbd> and <kbd>s</kbd>, a comment with <kbd>c</kbd>, the review with <kbd>A</kbd>, then <kbd>a</kbd>.</figcaption>
+  </figure>
+  <div class="shots">
+    <figure>
+      <a href="prs-inbox.png"><img src="prs-inbox.png" width="1400" height="800" loading="lazy" alt="The pull request list of the folder acme: three open pull requests in api and six in site, each with its number, title, review and checks marks and age; #212, Fix the login redirect loop, is selected, and beside the list its preview says your review is requested and its checks pass."></a>
+      <figcaption><strong>The list (<kbd>v</kbd>).</strong> Repo by repo, with the reviews asked of you (<kbd>⇄</kbd> on the tab and <kbd>f</kbd> to show only those), checks, conflicts and drafts at a glance, and a preview beside it.</figcaption>
+    </figure>
+    <figure>
+      <a href="prs-conversation.png"><img src="prs-conversation.png" width="1400" height="800" loading="lazy" alt="Pull request #212 open on its conversation: two comments, a review, then two line threads, each under the lines of code it is about, both marked with a yellow diamond to be handed to an agent."></a>
+      <figcaption><strong>The whole pull request (<kbd>Enter</kbd>).</strong> Overview, conversation with line threads under their lines, checks and files. <kbd>r</kbd> replies, <kbd>x</kbd> resolves, <kbd>e</kbd> and <kbd>D</kbd> edit and delete your own, <kbd>Space</kbd> marks a thread.</figcaption>
+    </figure>
+    <figure>
+      <a href="prs-diff.png"><img src="prs-diff.png" width="1400" height="800" loading="lazy" alt="The diff of #212 side by side: a file tree on the left, then old and new lines of src/auth/redirect.rs in two columns, removed lines red and added green, the words that changed marked, and a review thread folded under the line it is about."></a>
+      <figcaption><strong>The diff (<kbd>d</kbd>).</strong> A file tree beside unified or side-by-side (<kbd>s</kbd>) changes, threads under their lines. <kbd>J</kbd> / <kbd>K</kbd> go from file to file, <kbd>Ctrl+r</kbd> marks a file viewed on GitHub.</figcaption>
+    </figure>
+    <figure>
+      <a href="prs-review.png"><img src="prs-review.png" width="1400" height="800" loading="lazy" alt="The review box over the diff: Comment, Approve and Request changes, with Request changes chosen and a sentence typed. Above it, a line comment just written waits in the review, marked pending."></a>
+      <figcaption><strong>Writing back.</strong> <kbd>c</kbd> comments on the pull request, a line or a <kbd>v</kbd> range (<kbd>Ctrl+s</kbd> makes it a suggestion). Line comments wait in your review until <kbd>A</kbd> sends it: comment, approve or request changes.</figcaption>
+    </figure>
+  </div>
+  <figure>
+    <a href="prs-bands.png"><img src="prs-bands.png" width="1400" height="800" loading="lazy" alt="The grid in two bands: the folder acme with two agents, one done and one waiting, then the band of the worktree site@fix/login, headed by #212 Fix the login redirect loop with its checks passing, holding the agent that took the review comments. Below, its pane shows the threads it was given and its work on them."></a>
+    <figcaption><strong>From a pull request to an agent.</strong> <kbd>w</kbd> opens a worktree on its branch and an agent there; <kbd>a</kbd> hands the marked threads, with the lines they are about, to the agent already on that branch or to a new one. Cards stand in bands, one per worktree, under the branch and its pull request; <kbd>Shift</kbd>+<kbd>V</kbd> opens a card's pull request in the browser.</figcaption>
+  </figure>
+  <p class="after">Install <code>gh</code> and run <code>gh auth login</code>; with several accounts, <kbd>m</kbd> chooses the repos and the account each is read with. Turn it all off with <code>[github] enabled = false</code> or in the settings.</p>
 
   <h2 id="look">Its look and its voice</h2>
   <p>Themes, Istanbul scenes, sounds and notifications, all set from inside termist.</p>
@@ -324,7 +354,8 @@
   </div>
   <ul class="features">
     <li>Sounds and desktop notifications when an agent waits for you or is done, the notifications only while the terminal is not in front. Ghostty, WezTerm, kitty, iTerm2 and others, through tmux too.</li>
-    <li>The pane goes to the right of the cards from 180 columns.</li>
+    <li>The pane on any side of the cards, <code>right</code>, <code>left</code>, <code>bottom</code> or <code>top</code>, with one column of cards beside it; <kbd>Ctrl+a z</kbd> moves it between beside and under.</li>
+    <li>Toasts in the top right when an agent waits for you or is done, in any project, and a status line with CPU, memory, battery and the time.</li>
     <li><code>termist update</code> installs the newest release over the one you have, and <code>termist update --check</code> only looks.</li>
   </ul>
 
@@ -344,7 +375,9 @@
     <li>Start a task without leaving the grid: <kbd>p</kbd>, type the prompt, pick the agent with <kbd>Tab</kbd> and the model with <kbd>^O</kbd>.</li>
     <li>Send the next instruction to a finished agent with <kbd>Space</kbd>, without opening its terminal.</li>
     <li>Projects as tabs, cards that scroll, rename and archive, and a real terminal for each agent when you want to type into it.</li>
-    <li>Your pull requests next to your agents: <kbd>v</kbd> lists a project's open ones, repo by repo for a folder of repos, with the reviews asked of you, checks and conflicts; <kbd>Enter</kbd> opens one with its conversation and line threads, <kbd>d</kbd> its diff: a file tree beside unified or side-by-side changes, line comments under their lines, <kbd>Ctrl+r</kbd> to mark a file viewed on GitHub. <kbd>c</kbd> comments on the pull request, a line or a range, <kbd>r</kbd> replies, <kbd>x</kbd> resolves, <kbd>A</kbd> sends your review. <kbd>w</kbd> opens a worktree on its branch with an agent there; <kbd>Space</kbd> marks review threads and <kbd>a</kbd> hands them to the agent.</li>
+    <li>The models each CLI offers, to choose from with <kbd>^O</kbd>: Claude Code's, and what Codex and OpenCode list.</li>
+    <li>The mouse everywhere: a click on a tab, a card, the pane, a file or a thread, and the wheel moves what is under it. Drag over the pane to copy.</li>
+    <li><a href="#prs">Your pull requests next to your agents</a>: the list, the conversation, the diff, comments and reviews, and a worktree with an agent for each branch.</li>
   </ul>
 
   <h2 id="keys">Keys</h2>
@@ -359,9 +392,10 @@
       <tr><td><kbd>/</kbd></td><td>Find any session</td></tr>
       <tr><td><kbd>o</kbd> <kbd>x</kbd></td><td>Open a project, close its tab</td></tr>
       <tr><td><kbd>r</kbd> <kbd>a</kbd> <kbd>A</kbd></td><td>Rename, archive, show the archive</td></tr>
-      <tr><td><kbd>v</kbd></td><td>Pull requests of the project, through the GitHub CLI</td></tr>
-      <tr><td><kbd>d</kbd></td><td>In a pull request: its diff, unified or side by side (<kbd>s</kbd>)</td></tr>
+      <tr><td><kbd>v</kbd></td><td>Pull requests of the project, through the GitHub CLI; <kbd>Enter</kbd> opens one</td></tr>
+      <tr><td><kbd>d</kbd></td><td>In a pull request: its diff, unified or side by side (<kbd>s</kbd>); <kbd>Ctrl+r</kbd> marks a file viewed</td></tr>
       <tr><td><kbd>c</kbd> <kbd>A</kbd></td><td>In a pull request: comment (on a line or a <kbd>v</kbd> range in the diff), send your review</td></tr>
+      <tr><td><kbd>r</kbd> <kbd>x</kbd></td><td>On a thread: reply, resolve</td></tr>
       <tr><td><kbd>w</kbd> <kbd>Space</kbd> <kbd>a</kbd></td><td>In a pull request: a worktree and an agent on its branch; mark review threads, hand them to the agent</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>V</kbd></td><td>The selected card's pull request in the browser</td></tr>
       <tr><td><kbd>s</kbd></td><td>Settings: theme, colours, prefix, pane, keys</td></tr>
