@@ -385,6 +385,8 @@ impl Store {
                             effort,
                             user_named,
                             archived,
+                            cwd: PathBuf::new(),
+                            place: None,
                         },
                         resumable,
                     })
@@ -615,6 +617,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         }
     }
 

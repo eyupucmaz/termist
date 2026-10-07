@@ -13,6 +13,7 @@ pub const INBOX_LIMIT: u32 = 50;
 /// What a list row and a detail head need.
 pub const PR_FIELDS: &str = "fragment PrFields on PullRequest {
   number title url isDraft state createdAt updatedAt headRefName baseRefName
+  headRepository { nameWithOwner }
   additions deletions changedFiles mergeable reviewDecision
   author { login }
   reviewRequests(first: 10) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug } } } }
@@ -224,6 +225,7 @@ pub fn summary(p: &Value, viewer: &str) -> Option<PrSummary> {
         created_at: text(&p["createdAt"]),
         updated_at: text(&p["updatedAt"]),
         head: text(&p["headRefName"]),
+        head_repo: text(&p["headRepository"]["nameWithOwner"]),
         base: text(&p["baseRefName"]),
         additions: count(&p["additions"]),
         deletions: count(&p["deletions"]),
@@ -418,7 +420,8 @@ pub mod tests {
       "r0":{"pullRequests":{"totalCount":2,"nodes":[
         {"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212",
          "isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z",
-         "headRefName":"feat/dealer","baseRefName":"main","additions":184,"deletions":32,"changedFiles":9,
+         "headRefName":"feat/dealer","headRepository":{"nameWithOwner":"bob/site"},
+         "baseRefName":"main","additions":184,"deletions":32,"changedFiles":9,
          "mergeable":"UNKNOWN","reviewDecision":"REVIEW_REQUIRED","author":{"login":"bob"},
          "reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"alice"}},
                                     {"requestedReviewer":{"__typename":"Team","slug":"web"}}]},
@@ -478,6 +481,15 @@ pub mod tests {
         assert_eq!(a.mergeable, Mergeable::Unknown);
         assert_eq!(a.decision, Some(ReviewDecision::ReviewRequired));
         assert_eq!((a.additions, a.deletions, a.changed_files), (184, 32, 9));
+        assert_eq!(
+            (
+                a.head.as_str(),
+                a.head_repo.as_str(),
+                prs[1].head_repo.as_str()
+            ),
+            ("feat/dealer", "bob/site", ""),
+            "a fork's head repo; none when it is gone"
+        );
         assert!(!a.unseen, "the daemon decides unseen");
         let b = &prs[1];
         assert!(b.draft);

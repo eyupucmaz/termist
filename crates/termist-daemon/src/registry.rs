@@ -427,6 +427,7 @@ impl Registry {
             ClientRequest::CreateSession {
                 project,
                 kind,
+                cwd: _,
                 prompt,
                 model,
                 effort,
@@ -577,7 +578,8 @@ impl Registry {
             | ClientRequest::RefreshPrs { .. }
             | ClientRequest::MarkPrSeen { .. }
             | ClientRequest::SetFileViewed { .. }
-            | ClientRequest::WritePr { .. }) => {
+            | ClientRequest::WritePr { .. }
+            | ClientRequest::OpenWorktree { .. }) => {
                 let fx = self.github.request(
                     client,
                     req,
@@ -1089,6 +1091,7 @@ impl Registry {
                 (model, effort)
             }
         };
+        let cwd = proj.path.clone();
         let id = SessionId::new();
         let launch = self.launcher.launch(LaunchRequest {
             id,
@@ -1096,7 +1099,7 @@ impl Registry {
             prompt: prompt.as_deref(),
             model: model.as_deref(),
             effort: effort.as_deref(),
-            cwd: &proj.path,
+            cwd: &cwd,
             cols,
             rows,
             resume: None,
@@ -1119,6 +1122,8 @@ impl Registry {
             effort,
             user_named: false,
             archived: false,
+            cwd,
+            place: None,
         };
         self.sessions
             .push(Session::new(info.clone(), Some(cmd), false));
@@ -1300,6 +1305,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: p.path.clone(),
+            place: None,
         }
     }
 

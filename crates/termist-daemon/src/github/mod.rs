@@ -1804,6 +1804,7 @@ mod tests {
             created_at: "2026-10-01T10:00:00Z".into(),
             updated_at: updated_at.into(),
             head: "feat".into(),
+            head_repo: "acme/site".into(),
             base: "main".into(),
             additions: 1,
             deletions: 1,

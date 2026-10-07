@@ -134,6 +134,27 @@ pub struct SessionInfo {
     pub user_named: bool,
     /// Hidden from the grid, the palette and the attention order; the record stays.
     pub archived: bool,
+    /// The folder it runs in: where it started, or where the agent says it is now.
+    pub cwd: PathBuf,
+    /// What the daemon read about `cwd`; `None` until read.
+    pub place: Option<Box<Place>>,
+}
+
+/// Where a session runs: its worktree, branch, repo and pull request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The worktree's top folder; the folder itself when it is not in a repo.
+    pub root: PathBuf,
+    /// `None`: detached, or not a repo.
+    pub branch: Option<String>,
+    /// The commit when detached, short.
+    pub commit: Option<String>,
+    /// Which of the project's repos the worktree belongs to.
+    pub repo: Option<crate::github::RepoId>,
+    /// The open pull request whose head is `branch`.
+    pub pr: Option<crate::github::PrRef>,
+    /// The folder is no longer there.
+    pub gone: bool,
 }
 
 impl SessionInfo {
@@ -205,6 +226,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         };
         assert_eq!(s.display_name(), "shell-1");
         s.title = Some("Fix Login".into());

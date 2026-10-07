@@ -728,6 +728,7 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
+            ServerEvent::WorktreeReady { .. } | ServerEvent::WorktreeFailed { .. } => {}
             ServerEvent::PrWritten { ticket, .. } => {
                 if let Some(Some(target)) = self.writes.remove(&ticket) {
                     self.drafts.remove(&target);
@@ -1242,6 +1243,7 @@ impl App {
         vec![Action::Send(ClientRequest::CreateSession {
             project,
             kind,
+            cwd: None,
             prompt: None,
             model: None,
             effort: None,
@@ -1649,6 +1651,7 @@ impl App {
             Action::Send(ClientRequest::CreateSession {
                 project: q.project,
                 kind: SessionKind::Agent { harness },
+                cwd: None,
                 prompt,
                 model: q.launch.model,
                 effort: q.launch.effort,
@@ -3076,6 +3079,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         }
     }
 
@@ -3255,6 +3260,7 @@ mod tests {
                 kind: SessionKind::Agent {
                     harness: Harness::Claude
                 },
+                cwd: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -3290,6 +3296,7 @@ mod tests {
                 kind: SessionKind::Agent {
                     harness: Harness::Codex
                 },
+                cwd: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -3686,6 +3693,7 @@ mod tests {
                     kind: SessionKind::Agent {
                         harness: Harness::Claude
                     },
+                    cwd: None,
                     prompt: Some("fix the login redirect\nand add a test".into()),
                     model: Some("opus".into()),
                     effort: Some("max".into()),

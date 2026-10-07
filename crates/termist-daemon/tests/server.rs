@@ -102,6 +102,7 @@ async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> Sessio
     c.send(&ClientRequest::CreateSession {
         project,
         kind,
+        cwd: None,
         prompt: None,
         model: None,
         effort: None,
@@ -816,6 +817,7 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: None,
         model: None,
         effort: None,
@@ -1342,6 +1344,7 @@ async fn model_and_effort_reach_the_cli_and_come_back_on_resume() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: Some("fix it".into()),
         model: Some("  my model  ".into()),
         effort: Some("high".into()),
@@ -1524,6 +1527,7 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: Some("fix the login redirect".into()),
         model: Some("opus".into()),
         effort: None,

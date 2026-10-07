@@ -828,6 +828,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         };
         let waiting = mk(
             "claude-1",

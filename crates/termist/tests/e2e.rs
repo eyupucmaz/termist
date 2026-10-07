@@ -228,6 +228,7 @@ async fn play_turn(
     c.send(&ClientRequest::CreateSession {
         project: state.projects[0].id,
         kind,
+        cwd: None,
         prompt: None,
         model: None,
         effort: None,
@@ -795,6 +796,7 @@ async fn a_prompt_starting_with_a_dash_reaches_each_cli_as_the_prompt() {
         c.send(&ClientRequest::CreateSession {
             project: state.projects[0].id,
             kind: SessionKind::Agent { harness },
+            cwd: None,
             prompt: Some(prompt.into()),
             model: None,
             effort: None,

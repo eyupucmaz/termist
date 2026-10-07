@@ -752,6 +752,7 @@ pub mod fixtures {
             created_at: "2026-10-01T10:00:00Z".into(),
             updated_at: "2026-10-02T10:00:00Z".into(),
             head: "feat".into(),
+            head_repo: "acme/site".into(),
             base: "main".into(),
             additions: 184,
             deletions: 32,

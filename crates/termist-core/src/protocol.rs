@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -23,9 +23,12 @@ pub enum ClientRequest {
     ListState,
     /// `model` and `effort` are passed to the CLI as flags; `None` passes none. A
     /// non-empty prompt goes into the prompt history, a model into the recent models.
+    /// `cwd` is a folder of the project, or a worktree of one of its repos; `None` is
+    /// the project's folder.
     CreateSession {
         project: ProjectId,
         kind: SessionKind,
+        cwd: Option<PathBuf>,
         prompt: Option<String>,
         model: Option<String>,
         effort: Option<String>,
@@ -158,6 +161,11 @@ pub enum ClientRequest {
         ticket: u64,
         write: PrWrite,
     },
+    /// A worktree on the pull request's branch: the one already there, else a new one.
+    /// Answered with `WorktreeReady` or `WorktreeFailed`.
+    OpenWorktree {
+        pr: PrRef,
+    },
     Shutdown,
 }
 
@@ -217,6 +225,16 @@ pub enum ServerEvent {
         state: GhState,
         diff: Option<Box<PrDiff>>,
     },
+    /// The worktree for an `OpenWorktree` of this client; `created` when termist made it.
+    WorktreeReady {
+        pr: PrRef,
+        path: PathBuf,
+        created: bool,
+    },
+    WorktreeFailed {
+        pr: PrRef,
+        message: String,
+    },
     /// A `WritePr` of this client went through.
     PrWritten {
         pr: PrRef,
@@ -244,7 +262,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_9_since_writing_to_pull_requests() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+    fn the_protocol_is_10_since_worktrees_for_pull_requests() {
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 }
