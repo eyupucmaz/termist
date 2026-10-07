@@ -59,6 +59,11 @@ pub enum Mode {
     ConfirmArchive(SessionId),
     /// `D` was pressed on a comment of yours (`App::deleting`); `y` / Enter deletes it.
     ConfirmDelete,
+    /// `X` was pressed on a worktree (`App::removing`); `y` / Enter removes it. `files`
+    /// it has uncommitted changes in, once the daemon said so (then they go too).
+    ConfirmRemove {
+        files: u32,
+    },
 }
 
 /// What the body shows: the grid of cards, the archived cards, or pull requests.
@@ -107,6 +112,8 @@ pub struct App {
     pub selected: Option<SessionId>,
     /// The stand-in of a band with no cards, selected when no card is (its folder).
     pub empty: Option<PathBuf>,
+    /// The worktree `X` asked to remove, until the daemon answers.
+    removing: Option<PathBuf>,
     /// A task waiting for its new worktree: the `CreateWorktree` ticket and what to
     /// start once it is made.
     task_for: Option<(u64, QuickPrompt)>,
@@ -263,6 +270,7 @@ impl App {
             project: None,
             selected: None,
             empty: None,
+            removing: None,
             task_for: None,
             worktrees: HashMap::new(),
             mode: Mode::Grid,
@@ -755,6 +763,9 @@ impl App {
             ServerEvent::Worktrees { project, list } => {
                 self.worktrees.insert(project, list);
                 self.repair_selection();
+                if matches!(self.overlays.last(), Some(Overlay::Worktrees(_))) {
+                    self.open_worktrees();
+                }
             }
             ServerEvent::WorktreeMade {
                 ticket,
@@ -780,9 +791,23 @@ impl App {
                     self.overlays.push(Overlay::QuickPrompt(q));
                 }
             }
-            ServerEvent::RemoveRefused { .. }
-            | ServerEvent::WorktreeRemoved { .. }
-            | ServerEvent::RemoveFailed { .. } => {}
+            ServerEvent::RemoveRefused { path, files } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.mode = Mode::ConfirmRemove { files };
+                }
+            }
+            ServerEvent::WorktreeRemoved { path } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.removing = None;
+                    self.message = Some(format!("removed {} · the branch stays", short(&path)));
+                }
+            }
+            ServerEvent::RemoveFailed { path, message } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.removing = None;
+                    self.message = Some(message);
+                }
+            }
             ServerEvent::WorktreeReady { pr, path, .. } => {
                 // Only the one asked for; another client's answer leaves it waiting.
                 if self
@@ -938,6 +963,19 @@ impl App {
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
                     return vec![Action::Send(ClientRequest::ArchiveSession { session })];
                 }
+                return vec![];
+            }
+            Mode::ConfirmRemove { files } => {
+                self.mode = Mode::Grid;
+                if let Some(path) = self.removing.clone()
+                    && matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+                {
+                    return vec![Action::Send(ClientRequest::RemoveWorktree {
+                        path,
+                        force: files > 0,
+                    })];
+                }
+                self.removing = None;
                 return vec![];
             }
             Mode::ConfirmDelete => {
@@ -1549,6 +1587,7 @@ impl App {
             Some(Overlay::ModelName(_)) => self.model_name_key(key),
             Some(Overlay::Project(_)) => self.project_key(key),
             Some(Overlay::Target(_)) => self.target_key(key),
+            Some(Overlay::Worktrees(_)) => self.worktrees_key(key),
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
             Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
@@ -1741,6 +1780,157 @@ impl App {
                         seed,
                     });
                 }
+            }
+        }
+        vec![]
+    }
+
+    /// `X`: asks before removing the worktree at `path`; a live card in it says no.
+    fn ask_remove(&mut self, path: PathBuf) {
+        let live = self.state.sessions.iter().any(|s| {
+            !s.archived
+                && s.status.is_live()
+                && s.place
+                    .as_deref()
+                    .map_or(&s.cwd, |p| &p.root)
+                    .starts_with(&path)
+        });
+        if live {
+            self.message = Some("stop its cards first (d)".into());
+            return;
+        }
+        self.removing = Some(path);
+        self.mode = Mode::ConfirmRemove { files: 0 };
+    }
+
+    /// The worktree `X` asks about, by its branch (or folder).
+    pub fn removing_name(&self) -> String {
+        let Some(path) = &self.removing else {
+            return String::new();
+        };
+        self.project_worktrees()
+            .iter()
+            .find(|w| &w.path == path)
+            .and_then(|w| w.branch.clone())
+            .unwrap_or_else(|| short(path))
+    }
+
+    /// `W`: the project's worktrees (opened again, on the same row, when they change).
+    fn open_worktrees(&mut self) {
+        let Some(project) = self.project else {
+            return;
+        };
+        let at = match self.overlays.last() {
+            Some(Overlay::Worktrees(p)) => {
+                let at = p.selected_index();
+                self.overlays.pop();
+                at
+            }
+            _ => None,
+        };
+        let repos = self
+            .prs
+            .get(&project)
+            .map(|d| d.repos.as_slice())
+            .unwrap_or(&[]);
+        let carded: Vec<&Path> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project == project && !s.archived)
+            .map(|s| {
+                s.place
+                    .as_deref()
+                    .map_or(s.cwd.as_path(), |p| p.root.as_path())
+            })
+            .collect();
+        let labels: HashMap<PathBuf, String> = self
+            .project_worktrees()
+            .iter()
+            .map(|w| {
+                let cards = carded.contains(&w.path.as_path());
+                let mark = if cards || w.shown { "✓" } else { " " };
+                let repo = w
+                    .repo
+                    .filter(|_| repos.len() > 1)
+                    .and_then(|id| repos.iter().find(|r| r.repo == id))
+                    .map(|r| format!("{}@", r.name))
+                    .unwrap_or_default();
+                let name = w.branch.clone().unwrap_or_else(|| short(&w.path));
+                let who = if w.made_by_termist {
+                    "termist"
+                } else {
+                    "outside"
+                };
+                let stat = w
+                    .stat
+                    .filter(|s| s.files > 0 || s.dirty)
+                    .map(|s| {
+                        let dirty = if s.dirty { " ●" } else { "" };
+                        format!(" · {} files +{} −{}{dirty}", s.files, s.added, s.removed)
+                    })
+                    .unwrap_or_default();
+                let end = match w.pr_end {
+                    Some((n, termist_core::PrEnd::Merged)) => format!(" · #{n} merged"),
+                    Some((n, termist_core::PrEnd::Closed)) => format!(" · #{n} closed"),
+                    None => String::new(),
+                };
+                let cards = if cards { " · has cards" } else { "" };
+                (
+                    w.path.clone(),
+                    format!("{mark} ⎇ {repo}{name} · {who}{stat}{end}{cards}"),
+                )
+            })
+            .collect();
+        let items: Vec<PathBuf> = self
+            .project_worktrees()
+            .iter()
+            .map(|w| w.path.clone())
+            .collect();
+        let mut picker = ListPicker::new(items, move |p| labels[p].clone(), false);
+        if let Some(at) = at {
+            picker.select_index(at);
+        }
+        self.overlays.push(Overlay::Worktrees(picker));
+    }
+
+    fn worktrees_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Worktrees(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.overlays.pop();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let Some(path) = picker.selected().cloned() else {
+                    return vec![];
+                };
+                let has_cards = self.state.sessions.iter().any(|s| {
+                    !s.archived && s.place.as_deref().map_or(&s.cwd, |p| &p.root) == &path
+                });
+                if has_cards {
+                    self.message = Some("it has cards: always shown".into());
+                    return vec![];
+                }
+                let shown = self
+                    .project_worktrees()
+                    .iter()
+                    .any(|w| w.path == path && w.shown);
+                return vec![Action::Send(ClientRequest::SetWorktreeShown {
+                    path,
+                    shown: !shown,
+                })];
+            }
+            KeyCode::Char('X') => {
+                let Some(path) = picker.selected().cloned() else {
+                    return vec![];
+                };
+                self.overlays.pop();
+                self.ask_remove(path);
+            }
+            _ => {
+                picker.key(key);
             }
         }
         vec![]
@@ -3051,6 +3241,15 @@ impl App {
             KeyAction::NewSession => return self.open_picker(),
             KeyAction::QuickPrompt => return self.open_quick_prompt(),
             KeyAction::SameTask => return self.same_task(),
+            KeyAction::RemoveWorktree => {
+                match self.empty_worktree().or_else(|| self.card_worktree()) {
+                    Some((path, _)) => self.ask_remove(path),
+                    None => {
+                        self.message = Some("the project's own folder is not a worktree".into())
+                    }
+                }
+            }
+            KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::NewShell => return self.create(SessionKind::Shell),
             KeyAction::FollowUp => self.open_follow_up(),
             KeyAction::Rename => self.open_rename(),
@@ -3776,6 +3975,13 @@ impl App {
         }
         actions
     }
+}
+
+/// A folder's last part, as messages name a worktree.
+fn short(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -6355,6 +6561,108 @@ mod tests {
             Some("/w/site-worktrees/docs".into()),
             "a band's stand-in"
         );
+    }
+
+    fn worktree(path: &str, branch: &str, shown: bool, made: bool) -> termist_core::WorktreeInfo {
+        termist_core::WorktreeInfo {
+            path: path.into(),
+            repo: Some(termist_core::github::RepoId(7)),
+            branch: Some(branch.into()),
+            base: None,
+            made_by_termist: made,
+            shown,
+            stat: None,
+            pr_end: None,
+        }
+    }
+
+    #[test]
+    fn x_removes_a_worktree_after_asking_twice_when_work_would_go_with_it() {
+        let (mut app, s, _) = linked();
+        let path = PathBuf::from("/w/site-worktrees/fix");
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![worktree("/w/site-worktrees/fix", "fix", true, true)],
+        });
+        app.select(s[0].id);
+        app.on_key(k(K::Char('X')));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("the project's own folder is not a worktree")
+        );
+        let mut live = s[1].clone();
+        live.status = AgentStatus::Running;
+        app.on_event(ServerEvent::SessionUpdated(live.clone()));
+        app.select(live.id);
+        app.on_key(k(K::Char('X')));
+        assert_eq!(app.message.as_deref(), Some("stop its cards first (d)"));
+        live.status = AgentStatus::Exited { code: Some(0) };
+        app.on_event(ServerEvent::SessionUpdated(live));
+        app.on_key(k(K::Char('X')));
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 0 });
+        assert_eq!(app.removing_name(), "fix");
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('y')))),
+            [&ClientRequest::RemoveWorktree {
+                path: path.clone(),
+                force: false
+            }]
+        );
+        app.on_event(ServerEvent::RemoveRefused {
+            path: path.clone(),
+            files: 3,
+        });
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 3 });
+        assert_eq!(
+            sent(&app.on_key(k(K::Enter))),
+            [&ClientRequest::RemoveWorktree {
+                path: path.clone(),
+                force: true
+            }]
+        );
+        app.on_event(ServerEvent::WorktreeRemoved { path: path.clone() });
+        assert_eq!(
+            app.message.as_deref(),
+            Some("removed fix · the branch stays")
+        );
+        // Any other key keeps it.
+        app.removing = Some(path);
+        app.mode = Mode::ConfirmRemove { files: 0 };
+        assert!(sent(&app.on_key(k(K::Char('n')))).is_empty());
+        assert_eq!((app.mode, app.removing.clone()), (Mode::Grid, None));
+    }
+
+    #[test]
+    fn w_lists_the_worktrees_to_show_hide_or_remove() {
+        let (mut app, _, _) = linked();
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![
+                worktree("/w/site-worktrees/fix", "fix", true, true),
+                worktree("/w/site/.claude/worktrees/x", "x", false, false),
+            ],
+        });
+        app.on_key(k(K::Char('W')));
+        let Some(Overlay::Worktrees(picker)) = app.overlays.last() else {
+            panic!("the worktrees")
+        };
+        assert_eq!(
+            (picker.label(0), picker.label(1)),
+            ("✓ ⎇ fix · termist · has cards", "  ⎇ x · outside")
+        );
+        app.on_key(k(K::Enter));
+        assert_eq!(app.message.as_deref(), Some("it has cards: always shown"));
+        app.on_key(k(K::Down));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char(' ')))),
+            [&ClientRequest::SetWorktreeShown {
+                path: "/w/site/.claude/worktrees/x".into(),
+                shown: true
+            }]
+        );
+        app.on_key(k(K::Char('X')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 0 });
     }
 
     #[test]

@@ -853,6 +853,21 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 t.warn,
             )
         }
+        (_, Mode::ConfirmRemove { files }) => {
+            let name = app.removing_name();
+            let text = match files {
+                0 => format!(
+                    "Remove worktree {name}? The branch stays.  y / Enter: remove · any key: keep it"
+                ),
+                1 => format!(
+                    "{name} has 1 changed file: remove it too?  y / Enter: remove · any key: keep it"
+                ),
+                n => format!(
+                    "{name} has {n} changed files: remove them too?  y / Enter: remove · any key: keep it"
+                ),
+            };
+            (text, t.warn)
+        }
         (_, Mode::ConfirmDelete) => (
             "Delete your comment? GitHub keeps no copy.  y / Enter: delete · any key: keep it"
                 .into(),

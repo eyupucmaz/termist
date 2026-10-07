@@ -787,6 +787,36 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let area = centered(body, 68, lines.len() as u16 + 2);
             boxed(f, t, area, "new key", lines);
         }
+        Overlay::Worktrees(picker) => {
+            let rows = picker
+                .visible()
+                .map(|(i, _, on)| {
+                    let label = format!(" {}", picker.label(i));
+                    Line::from(Span::styled(label, highlighted(Style::default(), on)))
+                })
+                .collect();
+            let rows = if picker.items().is_empty() {
+                vec![Line::from(Span::styled(
+                    " no worktrees: Ctrl+N in the new-task prompt makes one",
+                    dim(),
+                ))]
+            } else {
+                rows
+            };
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "worktrees".into(),
+                    width: 76,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::Target(picker) => {
             let rows = picker
                 .visible()
@@ -955,6 +985,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",
         Overlay::Hand { .. } => "↑/↓ choose · Enter there · Esc cancel",
         Overlay::Target(_) => "type to filter · ↑/↓ choose · Enter there · Esc back",
+        Overlay::Worktrees(_) => "↑/↓ choose · Enter show or hide · X remove · Esc close",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
         Overlay::OpenProject(_) => {

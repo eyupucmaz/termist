@@ -31,6 +31,8 @@ pub enum Overlay {
     },
     /// `Ctrl+T` in the quick prompt: where the task starts.
     Target(ListPicker<TargetChoice>),
+    /// `W`: the project's worktrees, by folder.
+    Worktrees(ListPicker<std::path::PathBuf>),
     /// `Space`: the next instruction for a card's agent, sent without entering the card.
     FollowUp {
         session: SessionId,
