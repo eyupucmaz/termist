@@ -140,6 +140,41 @@ pub struct SessionInfo {
     pub place: Option<Box<Place>>,
 }
 
+/// A worktree of one of a project's repos, as the daemon keeps and reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub repo: Option<crate::github::RepoId>,
+    /// `None` when detached.
+    pub branch: Option<String>,
+    /// The branch it was made from, when termist made it.
+    pub base: Option<String>,
+    pub made_by_termist: bool,
+    /// Drawn as a band even with no cards in it.
+    pub shown: bool,
+    /// What the branch changed since it left its base, the uncommitted too; `None` until
+    /// read or when it cannot be (no merge base).
+    pub stat: Option<Stat>,
+    /// The last pull request seen on its branch, once it is no longer open.
+    pub pr_end: Option<(u32, PrEnd)>,
+}
+
+/// `3 files +60 −28`, and whether some of it is not committed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stat {
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
+    pub dirty: bool,
+}
+
+/// How a pull request stopped being open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrEnd {
+    Merged,
+    Closed,
+}
+
 /// Where a session runs: its worktree, branch, repo and pull request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {

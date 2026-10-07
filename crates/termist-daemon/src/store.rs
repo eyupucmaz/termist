@@ -10,7 +10,7 @@ use termist_core::{
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -87,6 +87,38 @@ const MIGRATE_V4: &str = "
 ALTER TABLE sessions ADD COLUMN cwd TEXT;
 PRAGMA user_version = 4;
 ";
+
+/// v4 brought to v5: the worktrees of a project's repos termist knows of.
+const MIGRATE_V5: &str = "
+CREATE TABLE worktrees (
+    id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    repo_id INTEGER REFERENCES gh_repo(id) ON DELETE SET NULL,
+    path TEXT NOT NULL UNIQUE,
+    branch TEXT,
+    base TEXT,
+    pr INTEGER,
+    made_by_termist INTEGER NOT NULL DEFAULT 0,
+    shown INTEGER NOT NULL DEFAULT 0,
+    created_ms INTEGER NOT NULL
+);
+PRAGMA user_version = 5;
+";
+
+/// A worktree of one of a project's repos, as termist keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredWorktree {
+    pub project: ProjectId,
+    pub repo: Option<RepoId>,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    /// The branch it was made from, when termist made it.
+    pub base: Option<String>,
+    /// The last pull request seen on its branch.
+    pub pr: Option<u32>,
+    pub made_by_termist: bool,
+    pub shown: bool,
+}
 
 /// A GitHub repo found in a project, with the user's choices for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,17 +263,24 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
+                Self::upgrade(&mut conn, MIGRATE_V5)?;
             }
             1 => {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
+                Self::upgrade(&mut conn, MIGRATE_V5)?;
             }
             2 => {
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
+                Self::upgrade(&mut conn, MIGRATE_V5)?;
             }
-            3 => Self::upgrade(&mut conn, MIGRATE_V4)?,
+            3 => {
+                Self::upgrade(&mut conn, MIGRATE_V4)?;
+                Self::upgrade(&mut conn, MIGRATE_V5)?;
+            }
+            4 => Self::upgrade(&mut conn, MIGRATE_V5)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
@@ -258,6 +297,10 @@ impl Store {
             "SELECT id, project_id, path, owner, name, visible, account_override FROM gh_repo LIMIT 0",
         )?;
         conn.prepare("SELECT owner, name, number, seen_updated_at FROM pr_seen LIMIT 0")?;
+        conn.prepare(
+            "SELECT project_id, repo_id, path, branch, base, pr, made_by_termist, shown, created_ms
+             FROM worktrees LIMIT 0",
+        )?;
         Ok(Store {
             conn,
             not_saved: None,
@@ -531,6 +574,87 @@ impl Store {
             }
         }
         Ok(repos)
+    }
+
+    /// Keeps a worktree found or made: a new one as given; one already kept takes the
+    /// branch and repo it has now, and keeps the rest (who made it, shown, base, pr).
+    pub fn upsert_worktree(&self, w: &StoredWorktree) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO worktrees (project_id, repo_id, path, branch, base, pr, made_by_termist, shown, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, repo_id = excluded.repo_id,
+               made_by_termist = MAX(made_by_termist, excluded.made_by_termist),
+               shown = MAX(shown, excluded.shown),
+               base = COALESCE(base, excluded.base)",
+            params![
+                w.project.to_string(),
+                w.repo.map(|r| r.0),
+                w.path.to_string_lossy(),
+                w.branch,
+                w.base,
+                w.pr,
+                w.made_by_termist,
+                w.shown,
+                now_ms() as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every kept worktree, oldest first.
+    pub fn worktrees(&self) -> anyhow::Result<Vec<StoredWorktree>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT project_id, repo_id, path, branch, base, pr, made_by_termist, shown
+             FROM worktrees ORDER BY created_ms, id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                StoredWorktree {
+                    project: ProjectId::new(),
+                    repo: r.get::<_, Option<i64>>(1)?.map(RepoId),
+                    path: PathBuf::from(r.get::<_, String>(2)?),
+                    branch: r.get(3)?,
+                    base: r.get(4)?,
+                    pr: r.get(5)?,
+                    made_by_termist: r.get(6)?,
+                    shown: r.get(7)?,
+                },
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (project, mut w) = row?;
+            if let Ok(project) = project.parse::<ProjectId>() {
+                w.project = project;
+                out.push(w);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn set_worktree_shown(&self, path: &Path, shown: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE worktrees SET shown = ?2 WHERE path = ?1",
+            params![path.to_string_lossy(), shown],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_worktree_pr(&self, path: &Path, pr: u32) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE worktrees SET pr = ?2 WHERE path = ?1",
+            params![path.to_string_lossy(), pr],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_worktree(&self, path: &Path) -> anyhow::Result<()> {
+        self.conn.execute(
+            "DELETE FROM worktrees WHERE path = ?1",
+            params![path.to_string_lossy()],
+        )?;
+        Ok(())
     }
 
     pub fn set_repo_visible(&self, id: RepoId, visible: bool) -> anyhow::Result<()> {
@@ -1125,6 +1249,82 @@ mod tests {
         store
             .upsert_repo(projects[0].id, Path::new("/api"), "acme", "api")
             .unwrap();
+    }
+
+    #[test]
+    fn worktrees_are_kept_and_a_found_one_does_not_undo_the_user_s_choices() {
+        let store = Store::open_in_memory();
+        let p = project("/w/site");
+        store.upsert_project(&p).unwrap();
+        let repo = store
+            .upsert_repo(p.id, Path::new("/w/site"), "acme", "site")
+            .unwrap();
+        let made = StoredWorktree {
+            project: p.id,
+            repo: Some(repo.id),
+            path: "/w/site-worktrees/fix".into(),
+            branch: Some("fix".into()),
+            base: Some("main".into()),
+            pr: None,
+            made_by_termist: true,
+            shown: true,
+        };
+        store.upsert_worktree(&made).unwrap();
+        // Found again by a scan: another branch now, nothing known of who made it.
+        store
+            .upsert_worktree(&StoredWorktree {
+                branch: Some("fix-2".into()),
+                base: None,
+                made_by_termist: false,
+                shown: false,
+                ..made.clone()
+            })
+            .unwrap();
+        let outside = StoredWorktree {
+            path: "/w/site/.claude/worktrees/x".into(),
+            branch: None,
+            base: None,
+            made_by_termist: false,
+            shown: false,
+            ..made.clone()
+        };
+        store.upsert_worktree(&outside).unwrap();
+        let kept = store.worktrees().unwrap();
+        assert_eq!(
+            kept[0],
+            StoredWorktree {
+                branch: Some("fix-2".into()),
+                ..made.clone()
+            }
+        );
+        assert_eq!(kept[1], outside);
+        store.set_worktree_shown(&outside.path, true).unwrap();
+        store.set_worktree_pr(&made.path, 212).unwrap();
+        store.delete_worktree(&made.path).unwrap();
+        let kept = store.worktrees().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].shown);
+        store.set_worktree_pr(&outside.path, 212).unwrap();
+        assert_eq!(store.worktrees().unwrap()[0].pr, Some(212));
+    }
+
+    #[test]
+    fn a_v4_database_gains_an_empty_worktree_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4] {
+                conn.execute_batch(sql).unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.worktrees().unwrap().is_empty());
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
     }
 
     #[test]

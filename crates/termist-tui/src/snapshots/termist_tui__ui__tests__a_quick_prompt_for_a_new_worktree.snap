@@ -1,0 +1,22 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: t.backend_mut()
+---
+" termist   site                                                           12:00 "
+"                                                                                "
+" ⎇ main                                                                         "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮                                "
+"┃● shell-1             ┃│● shell-3             │                                "
+"┃she┌ new worktree ⎇ fix-the-login-redirect ───────────────────────────────┐    "
+"┗━━━│fix the login redirect                                                │    "
+"↓ 2 │                                                                      │    "
+"    │                                                                      │    "
+"┌ sh│                                                                      │───┐"
+"│   │site ^P · ⎇ new ^N ^T · claude Tab · default ^O                       │   │"
+"│   └──────────────────────────────────────────────────────────────────────┘   │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · "

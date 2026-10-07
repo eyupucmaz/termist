@@ -31,16 +31,27 @@ pub fn centered(body: Rect, width: u16, height: u16) -> Rect {
 
 /// Clears `area` and draws a bordered box titled `title` holding `lines`.
 fn boxed(f: &mut Frame, theme: &Theme, area: Rect, title: &str, lines: Vec<Line<'static>>) {
+    boxed_in(f, theme, area, title, lines, None);
+}
+
+/// `boxed` with its border in `border` (a new worktree's green).
+fn boxed_in(
+    f: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    border: Option<Style>,
+) {
     f.render_widget(Clear, area);
     f.buffer_mut().set_style(area, theme.base);
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {title} ")),
-        ),
-        area,
-    );
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {title} "));
+    if let Some(border) = border {
+        block = block.border_style(border);
+    }
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn highlighted(theme: &Theme, style: Style, on: bool) -> Style {
@@ -138,6 +149,20 @@ fn prompt_box(
     footer: Option<String>,
     top: bool,
 ) {
+    prompt_box_in(f, theme, body, title, input, footer, top, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prompt_box_in(
+    f: &mut Frame,
+    theme: &Theme,
+    body: Rect,
+    title: &str,
+    input: &TextInput,
+    footer: Option<String>,
+    top: bool,
+    border: Option<Style>,
+) {
     let width = PROMPT_WIDTH.min(body.width);
     let (all, (cy, cx)) = wrapped_rows(input, width.saturating_sub(2));
     let fixed = 2 + footer.is_some() as u16;
@@ -155,7 +180,7 @@ fn prompt_box(
     if let Some(footer) = footer {
         lines.push(Line::from(Span::styled(footer, theme.dim)));
     }
-    boxed(f, theme, area, title, lines);
+    boxed_in(f, theme, area, title, lines, border);
     if top && room > 0 {
         f.set_cursor_position((area.x + 1 + cx as u16, area.y + 1 + (cy - first) as u16));
     }
@@ -255,8 +280,8 @@ fn text_box(
     }
 }
 
-/// `orbit-api ^P · claude Tab · opus · high ^O`; `orbit-api ⎇ fix/login ^P · …` in a
-/// pull request's worktree.
+/// `orbit-api ^P · folder ^T · claude Tab · opus · high ^O`; `⎇ fix/login ^T` in a
+/// worktree, `⎇ new ^N` for a new one.
 pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
     let project = app
         .state
@@ -281,13 +306,13 @@ pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
         .as_deref()
         .map(|e| format!(" · {e}"))
         .unwrap_or_default();
-    let worktree = q
-        .worktree
-        .as_ref()
-        .map(|(_, branch)| format!(" ⎇ {branch}"))
-        .unwrap_or_default();
+    let worktree = match (&q.worktree, &q.new_worktree) {
+        (_, Some(_)) => "⎇ new ^N".to_string(),
+        (Some((_, branch)), None) => format!("⎇ {branch}"),
+        (None, None) => "folder".to_string(),
+    };
     format!(
-        "{project}{worktree} ^P · {}{missing} Tab · {model}{effort} ^O",
+        "{project} ^P · {worktree} ^T · {}{missing} Tab · {model}{effort} ^O",
         harness.id()
     )
 }
@@ -324,15 +349,33 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
-        Overlay::QuickPrompt(q) => prompt_box(
-            f,
-            t,
-            body,
-            "new task",
-            &q.input,
-            Some(launch_line(app, q)),
-            top,
-        ),
+        Overlay::QuickPrompt(q) => {
+            // A new worktree: the box is green and says the branch it will be on.
+            let (title, border) = match (&q.new_worktree, app.new_branch(q)) {
+                (Some(new), Some(branch)) => {
+                    let repo = new
+                        .repo_name
+                        .as_ref()
+                        .map(|r| format!("{r}@"))
+                        .unwrap_or_default();
+                    (
+                        format!("new worktree ⎇ {repo}{branch}"),
+                        Some(Style::default().fg(t.status(termist_core::AgentStatus::Finished))),
+                    )
+                }
+                _ => ("new task".to_string(), None),
+            };
+            prompt_box_in(
+                f,
+                t,
+                body,
+                &title,
+                &q.input,
+                Some(launch_line(app, q)),
+                top,
+                border,
+            )
+        }
         Overlay::Model(m) => {
             let rows = m
                 .models
@@ -744,6 +787,58 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let area = centered(body, 68, lines.len() as u16 + 2);
             boxed(f, t, area, "new key", lines);
         }
+        Overlay::Worktrees(picker) => {
+            let rows = picker
+                .visible()
+                .map(|(i, _, on)| {
+                    let label = format!(" {}", picker.label(i));
+                    Line::from(Span::styled(label, highlighted(Style::default(), on)))
+                })
+                .collect();
+            let rows = if picker.items().is_empty() {
+                vec![Line::from(Span::styled(
+                    " no worktrees: Ctrl+N in the new-task prompt makes one",
+                    dim(),
+                ))]
+            } else {
+                rows
+            };
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "worktrees".into(),
+                    width: 76,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
+        Overlay::Target(picker) => {
+            let rows = picker
+                .visible()
+                .map(|(i, _, on)| {
+                    let label = format!(" {}", picker.label(i));
+                    Line::from(Span::styled(label, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "start the task in".into(),
+                    width: 64,
+                    query: picker.query().map(str::to_string),
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::Hand { pr, picker, .. } => {
             let rows = picker
                 .visible()
@@ -889,6 +984,8 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
         Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",
         Overlay::Hand { .. } => "↑/↓ choose · Enter there · Esc cancel",
+        Overlay::Target(_) => "type to filter · ↑/↓ choose · Enter there · Esc back",
+        Overlay::Worktrees(_) => "↑/↓ choose · Enter show or hide · X remove · Esc close",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
         Overlay::OpenProject(_) => {

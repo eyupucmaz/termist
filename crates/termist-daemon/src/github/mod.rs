@@ -37,6 +37,8 @@ const DETAILS: usize = 50;
 const DIFFS: usize = 10;
 /// Below this many points left in the hour, an account is read slowly.
 const RATE_FLOOR: u32 = 300;
+/// A pull request still open when its end was asked is asked again after this long.
+const ASK_END_AGAIN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// A folder with more repos than this shows only its first ones at first; the repos
 /// window shows the others. Every shown repo spends the hourly budget.
 const SHOWN_AT_FIRST: usize = 10;
@@ -105,6 +107,15 @@ pub enum Job {
         repo: PathBuf,
         head: worktree::Head,
     },
+    /// How these pull requests of one repo stand now.
+    PrEnds {
+        gh: GhHandle,
+        repo: RepoId,
+        account: Account,
+        owner: String,
+        name: String,
+        numbers: Vec<u32>,
+    },
     /// Marks a file viewed on GitHub, or not, as `client` asked.
     MarkViewed {
         gh: GhHandle,
@@ -164,6 +175,11 @@ pub enum Done {
         viewed: bool,
         client: ClientId,
         reply: Result<(), GhState>,
+    },
+    /// Each number's end, if it ended; nothing learnt when the call failed.
+    PrEnds {
+        repo: RepoId,
+        ends: Result<Vec<(u32, Option<termist_core::PrEnd>)>, GhState>,
     },
     /// The worktree's folder and whether it was made now, or why there is none.
     Worktree {
@@ -332,6 +348,12 @@ pub struct GitHub {
     writing: HashSet<PrRef>,
     /// The clients waiting for a pull request's worktree; one job makes it for all.
     worktrees: HashMap<PrRef, Vec<ClientId>>,
+    /// Pull requests no longer open: how they ended, once GitHub said.
+    pr_ends: HashMap<PrRef, termist_core::PrEnd>,
+    /// When each pull request's end was last asked: one still open (or a failed ask) is
+    /// asked again after `ASK_END_AGAIN`.
+    pr_asked: HashMap<PrRef, Instant>,
+    asking_ends: HashSet<RepoId>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
@@ -369,6 +391,9 @@ impl GitHub {
             writes: HashMap::new(),
             writing: HashSet::new(),
             worktrees: HashMap::new(),
+            pr_ends: HashMap::new(),
+            pr_asked: HashMap::new(),
+            asking_ends: HashSet::new(),
             slow_until: HashMap::new(),
             seen,
         }
@@ -882,6 +907,86 @@ impl GitHub {
     }
 
     /// Answers every client waiting for `pr`'s worktree.
+    /// How a pull request no longer open ended, once asked.
+    pub fn pr_end(&self, pr: PrRef) -> Option<termist_core::PrEnd> {
+        self.pr_ends.get(&pr).copied()
+    }
+
+    /// Asks how each of `prs` ended, those no longer in the open list and not asked
+    /// before: one job a repo.
+    pub fn ask_pr_ends(&mut self, prs: &[PrRef], now: Instant) -> Effects {
+        let mut fx = Effects::default();
+        let Some((gh, accounts)) = self.ready() else {
+            return fx;
+        };
+        let mut by_repo: BTreeMap<RepoId, Vec<u32>> = BTreeMap::new();
+        for pr in prs {
+            let open = self
+                .repo(pr.repo)
+                .is_some_and(|r| r.prs.iter().any(|p| p.number == pr.number));
+            let recently = self
+                .pr_asked
+                .get(pr)
+                .is_some_and(|t| now.saturating_duration_since(*t) < ASK_END_AGAIN);
+            if !open && !self.pr_ends.contains_key(pr) && !recently {
+                by_repo.entry(pr.repo).or_default().push(pr.number);
+            }
+        }
+        for (repo, mut numbers) in by_repo {
+            numbers.sort_unstable();
+            numbers.dedup();
+            let Some(r) = self.repo(repo) else { continue };
+            let Some(account) = r
+                .account()
+                .and_then(|login| accounts.iter().find(|a| a.login == login).cloned())
+            else {
+                continue;
+            };
+            let (owner, name) = (r.stored.owner.clone(), r.stored.name.clone());
+            if !self.asking_ends.insert(repo) {
+                continue;
+            }
+            for n in &numbers {
+                self.pr_asked.insert(PrRef { repo, number: *n }, now);
+            }
+            fx.jobs.push(Job::PrEnds {
+                gh: gh.clone(),
+                repo,
+                account,
+                owner,
+                name,
+                numbers,
+            });
+        }
+        fx
+    }
+
+    /// A worktree made for `pr` is termist's: kept, shown, with its pull request.
+    fn keep_worktree(&self, pr: PrRef, path: &Path, store: &Store) {
+        let Some(r) = self.repo(pr.repo) else {
+            return;
+        };
+        let branch = r
+            .prs
+            .iter()
+            .find(|p| p.number == pr.number)
+            .or_else(|| self.cached(pr).map(|d| &d.summary))
+            .map(|p| p.head.clone());
+        let made = crate::store::StoredWorktree {
+            project: r.stored.project,
+            repo: Some(pr.repo),
+            path: path.to_path_buf(),
+            branch,
+            base: None,
+            pr: Some(pr.number),
+            made_by_termist: true,
+            shown: true,
+        };
+        if let Err(e) = store.upsert_worktree(&made) {
+            tracing::warn!(error = %e, "could not keep a worktree");
+        }
+    }
+
     fn worktree_done(
         &mut self,
         pr: PrRef,
@@ -1374,7 +1479,21 @@ impl GitHub {
                 };
                 self.to_diff_watchers(pr, event, &mut fx);
             }
-            Done::Worktree { pr, reply } => self.worktree_done(pr, reply, &mut fx),
+            Done::PrEnds { repo, ends } => {
+                self.asking_ends.remove(&repo);
+                // Only an end is kept for good; an open one is asked again later.
+                for (number, end) in ends.unwrap_or_default() {
+                    if let Some(end) = end {
+                        self.pr_ends.insert(PrRef { repo, number }, end);
+                    }
+                }
+            }
+            Done::Worktree { pr, reply } => {
+                if let Ok((path, true)) = &reply {
+                    self.keep_worktree(pr, path, store);
+                }
+                self.worktree_done(pr, reply, &mut fx);
+            }
             Done::Written {
                 pr,
                 client,
@@ -2861,6 +2980,58 @@ mod tests {
     }
 
     #[test]
+    fn how_a_pull_request_ended_is_asked_once_and_kept() {
+        let (mut w, pr) = looking(false);
+        let jobs = |fx: &Effects| -> Vec<Vec<u32>> {
+            fx.jobs
+                .iter()
+                .filter_map(|j| match j {
+                    Job::PrEnds { numbers, .. } => Some(numbers.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let now = w.now;
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr, pr], now)), [vec![212]]);
+        assert!(jobs(&w.gh.ask_pr_ends(&[pr], now)).is_empty(), "on its way");
+        w.done(Done::PrEnds {
+            repo: pr.repo,
+            ends: Ok(vec![(212, Some(termist_core::PrEnd::Merged))]),
+        });
+        assert_eq!(w.gh.pr_end(pr), Some(termist_core::PrEnd::Merged));
+        let later = now + std::time::Duration::from_secs(3600);
+        assert!(
+            jobs(&w.gh.ask_pr_ends(&[pr], later)).is_empty(),
+            "an end stays known"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_still_open_when_asked_is_asked_again_later() {
+        let (mut w, pr) = looking(false);
+        let jobs = |fx: &Effects| {
+            fx.jobs
+                .iter()
+                .filter(|j| matches!(j, Job::PrEnds { .. }))
+                .count()
+        };
+        let now = w.now;
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr], now)), 1);
+        w.done(Done::PrEnds {
+            repo: pr.repo,
+            ends: Ok(vec![(212, None)]),
+        });
+        assert_eq!(w.gh.pr_end(pr), None);
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr], now)), 0, "not at once");
+        let later = now + std::time::Duration::from_secs(11 * 60);
+        assert_eq!(
+            jobs(&w.gh.ask_pr_ends(&[pr], later)),
+            1,
+            "it may have merged since"
+        );
+    }
+
+    #[test]
     fn a_worktree_is_made_once_for_every_client_waiting_and_says_why_it_cannot() {
         let mut w = world(&["api"]);
         let nowhere = PrRef {
@@ -2919,6 +3090,18 @@ mod tests {
             pr,
             reply: Ok((path.clone(), true)),
         });
+        let kept = w.store.worktrees().unwrap();
+        assert_eq!(
+            (
+                kept[0].path.clone(),
+                kept[0].pr,
+                kept[0].made_by_termist,
+                kept[0].shown
+            ),
+            (path.clone(), Some(212), true, true),
+            "termist's, with its pull request"
+        );
+        assert_eq!(kept[0].branch.as_deref(), Some("fix/login"));
         let ready = ServerEvent::WorktreeReady {
             pr,
             path,

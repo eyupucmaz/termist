@@ -29,6 +29,10 @@ pub enum Overlay {
         text: String,
         picker: ListPicker<HandTo>,
     },
+    /// `Ctrl+T` in the quick prompt: where the task starts.
+    Target(ListPicker<TargetChoice>),
+    /// `W`: the project's worktrees, by folder.
+    Worktrees(ListPicker<std::path::PathBuf>),
     /// `Space`: the next instruction for a card's agent, sent without entering the card.
     FollowUp {
         session: SessionId,
@@ -292,6 +296,28 @@ pub struct QuickPrompt {
     /// The worktree the agent starts in and its branch (from `w`); `None` is the
     /// project's folder.
     pub worktree: Option<(std::path::PathBuf, String)>,
+    /// `Ctrl+N`: a new worktree, on a branch named from the prompt, in this repo.
+    pub new_worktree: Option<NewWorktree>,
+}
+
+/// A worktree to make for the task: in which repo (`repo@` before the branch where the
+/// project holds several), and the seed of a name when the prompt gives none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewWorktree {
+    pub repo: termist_core::github::RepoId,
+    pub repo_name: Option<String>,
+    pub seed: u64,
+}
+
+/// Where a task starts, as `Ctrl+T` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TargetChoice {
+    /// The project's own folder.
+    Folder,
+    /// A worktree: its folder and its branch (or folder) name.
+    Worktree(std::path::PathBuf, String),
+    /// A new worktree of a repo (named when the project holds several).
+    New(termist_core::github::RepoId, Option<String>),
 }
 
 impl QuickPrompt {
@@ -619,6 +645,7 @@ mod tests {
             project: ProjectId::new(),
             launch: launch(Harness::Claude, Some("opus"), Some("high")),
             worktree: None,
+            new_worktree: None,
         };
         q.set_harness(Harness::Codex);
         assert_eq!(q.launch, launch(Harness::Codex, None, Some("high")));

@@ -4,8 +4,9 @@ use crate::github::{self, Done, Effects, GitHub, To};
 use crate::launch::{LaunchRequest, Launcher};
 use crate::place::{self, GitFacts};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
-use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession};
+use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession, StoredWorktree};
 use crate::transcript::TranscriptTail;
+use crate::worktrees::Listed;
 use crate::{claude, codex, opencode};
 use anyhow::{Context, bail};
 use serde_json::Value;
@@ -35,6 +36,38 @@ const PLACES_ROUND: Duration = Duration::from_secs(30);
 
 /// What git said about a session folder, read on a blocking thread.
 pub struct PlaceRead(pub PathBuf, pub Option<GitFacts>);
+
+/// A repo's worktrees as a scan found them, each with what its branch changed; `None`
+/// when git could not list them.
+pub struct WorktreeScan {
+    pub project: ProjectId,
+    pub repo: termist_core::github::RepoId,
+    /// The worktrees' generation when the scan started (see `Registry::worktree_epoch`).
+    pub epoch: u64,
+    pub found: Option<Vec<(Listed, Option<termist_core::Stat>)>>,
+}
+
+/// A worktree made (or not) for a client's `CreateWorktree`.
+pub struct Made {
+    pub client: ClientId,
+    pub ticket: u64,
+    pub project: ProjectId,
+    pub repo: termist_core::github::RepoId,
+    pub branch: String,
+    /// What was made; or why not.
+    pub result: Result<crate::worktrees::Made, String>,
+    /// The repo's own folder: a branch open there is not a worktree to keep.
+    pub own: PathBuf,
+}
+
+/// A worktree removed (or not) for a client's `RemoveWorktree`: `Ok(Some(files))`
+/// when it has uncommitted changes and was left.
+pub struct Removed {
+    pub client: ClientId,
+    pub project: ProjectId,
+    pub path: PathBuf,
+    pub result: Result<Option<u32>, String>,
+}
 
 /// A rescan for missing CLIs can start a login shell; one per this window is enough.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -145,6 +178,23 @@ pub struct Registry {
     places_round: Option<std::time::Instant>,
     /// Runs git (a stand-in in tests).
     git: fn(&Path, &[&str]) -> Option<String>,
+    scans_tx: UnboundedSender<WorktreeScan>,
+    scans_rx: Option<UnboundedReceiver<WorktreeScan>>,
+    /// Repos whose worktrees are being read.
+    scanning: HashSet<termist_core::github::RepoId>,
+    /// Bumped when termist makes or removes a worktree: a scan started before saw
+    /// another list and must not undo it.
+    worktree_epoch: u64,
+    /// What each worktree's branch changed, as last read.
+    worktree_stats: HashMap<PathBuf, termist_core::Stat>,
+    /// Each project's worktrees as last sent.
+    worktrees_sent: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
+    made_tx: UnboundedSender<Made>,
+    made_rx: Option<UnboundedReceiver<Made>>,
+    /// Fetches before a new branch is made (a stand-in in tests).
+    fetch: fn(&Path, &[&str]) -> Result<String, String>,
+    removed_tx: UnboundedSender<Removed>,
+    removed_rx: Option<UnboundedReceiver<Removed>>,
 }
 
 impl Registry {
@@ -180,6 +230,9 @@ impl Registry {
         let github = GitHub::new(&store);
         let (github_tx, github_rx) = tokio::sync::mpsc::unbounded_channel();
         let (places_tx, places_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (scans_tx, scans_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (made_tx, made_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (removed_tx, removed_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
         let locate: Locate = Arc::new(move || {
             let program = gh_bin
@@ -223,6 +276,17 @@ impl Registry {
             places_reading: HashSet::new(),
             places_round: None,
             git: crate::github::repos::git,
+            scans_tx,
+            scans_rx: Some(scans_rx),
+            scanning: HashSet::new(),
+            worktree_epoch: 0,
+            worktree_stats: HashMap::new(),
+            worktrees_sent: HashMap::new(),
+            made_tx,
+            made_rx: Some(made_rx),
+            fetch: crate::worktrees::fetch,
+            removed_tx,
+            removed_rx: Some(removed_rx),
         }
     }
 
@@ -263,6 +327,335 @@ impl Registry {
         for cwd in cwds {
             self.read_place(cwd);
         }
+        self.scan_worktrees();
+    }
+
+    /// Reads every open project's repos' worktrees on blocking threads; `worktrees_scanned`
+    /// takes each answer.
+    fn scan_worktrees(&mut self) {
+        let kept = self.store.worktrees().unwrap_or_default();
+        // The pull requests kept worktrees were on: how the ones no longer open ended.
+        let prs: Vec<termist_core::github::PrRef> = kept
+            .iter()
+            .filter_map(|w| {
+                Some(termist_core::github::PrRef {
+                    repo: w.repo?,
+                    number: w.pr?,
+                })
+            })
+            .collect();
+        let fx = self.github.ask_pr_ends(&prs, std::time::Instant::now());
+        self.github_effects(fx);
+        let bases: HashMap<PathBuf, String> = kept
+            .into_iter()
+            .filter_map(|w| Some((w.path, w.base?)))
+            .collect();
+        for p in self.projects.iter().filter(|p| p.open) {
+            for view in self.github.repo_views(p.id) {
+                if !self.scanning.insert(view.id) {
+                    continue;
+                }
+                let (tx, bases, own) = (self.scans_tx.clone(), bases.clone(), p.path.clone());
+                let (project, repo, path) = (p.id, view.id, view.path.clone());
+                let epoch = self.worktree_epoch;
+                tokio::task::spawn_blocking(move || {
+                    let base = |w: &Path| bases.get(w).cloned();
+                    let found =
+                        crate::worktrees::scan(&path, &own, &base, &crate::github::worktree::git);
+                    let _ = tx.send(WorktreeScan {
+                        project,
+                        repo,
+                        epoch,
+                        found,
+                    });
+                });
+            }
+        }
+    }
+
+    /// Keeps what a scan found: new worktrees are added (shown when an open pull request
+    /// has their branch), ones git no longer lists are dropped.
+    pub fn worktrees_scanned(&mut self, scan: WorktreeScan) {
+        self.scanning.remove(&scan.repo);
+        if scan.epoch != self.worktree_epoch {
+            // It read the list before a worktree was made or removed: read it again.
+            self.scan_worktrees();
+            return;
+        }
+        let Some(found) = scan.found else {
+            return;
+        };
+        let kept: Vec<StoredWorktree> = self
+            .store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| w.project == scan.project && w.repo == Some(scan.repo))
+            .collect();
+        let open: HashSet<String> = self
+            .github
+            .repo_views(scan.project)
+            .into_iter()
+            .filter(|v| v.id == scan.repo)
+            .flat_map(|v| v.prs.into_iter().map(|(_, head, _)| head))
+            .collect();
+        for (listed, stat) in &found {
+            let known = kept.iter().any(|w| w.path == listed.path);
+            let fresh = StoredWorktree {
+                project: scan.project,
+                repo: Some(scan.repo),
+                path: listed.path.clone(),
+                branch: listed.branch.clone(),
+                base: None,
+                pr: None,
+                made_by_termist: false,
+                shown: !known && listed.branch.as_ref().is_some_and(|b| open.contains(b)),
+            };
+            if let Err(e) = self.store.upsert_worktree(&fresh) {
+                tracing::warn!(error = %e, "could not keep a worktree");
+            }
+            match stat {
+                Some(stat) => self.worktree_stats.insert(listed.path.clone(), *stat),
+                None => self.worktree_stats.remove(&listed.path),
+            };
+        }
+        for gone in kept
+            .iter()
+            .filter(|w| !found.iter().any(|(l, _)| l.path == w.path))
+        {
+            if let Err(e) = self.store.delete_worktree(&gone.path) {
+                tracing::warn!(error = %e, "could not forget a worktree");
+            }
+            self.worktree_stats.remove(&gone.path);
+        }
+        self.send_worktrees(scan.project);
+    }
+
+    /// Makes a worktree on a blocking thread; `worktree_made` answers the client.
+    fn create_worktree(
+        &mut self,
+        client: ClientId,
+        project: ProjectId,
+        repo: termist_core::github::RepoId,
+        branch: String,
+        ticket: u64,
+    ) {
+        let Some(view) = self
+            .github
+            .repo_views(project)
+            .into_iter()
+            .find(|v| v.id == repo)
+        else {
+            self.send(
+                client,
+                ServerEvent::WorktreeNotMade {
+                    ticket,
+                    message: "couldn't make a worktree · not loaded yet".into(),
+                },
+            );
+            return;
+        };
+        let (tx, fetch) = (self.made_tx.clone(), self.fetch);
+        tokio::task::spawn_blocking(move || {
+            let result = crate::worktrees::create(
+                &view.path,
+                &branch,
+                &crate::github::worktree::git,
+                &fetch,
+            );
+            let _ = tx.send(Made {
+                client,
+                ticket,
+                project,
+                repo,
+                branch,
+                result,
+                own: view.path,
+            });
+        });
+    }
+
+    /// Keeps the worktree made, tells the client, and reads the worktrees again.
+    pub fn worktree_made(&mut self, m: Made) {
+        match m.result {
+            Ok(crate::worktrees::Made {
+                path,
+                branch,
+                base,
+                note,
+            }) => {
+                // A branch already open in the repo's own folder is no worktree to keep.
+                self.worktree_epoch += 1;
+                if place::resolved(&path) != place::resolved(&m.own) {
+                    let made = StoredWorktree {
+                        project: m.project,
+                        repo: Some(m.repo),
+                        path: path.clone(),
+                        branch: Some(branch.clone()),
+                        base: Some(base),
+                        pr: None,
+                        made_by_termist: true,
+                        shown: true,
+                    };
+                    if let Err(e) = self.store.upsert_worktree(&made) {
+                        tracing::warn!(error = %e, "could not keep a worktree");
+                    }
+                }
+                self.send(
+                    m.client,
+                    ServerEvent::WorktreeMade {
+                        ticket: m.ticket,
+                        path,
+                        branch,
+                        note,
+                    },
+                );
+                self.send_worktrees(m.project);
+                self.scan_worktrees();
+            }
+            Err(why) => self.send(
+                m.client,
+                ServerEvent::WorktreeNotMade {
+                    ticket: m.ticket,
+                    message: format!("couldn't make a worktree · {why}"),
+                },
+            ),
+        }
+    }
+
+    /// Removes a worktree termist keeps, on a blocking thread: never a repo's or a
+    /// project's own folder, never one a live card runs in.
+    fn remove_worktree(
+        &mut self,
+        client: ClientId,
+        path: PathBuf,
+        force: bool,
+    ) -> Result<(), String> {
+        let kept = self.store.worktrees().unwrap_or_default();
+        let w = kept
+            .iter()
+            .find(|w| w.path == path)
+            .ok_or("not a worktree termist knows of")?;
+        let view = self
+            .github
+            .repo_views(w.project)
+            .into_iter()
+            .find(|v| Some(v.id) == w.repo)
+            .ok_or("its repo is not loaded yet")?;
+        let here = place::resolved(&path);
+        let own = self
+            .projects
+            .iter()
+            .any(|p| place::resolved(&p.path) == here)
+            || place::resolved(&view.path) == here
+            || view.main == here;
+        if own {
+            return Err("the project's own folder is not a worktree".into());
+        }
+        let inside = |cwd: &Path| place::resolved(cwd).starts_with(&here);
+        if self
+            .sessions
+            .iter()
+            .any(|s| s.info.status.is_live() && inside(&s.info.cwd))
+        {
+            return Err("stop its cards first".into());
+        }
+        let (tx, project) = (self.removed_tx.clone(), w.project);
+        tokio::task::spawn_blocking(move || {
+            let result =
+                crate::worktrees::remove(&view.path, &path, force, &crate::github::worktree::git);
+            let _ = tx.send(Removed {
+                client,
+                project,
+                path,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    /// The worktree is gone: forgotten, its stopped cards archived; or why not.
+    pub fn worktree_removed(&mut self, r: Removed) {
+        match r.result {
+            Ok(Some(files)) => self.send(
+                r.client,
+                ServerEvent::RemoveRefused {
+                    path: r.path,
+                    files,
+                },
+            ),
+            Ok(None) => {
+                self.worktree_epoch += 1;
+                if let Err(e) = self.store.delete_worktree(&r.path) {
+                    tracing::warn!(error = %e, "could not forget a worktree");
+                }
+                self.worktree_stats.remove(&r.path);
+                // Its cards that stopped: their records stay, out of the grid.
+                let inside = |cwd: &Path| cwd.starts_with(&r.path);
+                let cards: Vec<SessionId> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| !s.info.archived && !s.info.status.is_live() && inside(&s.info.cwd))
+                    .map(|s| s.info.id)
+                    .collect();
+                for id in cards {
+                    if let Some(s) = self.session_mut(id) {
+                        s.info.archived = true;
+                    }
+                    self.updated(id);
+                }
+                self.send(r.client, ServerEvent::WorktreeRemoved { path: r.path });
+                self.send_worktrees(r.project);
+                self.scan_worktrees();
+            }
+            Err(why) => {
+                let name = r
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.send(
+                    r.client,
+                    ServerEvent::RemoveFailed {
+                        path: r.path,
+                        message: format!("couldn't remove {name} · {why}"),
+                    },
+                );
+            }
+        }
+    }
+
+    /// The project's worktrees as kept, with what each changed.
+    fn worktree_infos(&self, project: ProjectId) -> Vec<termist_core::WorktreeInfo> {
+        self.store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| w.project == project)
+            .map(|w| termist_core::WorktreeInfo {
+                pr_end: w.repo.zip(w.pr).and_then(|(repo, number)| {
+                    let pr = termist_core::github::PrRef { repo, number };
+                    Some((number, self.github.pr_end(pr)?))
+                }),
+                stat: self.worktree_stats.get(&w.path).copied(),
+                path: w.path,
+                repo: w.repo,
+                branch: w.branch,
+                base: w.base,
+                made_by_termist: w.made_by_termist,
+                shown: w.shown,
+            })
+            .collect()
+    }
+
+    /// Sends the project's worktrees to every client when they changed.
+    fn send_worktrees(&mut self, project: ProjectId) {
+        let list = self.worktree_infos(project);
+        if self.worktrees_sent.get(&project) == Some(&list) {
+            return;
+        }
+        self.worktrees_sent.insert(project, list.clone());
+        self.broadcast(ServerEvent::Worktrees { project, list });
     }
 
     /// Each session's place from what git said and the pull requests last read (those
@@ -287,7 +680,33 @@ impl Registry {
             }
         }
         for info in changed {
+            self.note_worktree_pr(&info);
             self.broadcast(ServerEvent::SessionUpdated(info));
+        }
+    }
+
+    /// A card on a kept worktree's branch names its pull request: kept, so the band can
+    /// say it merged once it is no longer open.
+    fn note_worktree_pr(&mut self, info: &SessionInfo) {
+        let Some((root, number)) = info
+            .place
+            .as_ref()
+            .and_then(|p| Some((p.root.clone(), p.pr?.number)))
+        else {
+            return;
+        };
+        let kept = self.store.worktrees().unwrap_or_default();
+        let Some(w) = kept
+            .iter()
+            .find(|w| place::resolved(&w.path) == place::resolved(&root))
+        else {
+            return;
+        };
+        if w.pr != Some(number) {
+            if let Err(e) = self.store.set_worktree_pr(&w.path, number) {
+                tracing::warn!(error = %e, "could not keep the worktree's pull request");
+            }
+            self.send_worktrees(w.project);
         }
     }
 
@@ -440,13 +859,32 @@ impl Registry {
 
     /// A GitHub job finished; what it found may start the next step at once.
     pub fn github_done(&mut self, done: Done) {
+        // `w` made a worktree: a scan already on its way saw the list without it.
+        if matches!(
+            &done,
+            Done::Worktree {
+                reply: Ok((_, true)),
+                ..
+            }
+        ) {
+            self.worktree_epoch += 1;
+        }
         let fx = self
             .github
             .done(done, std::time::Instant::now(), &self.store, &self.projects);
         self.github_effects(fx);
         self.github_tick();
-        // A new list of pull requests may name a session's branch.
+        // A new list of pull requests may name a session's branch, or end one.
         self.refresh_places(None);
+        let open: Vec<ProjectId> = self
+            .projects
+            .iter()
+            .filter(|p| p.open)
+            .map(|p| p.id)
+            .collect();
+        for project in open {
+            self.send_worktrees(project);
+        }
     }
 
     pub fn note(&mut self, note: SessionNote) {
@@ -530,6 +968,20 @@ impl Registry {
                 }
                 let fx = self.github.snapshot(To::One(client), &self.projects);
                 self.github_effects(fx);
+                // A new client knows of no worktree: only projects that have some.
+                for p in &self.projects {
+                    let list = self.worktree_infos(p.id);
+                    if list.is_empty() {
+                        continue;
+                    }
+                    self.send(
+                        client,
+                        ServerEvent::Worktrees {
+                            project: p.id,
+                            list,
+                        },
+                    );
+                }
             }
             ClientRequest::AddProject { path } => match self.add_project(path) {
                 Ok(()) => self.broadcast(ServerEvent::State(self.state())),
@@ -705,6 +1157,27 @@ impl Registry {
                 );
                 self.github_effects(fx);
                 self.github_tick();
+            }
+            // Worktrees of their own come with the next steps of this change.
+            ClientRequest::CreateWorktree {
+                project,
+                repo,
+                branch,
+                ticket,
+            } => self.create_worktree(client, project, repo, branch, ticket),
+            ClientRequest::SetWorktreeShown { path, shown } => {
+                let kept = self.store.worktrees().unwrap_or_default();
+                if let Some(w) = kept.iter().find(|w| w.path == path) {
+                    if let Err(e) = self.store.set_worktree_shown(&path, shown) {
+                        tracing::warn!(error = %e, "could not keep the worktree's choice");
+                    }
+                    self.send_worktrees(w.project);
+                }
+            }
+            ClientRequest::RemoveWorktree { path, force } => {
+                if let Err(why) = self.remove_worktree(client, path.clone(), force) {
+                    self.send(client, ServerEvent::RemoveFailed { path, message: why });
+                }
             }
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
@@ -1393,6 +1866,9 @@ pub async fn run(
     let mut catalogs = reg.catalog_rx.take().expect("a registry runs once");
     let mut github = reg.github_rx.take().expect("a registry runs once");
     let mut places = reg.places_rx.take().expect("a registry runs once");
+    let mut scans = reg.scans_rx.take().expect("a registry runs once");
+    let mut made = reg.made_rx.take().expect("a registry runs once");
+    let mut removed = reg.removed_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
     github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -1406,6 +1882,9 @@ pub async fn run(
             Some(c) = catalogs.recv() => reg.catalog_read(c, std::time::Instant::now()),
             Some(done) = github.recv() => reg.github_done(done),
             Some(read) = places.recv() => reg.place_read(read),
+            Some(scan) = scans.recv() => reg.worktrees_scanned(scan),
+            Some(m) = made.recv() => reg.worktree_made(m),
+            Some(r) = removed.recv() => reg.worktree_removed(r),
             _ = github_beat.tick() => {
                 reg.github_tick();
                 reg.places_tick(std::time::Instant::now());
@@ -2036,6 +2515,369 @@ mod tests {
             reg.git_facts[&worktree].clone(),
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_scan_keeps_new_worktrees_drops_gone_ones_and_says_so_once() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let made = PathBuf::from("/w/site-worktrees/fix");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: made.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        let listed = |path: &PathBuf, branch: &str| Listed {
+            path: path.clone(),
+            branch: Some(branch.into()),
+            main: false,
+        };
+        let outside = PathBuf::from("/w/site/.claude/worktrees/x");
+        let stat = termist_core::Stat {
+            files: 3,
+            added: 60,
+            removed: 28,
+            dirty: true,
+        };
+        let scan = |found: Vec<(Listed, Option<termist_core::Stat>)>| WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            epoch: 0,
+            found: Some(found),
+        };
+        reg.worktrees_scanned(scan(vec![
+            (listed(&made, "fix"), Some(stat)),
+            (listed(&outside, "x"), None),
+        ]));
+        let sent = |rx: &mut UnboundedReceiver<ServerEvent>| {
+            let mut out = vec![];
+            while let Ok(ServerEvent::Worktrees { list, .. }) = rx.try_recv() {
+                out.push(list);
+            }
+            out
+        };
+        let lists = sent(&mut rx);
+        assert_eq!(lists.len(), 1);
+        let list = &lists[0];
+        assert_eq!(
+            (
+                list[0].path.clone(),
+                list[0].made_by_termist,
+                list[0].shown,
+                list[0].stat
+            ),
+            (made.clone(), true, true, Some(stat))
+        );
+        assert_eq!(
+            (list[1].path.clone(), list[1].made_by_termist, list[1].shown),
+            (outside.clone(), false, false),
+            "found outside termist: hidden"
+        );
+        reg.worktrees_scanned(scan(vec![
+            (listed(&made, "fix"), Some(stat)),
+            (listed(&outside, "x"), None),
+        ]));
+        assert!(sent(&mut rx).is_empty(), "nothing changed: nothing sent");
+        reg.worktrees_scanned(scan(vec![(listed(&made, "fix"), Some(stat))]));
+        let lists = sent(&mut rx);
+        assert_eq!(lists[0].len(), 1, "the one git no longer lists is gone");
+        assert_eq!(reg.store.worktrees().unwrap().len(), 1);
+        reg.worktrees_scanned(WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            epoch: 0,
+            found: None,
+        });
+        assert_eq!(
+            reg.store.worktrees().unwrap().len(),
+            1,
+            "a failed scan forgets nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_worktree_makes_one_beside_the_repo_and_keeps_it_as_termist_s() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.clone(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &site, "acme", "site").unwrap();
+        let mut reg = registry_on(store);
+        reg.fetch = |_, _| Err("offline".into());
+        let mut made = reg.made_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        let ask = |repo, ticket| ClientRequest::CreateWorktree {
+            project: p.id,
+            repo,
+            branch: "fix-login".into(),
+            ticket,
+        };
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ask(termist_core::github::RepoId(99), 1),
+        });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerEvent::WorktreeNotMade {
+                ticket: 1,
+                message: "couldn't make a worktree · not loaded yet".into()
+            }
+        );
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ask(repo.id, 2),
+        });
+        let m = made.recv().await.unwrap();
+        reg.worktree_made(m);
+        let want = place::resolved(tmp.path())
+            .join("site-worktrees")
+            .join("fix-login");
+        match rx.try_recv().unwrap() {
+            ServerEvent::WorktreeMade {
+                ticket, path, note, ..
+            } => {
+                assert_eq!((ticket, place::resolved(&path)), (2, want.clone()));
+                assert_eq!(
+                    note.as_deref(),
+                    Some("made from local main: no fetch from origin")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let ServerEvent::Worktrees { list, .. } = rx.try_recv().unwrap() else {
+            panic!("the worktrees")
+        };
+        assert_eq!(list.len(), 1);
+        assert!(list[0].made_by_termist && list[0].shown);
+        assert_eq!(list[0].base.as_deref(), Some("main"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_is_removed_only_when_nothing_of_it_would_be_lost_unasked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let fix = tmp.path().join("site-worktrees").join("fix");
+        run_git(
+            &site,
+            &["worktree", "add", "-q", "-b", "fix", fix.to_str().unwrap()],
+        );
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.clone(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &site, "acme", "site").unwrap();
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: fix.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut stopped = stored(&p, "shell-1");
+        stopped.cwd = fix.join("src");
+        let mut live = stored(&p, "claude-2");
+        live.cwd = fix.clone();
+        store.upsert_session(&stopped, false).unwrap();
+        store.upsert_session(&live, false).unwrap();
+        let mut reg = registry_on(store);
+        let mut removed = reg.removed_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        let ask = |reg: &mut Registry, path: &Path, force| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::RemoveWorktree {
+                    path: path.to_path_buf(),
+                    force,
+                },
+            })
+        };
+        let failed = |rx: &mut UnboundedReceiver<ServerEvent>| match rx.try_recv() {
+            Ok(ServerEvent::RemoveFailed { message, .. }) => message,
+            other => panic!("{other:?}"),
+        };
+        ask(&mut reg, &site, false);
+        assert_eq!(failed(&mut rx), "not a worktree termist knows of");
+        reg.session_mut(live.id).unwrap().info.status = AgentStatus::Running;
+        ask(&mut reg, &fix, false);
+        assert_eq!(failed(&mut rx), "stop its cards first");
+        reg.session_mut(live.id).unwrap().info.status = AgentStatus::Disconnected;
+        std::fs::write(fix.join("notes.txt"), "half done").unwrap();
+        ask(&mut reg, &fix, false);
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerEvent::RemoveRefused {
+                path: fix.clone(),
+                files: 1
+            }
+        );
+        assert!(fix.is_dir(), "asked first");
+        ask(&mut reg, &fix, true);
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        let mut events = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(events.contains(&ServerEvent::WorktreeRemoved { path: fix.clone() }));
+        assert!(!fix.exists(), "the folder is gone");
+        let branch = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&site)
+            .args(["branch", "--list", "fix"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branch.stdout).contains("fix"),
+            "the branch stays"
+        );
+        assert!(reg.store.worktrees().unwrap().is_empty());
+        assert!(
+            reg.session(stopped.id).unwrap().info.archived,
+            "its stopped cards archived"
+        );
+        assert!(reg.session(live.id).unwrap().info.archived);
+    }
+
+    #[test]
+    fn a_card_on_a_kept_worktree_names_its_pull_request_for_later() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let path = PathBuf::from("/w/site-worktrees/fix");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: path.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut card = stored(&p, "claude-1");
+        card.place = Some(Box::new(termist_core::Place {
+            root: path.clone(),
+            branch: Some("fix".into()),
+            commit: None,
+            repo: Some(repo.id),
+            pr: Some(termist_core::github::PrRef {
+                repo: repo.id,
+                number: 212,
+            }),
+            gone: false,
+        }));
+        reg.note_worktree_pr(&card);
+        assert_eq!(reg.store.worktrees().unwrap()[0].pr, Some(212));
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_started_before_a_worktree_was_made_or_removed_changes_nothing() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let made = PathBuf::from("/w/site-worktrees/new");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: made.clone(),
+                branch: Some("new".into()),
+                base: Some("origin/main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        reg.worktree_epoch = 1; // a worktree was made after the scan below started
+        reg.scanning.insert(repo.id);
+        reg.worktrees_scanned(WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            epoch: 0,
+            found: Some(vec![]),
+        });
+        assert_eq!(
+            reg.store.worktrees().unwrap().len(),
+            1,
+            "the new worktree is not dropped by a list read before it existed"
+        );
+        assert!(reg.scanning.contains(&repo.id), "read again at once");
+    }
+
+    #[test]
+    fn a_worktree_shown_or_hidden_is_kept_and_sent() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let path = PathBuf::from("/w/site/.claude/worktrees/x");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: None,
+                path: path.clone(),
+                branch: Some("x".into()),
+                base: None,
+                pr: None,
+                made_by_termist: false,
+                shown: false,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::SetWorktreeShown {
+                path: path.clone(),
+                shown: true,
+            },
+        });
+        assert!(reg.store.worktrees().unwrap()[0].shown);
+        let Ok(ServerEvent::Worktrees { list, .. }) = rx.try_recv() else {
+            panic!("the worktrees again")
+        };
+        assert!(list[0].shown);
     }
 
     #[test]

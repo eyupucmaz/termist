@@ -71,6 +71,35 @@ pub fn permissions(repos: &[(String, String)]) -> String {
     format!("query {{\n{}}}\n", per_repo(repos, "viewerPermission"))
 }
 
+/// How each of `numbers` stands now, in one repo: `pN { state }`.
+pub fn pr_states(owner: &str, name: &str, numbers: &[u32]) -> String {
+    let asks: String = numbers
+        .iter()
+        .map(|n| format!("    p{n}: pullRequest(number: {n}) {{ state }}\n"))
+        .collect();
+    format!(
+        "query {{\n  repository(owner: {}, name: {}) {{\n{asks}  }}\n}}\n",
+        quoted(owner),
+        quoted(name)
+    )
+}
+
+/// Each number's end, if it ended: `None` while open, or when GitHub says nothing of it.
+pub fn parse_pr_states(v: &Value, numbers: &[u32]) -> Vec<(u32, Option<termist_core::PrEnd>)> {
+    numbers
+        .iter()
+        .map(|n| {
+            let state = v["data"]["repository"][format!("p{n}").as_str()]["state"].as_str();
+            let end = match state {
+                Some("MERGED") => Some(termist_core::PrEnd::Merged),
+                Some("CLOSED") => Some(termist_core::PrEnd::Closed),
+                _ => None,
+            };
+            (*n, end)
+        })
+        .collect()
+}
+
 pub fn counts(repos: &[(String, String)]) -> String {
     format!(
         "query {{\n{}}}\n",
@@ -453,6 +482,25 @@ pub mod tests {
         assert!(q.contains(r#"r1: repository(owner: "ac\"me", name: "gone")"#));
         assert!(q.contains("pullRequests(states: OPEN, first: 50"));
         assert!(q.contains("...PrFields"));
+    }
+
+    #[test]
+    fn the_end_of_pull_requests_no_longer_open_is_asked_by_number() {
+        let q = pr_states("acme", "si\"te", &[212, 198]);
+        assert!(q.contains("repository(owner: \"acme\", name: \"si\\\"te\")"));
+        assert!(q.contains("p212: pullRequest(number: 212) { state }"));
+        let v = json(
+            r#"{"data":{"repository":{"p212":{"state":"MERGED"},"p198":{"state":"CLOSED"},"p7":{"state":"OPEN"}}}}"#,
+        );
+        assert_eq!(
+            parse_pr_states(&v, &[212, 198, 7, 9]),
+            [
+                (212, Some(termist_core::PrEnd::Merged)),
+                (198, Some(termist_core::PrEnd::Closed)),
+                (7, None),
+                (9, None)
+            ]
+        );
     }
 
     #[test]

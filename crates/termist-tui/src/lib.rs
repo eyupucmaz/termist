@@ -13,6 +13,7 @@ pub mod run;
 pub mod scene_view;
 pub mod selection;
 pub mod settings;
+pub mod slug;
 pub mod sound;
 pub mod status_line;
 pub mod text_input;

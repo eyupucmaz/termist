@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Worktrees of their own, for agents that work in parallel.
+
+### Added
+
+- **A new worktree for a task.** In the new-task prompt `Ctrl+N` makes a worktree on a branch named
+  from the prompt, off the repo's default branch (fetched first when it can be), beside the repo, and
+  starts the agent in it. `Ctrl+T` picks where the task starts: the project's folder, a worktree, or a
+  new one. `[agents] new_worktree_by_default` opens the prompt with `Ctrl+N` on.
+- **`P`** starts a task like the selected card's: its agent, model, effort and worktree. `n` and `t`
+  start in the selected card's worktree.
+- **Bands say what their branch changed** since it left its base (`3 files +60 −28`, `●` while some of
+  it is not committed), and that its pull request merged or closed.
+- **`W`** lists every worktree of the project's repos, those made outside termist too; one can be shown
+  as a band with no cards, where `n`, `t` and `Enter` start something. **`X`** removes a worktree once
+  its cards are stopped, after asking (twice if it has uncommitted changes); the branch stays.
+
+### Updating
+
+This version changes how the TUI and the daemon talk, and what the daemon keeps. Run `termist update`,
+then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.2.0 - 2026-10-07
 
 From a pull request to an agent: its branch in a worktree, its review comments to the agent working

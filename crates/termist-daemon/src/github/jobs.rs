@@ -96,6 +96,22 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             reply: files::fetch(&*gh.0, &account.token, &want),
             head_oid: want.head_oid,
         },
+        Job::PrEnds {
+            gh,
+            repo,
+            account,
+            owner,
+            name,
+            numbers,
+        } => Done::PrEnds {
+            repo,
+            ends: gh::graphql(
+                &*gh.0,
+                &account.token,
+                &query::pr_states(&owner, &name, &numbers),
+            )
+            .map(|v| query::parse_pr_states(&v, &numbers)),
+        },
         Job::Worktree {
             gh,
             pr,
@@ -175,6 +191,10 @@ pub fn failed(job: &Job) -> Done {
             pr: *pr,
             head_oid: want.head_oid.clone(),
             reply: Err(why()),
+        },
+        Job::PrEnds { repo, .. } => Done::PrEnds {
+            repo: *repo,
+            ends: Err(why()),
         },
         Job::Worktree { pr, .. } => Done::Worktree {
             pr: *pr,

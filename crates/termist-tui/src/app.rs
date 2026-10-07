@@ -1,3 +1,4 @@
+use crate::bands::Slot;
 use crate::browse::Listing;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
@@ -58,6 +59,11 @@ pub enum Mode {
     ConfirmArchive(SessionId),
     /// `D` was pressed on a comment of yours (`App::deleting`); `y` / Enter deletes it.
     ConfirmDelete,
+    /// `X` was pressed on a worktree (`App::removing`); `y` / Enter removes it. `files`
+    /// it has uncommitted changes in, once the daemon said so (then they go too).
+    ConfirmRemove {
+        files: u32,
+    },
 }
 
 /// What the body shows: the grid of cards, the archived cards, or pull requests.
@@ -104,6 +110,15 @@ pub struct App {
     pub state: StateSnapshot,
     pub project: Option<ProjectId>,
     pub selected: Option<SessionId>,
+    /// The stand-in of a band with no cards, selected when no card is (its folder).
+    pub empty: Option<PathBuf>,
+    /// The worktree `X` asked to remove, until the daemon answers.
+    removing: Option<PathBuf>,
+    /// Tasks waiting for their new worktrees, by `CreateWorktree` ticket: what to start
+    /// once each is made.
+    task_for: HashMap<u64, QuickPrompt>,
+    /// Each project's worktrees, as the daemon last sent them.
+    pub worktrees: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
     pub mode: Mode,
     pub screens: HashMap<SessionId, Snapshot>,
     pub attached: Option<SessionId>,
@@ -254,6 +269,10 @@ impl App {
             state: StateSnapshot::default(),
             project: None,
             selected: None,
+            empty: None,
+            removing: None,
+            task_for: HashMap::new(),
+            worktrees: HashMap::new(),
             mode: Mode::Grid,
             screens: HashMap::new(),
             attached: None,
@@ -741,6 +760,50 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
+            ServerEvent::Worktrees { project, list } => {
+                self.worktrees.insert(project, list);
+                self.repair_selection();
+                if matches!(self.overlays.last(), Some(Overlay::Worktrees(_))) {
+                    self.open_worktrees();
+                }
+            }
+            ServerEvent::WorktreeMade {
+                ticket,
+                path,
+                branch,
+                note,
+            } => {
+                if let Some(mut q) = self.task_for.remove(&ticket) {
+                    self.message = note;
+                    q.new_worktree = None;
+                    q.worktree = Some((path, branch));
+                    return self.start_task(q);
+                }
+            }
+            ServerEvent::WorktreeNotMade { ticket, message } => {
+                if let Some(q) = self.task_for.remove(&ticket) {
+                    // The words come back, with why.
+                    self.message = Some(message);
+                    self.overlays.push(Overlay::QuickPrompt(q));
+                }
+            }
+            ServerEvent::RemoveRefused { path, files } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.mode = Mode::ConfirmRemove { files };
+                }
+            }
+            ServerEvent::WorktreeRemoved { path } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.removing = None;
+                    self.message = Some(format!("removed {} · the branch stays", short(&path)));
+                }
+            }
+            ServerEvent::RemoveFailed { path, message } => {
+                if self.removing.as_ref() == Some(&path) {
+                    self.removing = None;
+                    self.message = Some(message);
+                }
+            }
             ServerEvent::WorktreeReady { pr, path, .. } => {
                 // Only the one asked for; another client's answer leaves it waiting.
                 if self
@@ -898,6 +961,19 @@ impl App {
                 }
                 return vec![];
             }
+            Mode::ConfirmRemove { files } => {
+                self.mode = Mode::Grid;
+                if let Some(path) = self.removing.clone()
+                    && matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+                {
+                    return vec![Action::Send(ClientRequest::RemoveWorktree {
+                        path,
+                        force: files > 0,
+                    })];
+                }
+                self.removing = None;
+                return vec![];
+            }
             Mode::ConfirmDelete => {
                 self.mode = Mode::Grid;
                 let deleting = self.deleting.take();
@@ -1036,14 +1112,25 @@ impl App {
                 if self.overlays.is_empty()
                     && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
                 {
-                    let (card, more, band_pr) = {
+                    let (card, more, band_pr, empty) = {
                         let hits = self.hits.borrow();
                         (
                             hits.card_at(ev.column, ev.row),
                             hits.more_at(ev.column, ev.row),
                             hits.band_pr_at(ev.column, ev.row),
+                            hits.empty_at(ev.column, ev.row),
                         )
                     };
+                    if let Some(path) = empty {
+                        // A second click on a band's stand-in starts a task there.
+                        let again = self.selected.is_none() && self.empty.as_ref() == Some(&path);
+                        self.mode = Mode::Grid;
+                        self.set_slot(Slot::Empty(path));
+                        if again {
+                            return self.start_in_empty();
+                        }
+                        return self.sync_attachment();
+                    }
                     if let (Some(pr), Some(project)) = (band_pr, self.project) {
                         return self.reveal_pr(project, pr);
                     }
@@ -1284,10 +1371,15 @@ impl App {
         };
         self.focus_next_created = true;
         let (cols, rows) = self.pane;
+        // In the worktree of the selection: a band's stand-in, else the card's.
+        let cwd = self
+            .empty_worktree()
+            .or_else(|| self.card_worktree())
+            .map(|(path, _)| path);
         vec![Action::Send(ClientRequest::CreateSession {
             project,
             kind,
-            cwd: None,
+            cwd,
             prompt: None,
             model: None,
             effort: None,
@@ -1490,6 +1582,8 @@ impl App {
             Some(Overlay::Model(_)) => self.model_key(key),
             Some(Overlay::ModelName(_)) => self.model_name_key(key),
             Some(Overlay::Project(_)) => self.project_key(key),
+            Some(Overlay::Target(_)) => self.target_key(key),
+            Some(Overlay::Worktrees(_)) => self.worktrees_key(key),
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
             Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
@@ -1577,7 +1671,351 @@ impl App {
         let text = self.prompt_draft.clone().unwrap_or_default();
         // A task of its own: what it sends is not review threads.
         self.hand_for = None;
-        self.quick_prompt_in(project, &text, None)
+        // Where the selection is: its worktree, else the project's folder.
+        let target = self.empty_worktree().or_else(|| self.card_worktree());
+        let actions = self.quick_prompt_in(project, &text, target.clone());
+        if target.is_none()
+            && self.config.agents.new_worktree_by_default
+            && let Some(new) = self.new_worktree()
+            && let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut()
+        {
+            q.new_worktree = Some(new);
+        }
+        actions
+    }
+
+    /// `Ctrl+T`: the project's folder, its worktrees (hidden ones too), and a new
+    /// worktree in each repo.
+    fn target_picker(&self, project: ProjectId) -> ListPicker<overlay::TargetChoice> {
+        use overlay::TargetChoice;
+        let name = self
+            .state
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map_or_else(String::new, |p| p.name.clone());
+        let repos = self
+            .prs
+            .get(&project)
+            .map(|d| d.repos.as_slice())
+            .unwrap_or(&[]);
+        let several = repos.len() > 1;
+        let worktrees = self
+            .worktrees
+            .get(&project)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut items = vec![TargetChoice::Folder];
+        let mut labels = vec![format!("{name} · the project's folder")];
+        for w in worktrees {
+            let branch = w.branch.clone().unwrap_or_else(|| {
+                w.path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            let repo = w
+                .repo
+                .filter(|_| several)
+                .and_then(|id| repos.iter().find(|r| r.repo == id))
+                .map(|r| format!("{}@", r.name))
+                .unwrap_or_default();
+            let stat = w
+                .stat
+                .filter(|s| s.files > 0 || s.dirty)
+                .map(|s| {
+                    let dirty = if s.dirty { " ●" } else { "" };
+                    format!(" · {} files +{} −{}{dirty}", s.files, s.added, s.removed)
+                })
+                .unwrap_or_default();
+            labels.push(format!("⎇ {repo}{branch}{stat}"));
+            items.push(TargetChoice::Worktree(w.path.clone(), branch));
+        }
+        if several {
+            for r in repos {
+                labels.push(format!("new worktree in {}", r.name));
+                items.push(TargetChoice::New(r.repo, Some(r.name.clone())));
+            }
+        } else if let Some(new) = self.new_worktree() {
+            labels.push("new worktree…".into());
+            items.push(TargetChoice::New(new.repo, None));
+        }
+        let named: HashMap<TargetChoice, String> = items.iter().cloned().zip(labels).collect();
+        ListPicker::new(items, move |c| named[c].clone(), true)
+    }
+
+    fn target_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Target(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            return vec![];
+        }
+        if picker.key(key) != Pick::Chosen {
+            return vec![];
+        }
+        let choice = picker.selected().cloned();
+        self.overlays.pop();
+        let seed = termist_core::now_ms();
+        if let (Some(choice), Some(Overlay::QuickPrompt(q))) = (choice, self.overlays.last_mut()) {
+            match choice {
+                overlay::TargetChoice::Folder => {
+                    q.worktree = None;
+                    q.new_worktree = None;
+                }
+                overlay::TargetChoice::Worktree(path, branch) => {
+                    q.worktree = Some((path, branch));
+                    q.new_worktree = None;
+                }
+                overlay::TargetChoice::New(repo, repo_name) => {
+                    q.worktree = None;
+                    q.new_worktree = Some(overlay::NewWorktree {
+                        repo,
+                        repo_name,
+                        seed,
+                    });
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// `X`: asks before removing the worktree at `path`; a live card in it says no.
+    fn ask_remove(&mut self, path: PathBuf) {
+        let live = self.state.sessions.iter().any(|s| {
+            !s.archived
+                && s.status.is_live()
+                && s.place
+                    .as_deref()
+                    .map_or(&s.cwd, |p| &p.root)
+                    .starts_with(&path)
+        });
+        if live {
+            self.message = Some("stop its cards first (d)".into());
+            return;
+        }
+        self.removing = Some(path);
+        self.mode = Mode::ConfirmRemove { files: 0 };
+    }
+
+    /// The worktree `X` asks about, by its branch (or folder).
+    pub fn removing_name(&self) -> String {
+        let Some(path) = &self.removing else {
+            return String::new();
+        };
+        self.project_worktrees()
+            .iter()
+            .find(|w| &w.path == path)
+            .and_then(|w| w.branch.clone())
+            .unwrap_or_else(|| short(path))
+    }
+
+    /// `W`: the project's worktrees (opened again, on the same row, when they change).
+    fn open_worktrees(&mut self) {
+        let Some(project) = self.project else {
+            return;
+        };
+        let at = match self.overlays.last() {
+            Some(Overlay::Worktrees(p)) => {
+                let at = p.selected_index();
+                self.overlays.pop();
+                at
+            }
+            _ => None,
+        };
+        let repos = self
+            .prs
+            .get(&project)
+            .map(|d| d.repos.as_slice())
+            .unwrap_or(&[]);
+        let carded: Vec<&Path> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project == project && !s.archived)
+            .map(|s| {
+                s.place
+                    .as_deref()
+                    .map_or(s.cwd.as_path(), |p| p.root.as_path())
+            })
+            .collect();
+        let labels: HashMap<PathBuf, String> = self
+            .project_worktrees()
+            .iter()
+            .map(|w| {
+                let cards = carded.contains(&w.path.as_path());
+                let mark = if cards || w.shown { "✓" } else { " " };
+                let repo = w
+                    .repo
+                    .filter(|_| repos.len() > 1)
+                    .and_then(|id| repos.iter().find(|r| r.repo == id))
+                    .map(|r| format!("{}@", r.name))
+                    .unwrap_or_default();
+                let name = w.branch.clone().unwrap_or_else(|| short(&w.path));
+                let who = if w.made_by_termist {
+                    "termist"
+                } else {
+                    "outside"
+                };
+                let stat = w
+                    .stat
+                    .filter(|s| s.files > 0 || s.dirty)
+                    .map(|s| {
+                        let dirty = if s.dirty { " ●" } else { "" };
+                        format!(" · {} files +{} −{}{dirty}", s.files, s.added, s.removed)
+                    })
+                    .unwrap_or_default();
+                let end = match w.pr_end {
+                    Some((n, termist_core::PrEnd::Merged)) => format!(" · #{n} merged"),
+                    Some((n, termist_core::PrEnd::Closed)) => format!(" · #{n} closed"),
+                    None => String::new(),
+                };
+                let cards = if cards { " · has cards" } else { "" };
+                (
+                    w.path.clone(),
+                    format!("{mark} ⎇ {repo}{name} · {who}{stat}{end}{cards}"),
+                )
+            })
+            .collect();
+        let items: Vec<PathBuf> = self
+            .project_worktrees()
+            .iter()
+            .map(|w| w.path.clone())
+            .collect();
+        let mut picker = ListPicker::new(items, move |p| labels[p].clone(), false);
+        if let Some(at) = at {
+            picker.select_index(at);
+        }
+        self.overlays.push(Overlay::Worktrees(picker));
+    }
+
+    fn worktrees_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Worktrees(picker)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.overlays.pop();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let Some(path) = picker.selected().cloned() else {
+                    return vec![];
+                };
+                let has_cards = self.state.sessions.iter().any(|s| {
+                    !s.archived && s.place.as_deref().map_or(&s.cwd, |p| &p.root) == &path
+                });
+                if has_cards {
+                    self.message = Some("it has cards: always shown".into());
+                    return vec![];
+                }
+                let shown = self
+                    .project_worktrees()
+                    .iter()
+                    .any(|w| w.path == path && w.shown);
+                return vec![Action::Send(ClientRequest::SetWorktreeShown {
+                    path,
+                    shown: !shown,
+                })];
+            }
+            KeyCode::Char('X') => {
+                let Some(path) = picker.selected().cloned() else {
+                    return vec![];
+                };
+                self.overlays.pop();
+                self.ask_remove(path);
+            }
+            _ => {
+                picker.key(key);
+            }
+        }
+        vec![]
+    }
+
+    /// `Shift+P`: a new task like the selected card's: its CLI, model and effort, in its
+    /// worktree.
+    fn same_task(&mut self) -> Vec<Action> {
+        let Some(info) = self.selected_info().cloned() else {
+            return self.open_quick_prompt();
+        };
+        let SessionKind::Agent { harness } = info.kind else {
+            self.message = Some("a shell has no agent to start again".into());
+            return vec![];
+        };
+        self.hand_for = None;
+        let target = self.card_worktree();
+        let actions = self.quick_prompt_in(info.project, "", target);
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            q.launch = LaunchOptions {
+                harness,
+                model: info.model.clone(),
+                effort: info.effort.clone(),
+            };
+        }
+        actions
+    }
+
+    /// The selected card's worktree, when it is not in the project's own folder.
+    fn card_worktree(&self) -> Option<(PathBuf, String)> {
+        let id = self.selected?;
+        let s = self.state.sessions.iter().find(|s| s.id == id)?;
+        let place = s.place.as_deref()?;
+        let project = self.state.projects.iter().find(|p| p.id == s.project)?;
+        if project.path.starts_with(&place.root) || place.gone {
+            return None;
+        }
+        let name = place.branch.clone().unwrap_or_else(|| {
+            place
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        Some((place.root.clone(), name))
+    }
+
+    /// A new worktree in the selected card's repo, else the project's first; `None`
+    /// before any repo of the project is known.
+    fn new_worktree(&self) -> Option<overlay::NewWorktree> {
+        let project = self.project?;
+        let repos = self
+            .prs
+            .get(&project)
+            .map(|d| d.repos.as_slice())
+            .unwrap_or(&[]);
+        let selected = self
+            .selected
+            .and_then(|id| self.state.sessions.iter().find(|s| s.id == id))
+            .and_then(|s| s.place.as_ref()?.repo);
+        let repo = selected
+            .or_else(|| repos.first().map(|r| r.repo))
+            .or_else(|| self.project_worktrees().iter().find_map(|w| w.repo))?;
+        let repo_name = (repos.len() > 1)
+            .then(|| {
+                repos
+                    .iter()
+                    .find(|r| r.repo == repo)
+                    .map(|r| r.name.clone())
+            })
+            .flatten();
+        Some(overlay::NewWorktree {
+            repo,
+            repo_name,
+            seed: termist_core::now_ms(),
+        })
+    }
+
+    /// The branch a new worktree would get for `q` now.
+    pub fn new_branch(&self, q: &QuickPrompt) -> Option<String> {
+        let new = q.new_worktree.as_ref()?;
+        let taken: Vec<String> = self
+            .worktrees
+            .get(&q.project)
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.branch.clone())
+            .collect();
+        Some(crate::slug::branch(q.input.text(), &taken, new.seed))
     }
 
     /// The quick prompt for `project` with `text` in it, for its folder or a worktree.
@@ -1612,6 +2050,7 @@ impl App {
             project,
             launch,
             worktree,
+            new_worktree: None,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -1665,6 +2104,25 @@ impl App {
                 self.overlays
                     .push(Overlay::Project(overlay::project_picker(open, current)));
             }
+            KeyCode::Char('n') if ctrl => {
+                let was = q.new_worktree.take().is_some();
+                if !was {
+                    match self.new_worktree() {
+                        Some(new) => {
+                            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+                                q.new_worktree = Some(new);
+                                q.worktree = None;
+                            }
+                        }
+                        None => self.message = Some("no repo known yet in this project".into()),
+                    }
+                }
+            }
+            KeyCode::Char('t') if ctrl => {
+                let project = q.project;
+                let picker = self.target_picker(project);
+                self.overlays.push(Overlay::Target(picker));
+            }
             _ => {
                 if q.input.key(key) == Edit::Submit {
                     return self.submit_quick_prompt();
@@ -1702,6 +2160,26 @@ impl App {
         let Some(Overlay::QuickPrompt(q)) = self.overlays.pop() else {
             return vec![];
         };
+        // A new worktree first; the task starts in it when it is made.
+        if let (Some(new), Some(branch)) = (q.new_worktree.clone(), self.new_branch(&q)) {
+            self.next_ticket += 1;
+            let ticket = self.next_ticket;
+            self.message = Some(format!("making a worktree {branch}…"));
+            let project = q.project;
+            self.task_for.insert(ticket, q);
+            return vec![Action::Send(ClientRequest::CreateWorktree {
+                project,
+                repo: new.repo,
+                branch,
+                ticket,
+            })];
+        }
+        self.start_task(q)
+    }
+
+    /// Starts the quick prompt's task where it says.
+    fn start_task(&mut self, q: QuickPrompt) -> Vec<Action> {
+        let harness = q.launch.harness;
         let text = q.input.text();
         let prompt = (!text.trim().is_empty()).then(|| text.to_string());
         self.prompt_draft = None;
@@ -2306,16 +2784,66 @@ impl App {
 
     fn move_by(&mut self, delta: isize) {
         // In the order drawn: band by band.
-        let ids: Vec<SessionId> = self.grid_rows().into_iter().flat_map(|r| r.cards).collect();
-        if ids.is_empty() {
+        let slots: Vec<Slot> = self.grid_rows().into_iter().flat_map(|r| r.slots).collect();
+        if slots.is_empty() {
             return;
         }
-        let pos = self
-            .selected
-            .and_then(|id| ids.iter().position(|x| *x == id))
+        let here = self.slot();
+        let pos = here
+            .and_then(|s| slots.iter().position(|x| *x == s))
             .unwrap_or(0) as isize;
-        let next = (pos + delta).clamp(0, ids.len() as isize - 1) as usize;
-        self.selected = Some(ids[next]);
+        let next = (pos + delta).clamp(0, slots.len() as isize - 1) as usize;
+        self.set_slot(slots[next].clone());
+    }
+
+    /// The selected band stand-in's worktree, with its branch (or folder) name.
+    pub fn empty_worktree(&self) -> Option<(PathBuf, String)> {
+        let path = self.empty.clone().filter(|_| self.selected.is_none())?;
+        let w = self.project_worktrees().iter().find(|w| w.path == path)?;
+        let name = w.branch.clone().unwrap_or_else(|| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        Some((path, name))
+    }
+
+    /// Enter on a band's stand-in: the quick prompt, for its worktree.
+    fn start_in_empty(&mut self) -> Vec<Action> {
+        let (Some(project), Some(worktree)) = (self.project, self.empty_worktree()) else {
+            return vec![];
+        };
+        self.quick_prompt_in(project, "", Some(worktree))
+    }
+
+    /// What is selected in the grid: a card, else a band's stand-in.
+    pub fn slot(&self) -> Option<Slot> {
+        match (self.selected, &self.empty) {
+            (Some(id), _) => Some(Slot::Card(id)),
+            (None, Some(path)) => Some(Slot::Empty(path.clone())),
+            (None, None) => None,
+        }
+    }
+
+    fn set_slot(&mut self, slot: Slot) {
+        match slot {
+            Slot::Card(id) => {
+                self.selected = Some(id);
+                self.empty = None;
+            }
+            Slot::Empty(path) => {
+                self.selected = None;
+                self.empty = Some(path);
+            }
+        }
+    }
+
+    /// The current project's worktrees.
+    pub fn project_worktrees(&self) -> &[termist_core::WorktreeInfo] {
+        self.project
+            .and_then(|p| self.worktrees.get(&p))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Seconds since 1970, for the ages of pull requests.
@@ -2703,10 +3231,21 @@ impl App {
         match action {
             KeyAction::Quit => self.mode = Mode::ConfirmQuit,
             KeyAction::Focus if self.selected.is_some() => return self.enter(),
+            KeyAction::Focus if self.empty.is_some() => return self.start_in_empty(),
             KeyAction::Focus => {}
             KeyAction::Grid => self.mode = Mode::Grid,
             KeyAction::NewSession => return self.open_picker(),
             KeyAction::QuickPrompt => return self.open_quick_prompt(),
+            KeyAction::SameTask => return self.same_task(),
+            KeyAction::RemoveWorktree => {
+                match self.empty_worktree().or_else(|| self.card_worktree()) {
+                    Some((path, _)) => self.ask_remove(path),
+                    None => {
+                        self.message = Some("the project's own folder is not a worktree".into())
+                    }
+                }
+            }
+            KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::NewShell => return self.create(SessionKind::Shell),
             KeyAction::FollowUp => self.open_follow_up(),
             KeyAction::Rename => self.open_rename(),
@@ -3220,7 +3759,7 @@ impl App {
 
     /// The bands of `sessions` and whether they get headers; the archive is one band.
     pub fn grid_bands<'a>(
-        &self,
+        &'a self,
         sessions: &[&'a SessionInfo],
     ) -> (Vec<crate::bands::Band<'a>>, bool) {
         let path = self
@@ -3235,11 +3774,12 @@ impl App {
                 root: path,
                 place: None,
                 cards: sessions.to_vec(),
+                worktree: None,
             };
             return (vec![all], false);
         }
-        let bands = crate::bands::bands(&path, sessions);
-        let headers = crate::bands::headers(&bands);
+        let bands = crate::bands::bands(&path, sessions, self.project_worktrees());
+        let headers = crate::bands::headers(&path, &bands);
         (bands, headers)
     }
 
@@ -3248,14 +3788,15 @@ impl App {
         let sessions = self.project_sessions();
         let (bands, headers) = self.grid_bands(&sessions);
         crate::ui::Shape {
-            counts: bands.iter().map(|b| b.cards.len()).collect(),
+            // A band with no cards has its stand-in.
+            counts: bands.iter().map(|b| b.cards.len().max(1)).collect(),
             headers,
         }
     }
 
     fn selected_row(&self, rows: &[crate::bands::Row]) -> Option<usize> {
-        let id = self.selected?;
-        rows.iter().position(|r| r.cards.contains(&id))
+        let here = self.slot()?;
+        rows.iter().position(|r| r.slots.contains(&here))
     }
 
     /// `delta` rows down (up when negative), in the same column as far as the row goes;
@@ -3265,26 +3806,29 @@ impl App {
         if rows.is_empty() {
             return;
         }
+        let here = self.slot();
         let (r, col) = match self.selected_row(&rows) {
             Some(r) => (
                 r,
-                rows[r]
-                    .cards
-                    .iter()
-                    .position(|id| Some(*id) == self.selected),
+                rows[r].slots.iter().position(|s| Some(s) == here.as_ref()),
             ),
             None => (0, Some(0)),
         };
         let to = r as isize + delta;
         let last = rows.len() as isize - 1;
-        self.selected = Some(match to {
-            ..0 => rows[0].cards[0],
-            _ if to > last => *rows[last as usize].cards.last().expect("rows have cards"),
+        let slot = match to {
+            ..0 => rows[0].slots[0].clone(),
+            _ if to > last => rows[last as usize]
+                .slots
+                .last()
+                .expect("rows have slots")
+                .clone(),
             _ => {
-                let row = &rows[to as usize].cards;
-                row[col.unwrap_or(0).min(row.len() - 1)]
+                let row = &rows[to as usize].slots;
+                row[col.unwrap_or(0).min(row.len() - 1)].clone()
             }
-        });
+        };
+        self.set_slot(slot);
     }
 
     /// Ctrl+D / Ctrl+U: half a screen of cards down or up, selection and view together.
@@ -3378,10 +3922,31 @@ impl App {
         let valid = self
             .selected
             .is_some_and(|id| self.project_sessions().iter().any(|s| s.id == id));
-        if !valid {
+        // A band's stand-in stays selected while its worktree is shown with no cards.
+        let empty = self.selected.is_none()
+            && self.empty.as_ref().is_some_and(|path| {
+                self.project_worktrees()
+                    .iter()
+                    .any(|w| &w.path == path && w.shown)
+                    && !self
+                        .project_sessions()
+                        .iter()
+                        .any(|s| s.place.as_deref().map_or(&s.cwd, |p| &p.root) == path)
+            });
+        if !empty {
+            self.empty = None;
+        }
+        if !valid && !empty {
             self.selected = self.project_sessions().first().map(|s| s.id);
             if matches!(self.mode, Mode::Focus | Mode::FocusPrefix) {
                 self.mode = Mode::Grid;
+            }
+            // No card: the first band's stand-in, if a worktree is shown.
+            if self.selected.is_none()
+                && let Some(Slot::Empty(path)) =
+                    self.grid_rows().into_iter().flat_map(|r| r.slots).next()
+            {
+                self.empty = Some(path);
             }
         }
     }
@@ -3413,6 +3978,13 @@ impl App {
         }
         actions
     }
+}
+
+/// A folder's last part, as messages name a worktree.
+fn short(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -5731,7 +6303,7 @@ mod tests {
             q.input.text(),
             "Pull request #212 \"Fix login\" (https://github.com/acme/site/pull/212): feat into main. "
         );
-        assert!(crate::overlay_view::launch_line(&app, q).starts_with("site ⎇ feat ^P"));
+        assert!(crate::overlay_view::launch_line(&app, q).starts_with("site ^P · ⎇ feat ^T"));
         let actions = app.on_key(k(K::Enter));
         let created = sent(&actions).into_iter().find_map(|r| match r {
             ClientRequest::CreateSession { cwd, .. } => Some(cwd.clone()),
@@ -5793,6 +6365,349 @@ mod tests {
         app.open_follow_up();
         assert_eq!(app.hand_for, None, "nor is a plain follow-up");
         assert!(app.marks.contains_key(&pr), "still marked");
+    }
+
+    fn quick(app: &App) -> &QuickPrompt {
+        match app.overlays.last() {
+            Some(Overlay::QuickPrompt(q)) => q,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_n_makes_a_worktree_named_from_the_prompt_and_starts_the_task_in_it() {
+        let (mut app, s, _) = linked();
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        app.select(s[0].id);
+        app.on_key(k(K::Char('p')));
+        assert_eq!(quick(&app).worktree, None, "a card in the project's folder");
+        for c in "Giriş sayfasını düzelt".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        app.on_key(ctrl('n'));
+        assert_eq!(
+            app.new_branch(quick(&app)).as_deref(),
+            Some("giris-sayfasini-duzelt")
+        );
+        let actions = app.on_key(k(K::Enter));
+        let ticket = match sent(&actions)[..] {
+            [
+                ClientRequest::CreateWorktree {
+                    repo,
+                    branch,
+                    ticket,
+                    ..
+                },
+            ] => {
+                assert_eq!((repo.0, branch.as_str()), (7, "giris-sayfasini-duzelt"));
+                *ticket
+            }
+            ref other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            app.message.as_deref(),
+            Some("making a worktree giris-sayfasini-duzelt…")
+        );
+        app.on_event(ServerEvent::WorktreeNotMade {
+            ticket,
+            message: "couldn't make a worktree · not a branch name: x".into(),
+        });
+        assert_eq!(
+            quick(&app).input.text(),
+            "Giriş sayfasını düzelt",
+            "the words come back"
+        );
+        let actions = app.on_key(k(K::Enter));
+        let ticket = sent(&actions)
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::CreateWorktree { ticket, .. } => Some(*ticket),
+                _ => None,
+            })
+            .unwrap();
+        let actions = app.on_event(ServerEvent::WorktreeMade {
+            ticket,
+            path: "/w/site-worktrees/giris-sayfasini-duzelt".into(),
+            branch: "giris-sayfasini-duzelt".into(),
+            note: Some("made from local main: no fetch from origin".into()),
+        });
+        let started = sent(&actions)
+            .into_iter()
+            .find_map(|r| match r {
+                ClientRequest::CreateSession { cwd, prompt, .. } => {
+                    Some((cwd.clone(), prompt.clone()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            started,
+            (
+                Some("/w/site-worktrees/giris-sayfasini-duzelt".into()),
+                Some("Giriş sayfasını düzelt".into())
+            )
+        );
+        assert_eq!(
+            app.message.as_deref(),
+            Some("made from local main: no fetch from origin")
+        );
+    }
+
+    #[test]
+    fn two_new_worktrees_on_their_way_each_start_their_own_task() {
+        let (mut app, _, _) = linked();
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        let mut tickets = vec![];
+        for text in ["first task", "second task"] {
+            app.on_key(k(K::Char('p')));
+            app.on_key(ctrl('u'));
+            for c in text.chars() {
+                app.on_key(k(K::Char(c)));
+            }
+            app.on_key(ctrl('n'));
+            let actions = app.on_key(k(K::Enter));
+            tickets.push(
+                sent(&actions)
+                    .iter()
+                    .find_map(|r| match r {
+                        ClientRequest::CreateWorktree { ticket, .. } => Some(*ticket),
+                        _ => None,
+                    })
+                    .unwrap(),
+            );
+        }
+        let mut prompts = vec![];
+        for (ticket, branch) in tickets.into_iter().zip(["first-task", "second-task"]) {
+            let actions = app.on_event(ServerEvent::WorktreeMade {
+                ticket,
+                path: format!("/w/site-worktrees/{branch}").into(),
+                branch: branch.into(),
+                note: None,
+            });
+            prompts.extend(sent(&actions).into_iter().filter_map(|r| match r {
+                ClientRequest::CreateSession { prompt, .. } => prompt.clone(),
+                _ => None,
+            }));
+        }
+        assert_eq!(prompts, ["first task", "second task"], "neither is lost");
+    }
+
+    #[test]
+    fn the_quick_prompt_starts_where_the_selection_is_and_ctrl_t_changes_it() {
+        let (mut app, s, _) = linked();
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![termist_core::WorktreeInfo {
+                path: "/w/site-worktrees/fix".into(),
+                repo: Some(termist_core::github::RepoId(7)),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                made_by_termist: true,
+                shown: true,
+                stat: None,
+                pr_end: None,
+            }],
+        });
+        app.select(s[1].id);
+        app.on_key(k(K::Char('p')));
+        assert_eq!(
+            quick(&app).worktree,
+            Some(("/w/site-worktrees/fix".into(), "b".to_string())),
+            "the selected card's worktree"
+        );
+        app.on_key(ctrl('t'));
+        let Some(Overlay::Target(picker)) = app.overlays.last() else {
+            panic!("where to")
+        };
+        let labels: Vec<&str> = (0..picker.items().len()).map(|i| picker.label(i)).collect();
+        assert_eq!(
+            labels,
+            ["site · the project's folder", "⎇ fix", "new worktree…"]
+        );
+        app.on_key(k(K::Enter));
+        assert_eq!(quick(&app).worktree, None, "the project's folder");
+        app.on_key(ctrl('t'));
+        app.on_key(k(K::Down));
+        app.on_key(k(K::Down));
+        app.on_key(k(K::Enter));
+        assert!(quick(&app).new_worktree.is_some(), "a new one");
+        app.on_key(k(K::Esc));
+        app.config.agents.new_worktree_by_default = true;
+        app.select(s[0].id);
+        app.on_key(k(K::Char('p')));
+        assert!(
+            quick(&app).new_worktree.is_some(),
+            "new by default from the folder"
+        );
+    }
+
+    #[test]
+    fn shift_p_starts_a_task_like_the_card_and_t_opens_a_shell_in_its_worktree() {
+        let (mut app, s, _) = linked();
+        let mut agent = s[1].clone();
+        agent.kind = SessionKind::Agent {
+            harness: Harness::Codex,
+        };
+        agent.model = Some("gpt-5".into());
+        agent.effort = Some("high".into());
+        app.on_event(ServerEvent::SessionUpdated(agent.clone()));
+        app.select(agent.id);
+        app.on_key(k(K::Char('P')));
+        let q = quick(&app);
+        assert_eq!(
+            (
+                q.launch.harness,
+                q.launch.model.as_deref(),
+                q.launch.effort.as_deref()
+            ),
+            (Harness::Codex, Some("gpt-5"), Some("high"))
+        );
+        assert_eq!(
+            q.worktree,
+            Some(("/w/site-worktrees/fix".into(), "b".to_string()))
+        );
+        assert_eq!(q.input.text(), "");
+        app.on_key(k(K::Esc));
+        let shell_in = |app: &mut App| {
+            sent(&app.on_key(k(K::Char('t'))))
+                .into_iter()
+                .find_map(|r| match r {
+                    ClientRequest::CreateSession { cwd, .. } => Some(cwd.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(shell_in(&mut app), Some("/w/site-worktrees/fix".into()));
+        app.select(s[0].id);
+        assert_eq!(shell_in(&mut app), None, "the project's folder");
+        app.selected = None;
+        app.empty = Some("/w/site-worktrees/docs".into());
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![termist_core::WorktreeInfo {
+                path: "/w/site-worktrees/docs".into(),
+                repo: Some(termist_core::github::RepoId(7)),
+                branch: Some("docs".into()),
+                base: None,
+                made_by_termist: true,
+                shown: true,
+                stat: None,
+                pr_end: None,
+            }],
+        });
+        assert_eq!(
+            shell_in(&mut app),
+            Some("/w/site-worktrees/docs".into()),
+            "a band's stand-in"
+        );
+    }
+
+    fn worktree(path: &str, branch: &str, shown: bool, made: bool) -> termist_core::WorktreeInfo {
+        termist_core::WorktreeInfo {
+            path: path.into(),
+            repo: Some(termist_core::github::RepoId(7)),
+            branch: Some(branch.into()),
+            base: None,
+            made_by_termist: made,
+            shown,
+            stat: None,
+            pr_end: None,
+        }
+    }
+
+    #[test]
+    fn x_removes_a_worktree_after_asking_twice_when_work_would_go_with_it() {
+        let (mut app, s, _) = linked();
+        let path = PathBuf::from("/w/site-worktrees/fix");
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![worktree("/w/site-worktrees/fix", "fix", true, true)],
+        });
+        app.select(s[0].id);
+        app.on_key(k(K::Char('X')));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("the project's own folder is not a worktree")
+        );
+        let mut live = s[1].clone();
+        live.status = AgentStatus::Running;
+        app.on_event(ServerEvent::SessionUpdated(live.clone()));
+        app.select(live.id);
+        app.on_key(k(K::Char('X')));
+        assert_eq!(app.message.as_deref(), Some("stop its cards first (d)"));
+        live.status = AgentStatus::Exited { code: Some(0) };
+        app.on_event(ServerEvent::SessionUpdated(live));
+        app.on_key(k(K::Char('X')));
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 0 });
+        assert_eq!(app.removing_name(), "fix");
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('y')))),
+            [&ClientRequest::RemoveWorktree {
+                path: path.clone(),
+                force: false
+            }]
+        );
+        app.on_event(ServerEvent::RemoveRefused {
+            path: path.clone(),
+            files: 3,
+        });
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 3 });
+        assert_eq!(
+            sent(&app.on_key(k(K::Enter))),
+            [&ClientRequest::RemoveWorktree {
+                path: path.clone(),
+                force: true
+            }]
+        );
+        app.on_event(ServerEvent::WorktreeRemoved { path: path.clone() });
+        assert_eq!(
+            app.message.as_deref(),
+            Some("removed fix · the branch stays")
+        );
+        // Any other key keeps it.
+        app.removing = Some(path);
+        app.mode = Mode::ConfirmRemove { files: 0 };
+        assert!(sent(&app.on_key(k(K::Char('n')))).is_empty());
+        assert_eq!((app.mode, app.removing.clone()), (Mode::Grid, None));
+    }
+
+    #[test]
+    fn w_lists_the_worktrees_to_show_hide_or_remove() {
+        let (mut app, _, _) = linked();
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![
+                worktree("/w/site-worktrees/fix", "fix", true, true),
+                worktree("/w/site/.claude/worktrees/x", "x", false, false),
+            ],
+        });
+        app.on_key(k(K::Char('W')));
+        let Some(Overlay::Worktrees(picker)) = app.overlays.last() else {
+            panic!("the worktrees")
+        };
+        assert_eq!(
+            (picker.label(0), picker.label(1)),
+            ("✓ ⎇ fix · termist · has cards", "  ⎇ x · outside")
+        );
+        app.on_key(k(K::Enter));
+        assert_eq!(app.message.as_deref(), Some("it has cards: always shown"));
+        app.on_key(k(K::Down));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char(' ')))),
+            [&ClientRequest::SetWorktreeShown {
+                path: "/w/site/.claude/worktrees/x".into(),
+                shown: true
+            }]
+        );
+        app.on_key(k(K::Char('X')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode, Mode::ConfirmRemove { files: 0 });
     }
 
     #[test]

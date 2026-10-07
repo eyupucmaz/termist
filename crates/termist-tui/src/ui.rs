@@ -13,7 +13,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use std::time::Instant;
 use termist_core::config::PanePosition;
-use termist_core::github::PrRef;
 use termist_core::{AgentStatus, Snapshot, cell_flags};
 use termist_scenes::TimeOfDay;
 
@@ -271,7 +270,10 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         return;
     }
     let sessions = app.project_sessions();
-    if sessions.is_empty() && app.connected && !app.archive_view() {
+    // A shown worktree with no cards still has its band: the grid, not the scene.
+    let nothing = sessions.is_empty()
+        && (app.archive_view() || !app.project_worktrees().iter().any(|w| w.shown));
+    if nothing && app.connected && !app.archive_view() {
         let hint = empty_hint(app);
         draw_scene(
             f,
@@ -280,7 +282,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             areas.body,
             vec![Line::from(Span::styled(hint, app.theme.dim))],
         );
-    } else if sessions.is_empty() {
+    } else if nothing {
         let text = if !app.connected {
             "Connecting to the termist daemon…".to_string()
         } else {
@@ -309,28 +311,37 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
                 draw_band_header(f, app, &bands[b], line);
                 y += 1;
             }
-            for (col, id) in row.cards.iter().enumerate() {
+            for (col, slot) in row.slots.iter().enumerate() {
                 let rect = Rect {
                     x: areas.cards.x + col as u16 * CARD_W,
                     y,
                     width: CARD_W,
                     height: CARD_H,
                 };
-                let Some(s) = sessions.iter().find(|s| s.id == *id) else {
-                    continue;
-                };
                 if rect.right() > areas.cards.right() {
                     continue;
                 }
-                draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
-                app.hits.borrow_mut().cards.push((s.id, rect));
+                match slot {
+                    crate::bands::Slot::Card(id) => {
+                        let Some(s) = sessions.iter().find(|s| s.id == *id) else {
+                            continue;
+                        };
+                        draw_card(f, &app.theme, s, Some(s.id) == app.selected, rect);
+                        app.hits.borrow_mut().cards.push((s.id, rect));
+                    }
+                    crate::bands::Slot::Empty(path) => {
+                        let selected = app.selected.is_none() && app.empty.as_ref() == Some(path);
+                        draw_empty(f, &app.theme, selected, rect);
+                        app.hits.borrow_mut().empties.push((path.clone(), rect));
+                    }
+                }
             }
             y += CARD_H;
             shown += 1;
         }
         app.hits.borrow_mut().cards_zone = areas.cards_zone;
         if areas.scroll_lines {
-            let count = |rows: &[crate::bands::Row]| rows.iter().map(|r| r.cards.len()).sum();
+            let count = |rows: &[crate::bands::Row]| rows.iter().map(|r| r.slots.len()).sum();
             let above: usize = count(&rows[..first]);
             let below: usize = count(&rows[shown..]);
             let line = |y: u16| Rect {
@@ -485,80 +496,141 @@ fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: R
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let prs = app.project.and_then(|p| app.prs.get(&p));
-    let mut left = vec![Span::styled(" ⎇ ", t.dim)];
-    let mut pr_parts: Option<(PrRef, String, String, Vec<Span<'static>>)> = None;
-    match band.place {
-        Some(place) if place.gone => {
-            left.push(Span::styled(format!("{folder} (gone)"), t.dim));
-        }
-        Some(place) => {
-            // `repo@branch` where a project holds several repos.
-            let repo = place
-                .repo
-                .and_then(|id| {
-                    prs.filter(|p| p.repos.len() > 1)?
-                        .repos
-                        .iter()
-                        .find(|r| r.repo == id)
-                })
-                .map(|r| format!("{}@", r.name))
-                .unwrap_or_default();
-            let label = place
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    // `repo@branch` where a project holds several repos.
+    let repo_name = |id: Option<termist_core::github::RepoId>| {
+        id.and_then(|id| {
+            prs.filter(|p| p.repos.len() > 1)?
+                .repos
+                .iter()
+                .find(|r| r.repo == id)
+        })
+        .map(|r| format!("{}@", r.name))
+        .unwrap_or_default()
+    };
+    let label = match (band.place, band.worktree) {
+        (Some(place), _) if place.gone => Span::styled(format!("{folder} (gone)"), t.dim),
+        (Some(place), _) => {
+            let name = place
                 .branch
                 .clone()
                 .or_else(|| place.commit.clone())
                 .unwrap_or_else(|| folder.clone());
-            left.push(Span::styled(
-                format!("{repo}{label}"),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            let summary = place.pr.and_then(|pr| {
-                prs?.repos
-                    .iter()
-                    .find(|r| r.repo == pr.repo)?
-                    .prs
-                    .iter()
-                    .find(|s| s.number == pr.number)
-            });
-            if let (Some(pr), Some(summary)) = (place.pr, summary) {
-                let mut marks = vec![
-                    Span::raw(" "),
-                    crate::prs::checks_mark(t, summary.checks),
-                    crate::prs::conflict_mark(t, summary),
-                ];
-                let open = app
-                    .pr_details
-                    .get(&pr)
-                    .and_then(|(_, d)| d.as_ref())
-                    .map(|d| d.threads.iter().filter(|th| !th.resolved).count())
-                    .unwrap_or(0);
-                if open > 0 {
-                    marks.push(Span::styled(format!("●{open}"), t.warn));
-                }
-                pr_parts = Some((pr, format!("#{}", pr.number), summary.title.clone(), marks));
-            }
+            Span::styled(format!("{}{name}", repo_name(place.repo)), bold)
         }
-        None => left.push(Span::styled(folder, t.dim)),
+        (None, Some(w)) => {
+            let name = w.branch.clone().unwrap_or_else(|| folder.clone());
+            Span::styled(format!("{}{name}", repo_name(w.repo)), bold)
+        }
+        (None, None) => Span::styled(folder.clone(), t.dim),
+    };
+    // What the branch changed: in full, and short for a narrow header.
+    let stat = band
+        .worktree
+        .and_then(|w| w.stat)
+        .filter(|s| s.files > 0 || s.dirty);
+    let dirty = |s: &termist_core::Stat| if s.dirty { " ●" } else { "" };
+    let stat_full = stat.map(|s| {
+        let files = if s.files == 1 { "file" } else { "files" };
+        format!(
+            "{} {files} +{} −{}{}",
+            s.files,
+            s.added,
+            s.removed,
+            dirty(&s)
+        )
+    });
+    let stat_short = stat.map(|s| format!("+{}−{}{}", s.added, s.removed, dirty(&s).trim()));
+    // The open pull request on the branch, or how the last one ended.
+    let open = band.place.and_then(|place| {
+        let pr = place.pr?;
+        let summary = prs?
+            .repos
+            .iter()
+            .find(|r| r.repo == pr.repo)?
+            .prs
+            .iter()
+            .find(|s| s.number == pr.number)?;
+        Some((pr, summary))
+    });
+    let ended = band.worktree.and_then(|w| w.pr_end);
+    let mut marks: Vec<Span<'static>> = vec![];
+    if let Some((pr, summary)) = open {
+        marks.push(Span::raw(" "));
+        marks.push(crate::prs::checks_mark(t, summary.checks));
+        marks.push(crate::prs::conflict_mark(t, summary));
+        let threads = app
+            .pr_details
+            .get(&pr)
+            .and_then(|(_, d)| d.as_ref())
+            .map(|d| d.threads.iter().filter(|th| !th.resolved).count())
+            .unwrap_or(0);
+        if threads > 0 {
+            marks.push(Span::styled(format!("●{threads}"), t.warn));
+        }
     }
-    let mut spans = left;
-    if let Some((pr, number, title, marks)) = pr_parts {
-        let used: usize = spans.iter().map(|s| s.width()).sum::<usize>()
-            + 3
-            + number.chars().count()
-            + 1
-            + marks.iter().map(|s| s.width()).sum::<usize>();
-        let room = (area.width as usize).saturating_sub(used);
-        let title = match title.chars().count() <= room {
-            true => title,
-            false if room == 0 => String::new(),
-            false => {
-                let mut cut: String = title.chars().take(room - 1).collect();
-                cut.push('…');
-                cut
+    let width = |spans: &[Span]| spans.iter().map(|s| s.width()).sum::<usize>();
+    // From the fullest to the shortest; the first that fits is drawn.
+    let variant = |stat: Option<&String>, title: bool, wide: bool| {
+        let mut spans = vec![Span::styled(" ⎇ ", t.dim), label.clone()];
+        if let Some(stat) = stat {
+            spans.push(Span::styled(if wide { " · " } else { " " }, t.dim));
+            spans.push(Span::styled(stat.clone(), t.dim));
+        }
+        let mut number_at = None;
+        if let Some((pr, summary)) = open {
+            spans.push(Span::styled(if wide { " · " } else { " " }, t.dim));
+            number_at = Some((spans.len(), pr));
+            spans.push(Span::styled(format!("#{}", pr.number), t.accent));
+            if title {
+                spans.push(Span::raw(format!(" {}", summary.title)));
             }
-        };
-        let at = spans.iter().map(|s| s.width()).sum::<usize>() as u16 + 3;
-        let wide = number.chars().count() as u16;
+            spans.extend(marks.iter().cloned());
+        } else if let Some((number, end)) = ended {
+            let word = match end {
+                termist_core::PrEnd::Merged => "merged · X remove",
+                termist_core::PrEnd::Closed => "closed",
+            };
+            spans.push(Span::styled(
+                format!("{}#{number} {word}", if wide { " · " } else { " " }),
+                t.dim,
+            ));
+        }
+        (spans, number_at)
+    };
+    let room = area.width as usize;
+    let mut tries = vec![
+        variant(stat_full.as_ref(), true, true),
+        variant(stat_full.as_ref(), false, true),
+        variant(stat_short.as_ref(), false, false),
+        variant(None, false, false),
+    ];
+    // The full one with its title cut to fit, before dropping the title.
+    if let Some((_, summary)) = open {
+        let (spans, at) = variant(stat_full.as_ref(), false, true);
+        let free = room.saturating_sub(width(&spans) + 1);
+        if free >= 8 {
+            let mut cut: String = summary.title.chars().take(free - 1).collect();
+            if cut.chars().count() < summary.title.chars().count() {
+                cut.push('…');
+            } else {
+                cut = summary.title.clone();
+            }
+            let mut spans = spans;
+            let after = at.map_or(spans.len(), |(i, _)| i + 1);
+            spans.insert(after, Span::raw(format!(" {cut}")));
+            tries.insert(1, (spans, at));
+        }
+    }
+    let last = tries.len() - 1;
+    let pick = tries
+        .iter()
+        .position(|(spans, _)| width(spans) <= room)
+        .unwrap_or(last);
+    let (spans, number_at) = tries.swap_remove(pick);
+    if let Some((i, pr)) = number_at {
+        let at = width(&spans[..i]) as u16;
+        let wide = spans[i].width() as u16;
         // Only where it is drawn: past the header's width lies the pane.
         if at + wide <= area.width {
             app.hits.borrow_mut().band_prs.push((
@@ -571,11 +643,6 @@ fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: R
                 },
             ));
         }
-        spans.push(Span::styled(" · ", t.dim));
-        spans.push(Span::styled(number, t.accent));
-        spans.push(Span::raw(" "));
-        spans.push(Span::raw(title));
-        spans.extend(marks);
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -611,6 +678,39 @@ fn draw_card(
             format!("{} · {word}", s.kind.label()),
             theme.dim,
         )),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// The stand-in of a band with no cards: what can be started in its worktree.
+fn draw_empty(f: &mut Frame, theme: &Theme, selected: bool, rect: Rect) {
+    let border = if selected {
+        theme.accent.add_modifier(Modifier::BOLD)
+    } else {
+        theme.dim
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(if selected {
+            BorderType::Thick
+        } else {
+            BorderType::Plain
+        })
+        .border_set(if selected {
+            ratatui::symbols::border::THICK
+        } else {
+            ratatui::symbols::border::Set {
+                horizontal_top: "╌",
+                horizontal_bottom: "╌",
+                vertical_left: "╎",
+                vertical_right: "╎",
+                ..ratatui::symbols::border::PLAIN
+            }
+        })
+        .border_style(border);
+    let lines = vec![
+        Line::from(Span::styled("no cards", theme.dim)),
+        Line::from(Span::styled("n agent · t shell", theme.dim)),
     ];
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
@@ -755,6 +855,21 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 t.warn,
             )
+        }
+        (_, Mode::ConfirmRemove { files }) => {
+            let name = app.removing_name();
+            let text = match files {
+                0 => format!(
+                    "Remove worktree {name}? The branch stays.  y / Enter: remove · any key: keep it"
+                ),
+                1 => format!(
+                    "{name} has 1 changed file: remove it too?  y / Enter: remove · any key: keep it"
+                ),
+                n => format!(
+                    "{name} has {n} changed files: remove them too?  y / Enter: remove · any key: keep it"
+                ),
+            };
+            (text, t.warn)
         }
         (_, Mode::ConfirmDelete) => (
             "Delete your comment? GitHub keeps no copy.  y / Enter: delete · any key: keep it"
@@ -1314,6 +1429,159 @@ mod tests {
         };
         let areas = layout(Rect::new(0, 0, 60, 12), shape, PanePosition::Bottom);
         assert!(areas.card_lines > CARD_H, "a header and a row of cards");
+    }
+
+    /// `banded`'s project with its worktrees: fix/login changed (and not all of it
+    /// committed), docs with no cards and its pull request merged, one hidden.
+    fn with_worktrees(app: &mut App) {
+        use termist_core::github::RepoId;
+        use termist_core::{PrEnd, Stat, WorktreeInfo};
+        let project = app.state.projects[0].id;
+        let w = |path: &str, branch: &str, shown, stat, end| WorktreeInfo {
+            path: path.into(),
+            repo: Some(RepoId(7)),
+            branch: Some(branch.into()),
+            base: Some("main".into()),
+            made_by_termist: true,
+            shown,
+            stat,
+            pr_end: end,
+        };
+        app.on_event(ServerEvent::Worktrees {
+            project,
+            list: vec![
+                w(
+                    "/w/site-worktrees/fix/login",
+                    "fix/login",
+                    true,
+                    Some(Stat {
+                        files: 3,
+                        added: 60,
+                        removed: 28,
+                        dirty: true,
+                    }),
+                    None,
+                ),
+                w(
+                    "/w/site-worktrees/docs",
+                    "docs",
+                    true,
+                    None,
+                    Some((198, PrEnd::Merged)),
+                ),
+                w("/w/site-worktrees/spike", "spike", false, None, None),
+            ],
+        });
+    }
+
+    #[test]
+    fn bands_with_what_their_branch_changed_and_one_with_no_cards() {
+        let mut app = banded(0);
+        with_worktrees(&mut app);
+        insta::assert_snapshot!(render(&mut app, 100, 50).backend());
+    }
+
+    #[test]
+    fn a_narrow_header_keeps_the_number_and_a_short_summary() {
+        let mut app = banded(0);
+        with_worktrees(&mut app);
+        // Beside the pane (24 columns) the summary goes before the number does.
+        let text = screen_text(&render(&mut app, 190, 30));
+        assert!(text.contains(" ⎇ fix/login #212 ✓ "), "beside the pane");
+        assert!(text.contains(" ⎇ docs #198 merged"));
+        assert!(text.contains("╎no cards"));
+        assert!(
+            !text.contains("spike"),
+            "a hidden worktree with no cards has no band"
+        );
+        // Narrower than the full line: the title goes first.
+        let text = screen_text(&render(&mut app, 60, 40));
+        assert!(text.contains(" ⎇ fix/login · 3 files +60 −28 ● · #212 Login redirect l… ✓ "));
+    }
+
+    #[test]
+    fn a_band_s_stand_in_is_selected_like_a_card_and_enter_starts_a_task_there() {
+        let mut app = banded(0);
+        with_worktrees(&mut app);
+        render(&mut app, 100, 30);
+        for _ in 0..3 {
+            app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.selected, None);
+        assert_eq!(
+            app.empty.as_deref(),
+            Some(std::path::Path::new("/w/site-worktrees/docs"))
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(crate::overlay::Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("the quick prompt")
+        };
+        assert_eq!(
+            q.worktree,
+            Some(("/w/site-worktrees/docs".into(), "docs".to_string()))
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(
+            app.selected.is_some() && app.empty.is_none(),
+            "back on a card"
+        );
+    }
+
+    #[test]
+    fn a_quick_prompt_for_a_new_worktree() {
+        let mut app = banded(0);
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        for c in "fix the login redirect".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let mut t = render(&mut app, 80, 18);
+        let text = screen_text(&t);
+        assert!(text.contains(" new worktree ⎇ fix-the-login-redirect "));
+        assert!(text.contains("site ^P · ⎇ new ^N ^T · "));
+        insta::assert_snapshot!(t.backend_mut());
+    }
+
+    #[test]
+    fn a_project_with_no_cards_but_a_shown_worktree_draws_and_selects_its_stand_in() {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let mut app = App::new();
+        app.connected = true;
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p.clone()],
+            sessions: vec![],
+            ..StateSnapshot::default()
+        }));
+        app.on_event(ServerEvent::Worktrees {
+            project: p.id,
+            list: vec![termist_core::WorktreeInfo {
+                path: "/w/site-worktrees/docs".into(),
+                repo: None,
+                branch: Some("docs".into()),
+                base: None,
+                made_by_termist: true,
+                shown: true,
+                stat: None,
+                pr_end: None,
+            }],
+        });
+        let text = screen_text(&render(&mut app, 100, 30));
+        assert!(
+            text.contains("┃no cards"),
+            "the stand-in, selected; not the scene"
+        );
+        assert_eq!(
+            app.empty.as_deref(),
+            Some(std::path::Path::new("/w/site-worktrees/docs"))
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(app.mode, crate::app::Mode::ConfirmRemove { files: 0 });
     }
 
     #[test]
