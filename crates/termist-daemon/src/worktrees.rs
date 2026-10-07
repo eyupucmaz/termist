@@ -201,6 +201,26 @@ pub fn create(
     Ok((dest, default, note))
 }
 
+/// Removes the worktree at `path` of the repo at `repo` (its branch stays). Without
+/// `force`, one with uncommitted changes is left as it is: `Ok(Some(files))`.
+pub fn remove(repo: &Path, path: &Path, force: bool, git: Git) -> Result<Option<u32>, String> {
+    if !force {
+        let changed = git(path, &["status", "--porcelain"])?;
+        let files = changed.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+        if files > 0 {
+            return Ok(Some(files));
+        }
+    }
+    let path = path.to_string_lossy();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&path);
+    git(repo, &args)?;
+    Ok(None)
+}
+
 /// `git fetch`, given 15 s: a network that does not answer must not hold a new worktree.
 pub fn fetch(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut all = vec!["-C".to_string(), dir.to_string_lossy().into_owned()];

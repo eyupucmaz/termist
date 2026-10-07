@@ -58,6 +58,15 @@ pub struct Made {
     pub own: PathBuf,
 }
 
+/// A worktree removed (or not) for a client's `RemoveWorktree`: `Ok(Some(files))`
+/// when it has uncommitted changes and was left.
+pub struct Removed {
+    pub client: ClientId,
+    pub project: ProjectId,
+    pub path: PathBuf,
+    pub result: Result<Option<u32>, String>,
+}
+
 /// A rescan for missing CLIs can start a login shell; one per this window is enough.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -179,6 +188,8 @@ pub struct Registry {
     made_rx: Option<UnboundedReceiver<Made>>,
     /// Fetches before a new branch is made (a stand-in in tests).
     fetch: fn(&Path, &[&str]) -> Result<String, String>,
+    removed_tx: UnboundedSender<Removed>,
+    removed_rx: Option<UnboundedReceiver<Removed>>,
 }
 
 impl Registry {
@@ -216,6 +227,7 @@ impl Registry {
         let (places_tx, places_rx) = tokio::sync::mpsc::unbounded_channel();
         let (scans_tx, scans_rx) = tokio::sync::mpsc::unbounded_channel();
         let (made_tx, made_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (removed_tx, removed_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
         let locate: Locate = Arc::new(move || {
             let program = gh_bin
@@ -267,6 +279,8 @@ impl Registry {
             made_tx,
             made_rx: Some(made_rx),
             fetch: crate::worktrees::fetch,
+            removed_tx,
+            removed_rx: Some(removed_rx),
         }
     }
 
@@ -477,6 +491,106 @@ impl Registry {
                     message: format!("couldn't make a worktree · {why}"),
                 },
             ),
+        }
+    }
+
+    /// Removes a worktree termist keeps, on a blocking thread: never a repo's or a
+    /// project's own folder, never one a live card runs in.
+    fn remove_worktree(
+        &mut self,
+        client: ClientId,
+        path: PathBuf,
+        force: bool,
+    ) -> Result<(), String> {
+        let kept = self.store.worktrees().unwrap_or_default();
+        let w = kept
+            .iter()
+            .find(|w| w.path == path)
+            .ok_or("not a worktree termist knows of")?;
+        let view = self
+            .github
+            .repo_views(w.project)
+            .into_iter()
+            .find(|v| Some(v.id) == w.repo)
+            .ok_or("its repo is not loaded yet")?;
+        let here = place::resolved(&path);
+        let own = self
+            .projects
+            .iter()
+            .any(|p| place::resolved(&p.path) == here)
+            || place::resolved(&view.path) == here
+            || view.main == here;
+        if own {
+            return Err("the project's own folder is not a worktree".into());
+        }
+        let inside = |cwd: &Path| place::resolved(cwd).starts_with(&here);
+        if self
+            .sessions
+            .iter()
+            .any(|s| s.info.status.is_live() && inside(&s.info.cwd))
+        {
+            return Err("stop its cards first".into());
+        }
+        let (tx, project) = (self.removed_tx.clone(), w.project);
+        tokio::task::spawn_blocking(move || {
+            let result =
+                crate::worktrees::remove(&view.path, &path, force, &crate::github::worktree::git);
+            let _ = tx.send(Removed {
+                client,
+                project,
+                path,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    /// The worktree is gone: forgotten, its stopped cards archived; or why not.
+    pub fn worktree_removed(&mut self, r: Removed) {
+        match r.result {
+            Ok(Some(files)) => self.send(
+                r.client,
+                ServerEvent::RemoveRefused {
+                    path: r.path,
+                    files,
+                },
+            ),
+            Ok(None) => {
+                if let Err(e) = self.store.delete_worktree(&r.path) {
+                    tracing::warn!(error = %e, "could not forget a worktree");
+                }
+                self.worktree_stats.remove(&r.path);
+                // Its cards that stopped: their records stay, out of the grid.
+                let inside = |cwd: &Path| cwd.starts_with(&r.path);
+                let cards: Vec<SessionId> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| !s.info.archived && !s.info.status.is_live() && inside(&s.info.cwd))
+                    .map(|s| s.info.id)
+                    .collect();
+                for id in cards {
+                    if let Some(s) = self.session_mut(id) {
+                        s.info.archived = true;
+                    }
+                    self.updated(id);
+                }
+                self.send(r.client, ServerEvent::WorktreeRemoved { path: r.path });
+                self.send_worktrees(r.project);
+            }
+            Err(why) => {
+                let name = r
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.send(
+                    r.client,
+                    ServerEvent::RemoveFailed {
+                        path: r.path,
+                        message: format!("couldn't remove {name} · {why}"),
+                    },
+                );
+            }
         }
     }
 
@@ -972,7 +1086,20 @@ impl Registry {
                 branch,
                 ticket,
             } => self.create_worktree(client, project, repo, branch, ticket),
-            ClientRequest::SetWorktreeShown { .. } | ClientRequest::RemoveWorktree { .. } => {}
+            ClientRequest::SetWorktreeShown { path, shown } => {
+                let kept = self.store.worktrees().unwrap_or_default();
+                if let Some(w) = kept.iter().find(|w| w.path == path) {
+                    if let Err(e) = self.store.set_worktree_shown(&path, shown) {
+                        tracing::warn!(error = %e, "could not keep the worktree's choice");
+                    }
+                    self.send_worktrees(w.project);
+                }
+            }
+            ClientRequest::RemoveWorktree { path, force } => {
+                if let Err(why) = self.remove_worktree(client, path.clone(), force) {
+                    self.send(client, ServerEvent::RemoveFailed { path, message: why });
+                }
+            }
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -1662,6 +1789,7 @@ pub async fn run(
     let mut places = reg.places_rx.take().expect("a registry runs once");
     let mut scans = reg.scans_rx.take().expect("a registry runs once");
     let mut made = reg.made_rx.take().expect("a registry runs once");
+    let mut removed = reg.removed_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
     github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -1677,6 +1805,7 @@ pub async fn run(
             Some(read) = places.recv() => reg.place_read(read),
             Some(scan) = scans.recv() => reg.worktrees_scanned(scan),
             Some(m) = made.recv() => reg.worktree_made(m),
+            Some(r) = removed.recv() => reg.worktree_removed(r),
             _ = github_beat.tick() => {
                 reg.github_tick();
                 reg.places_tick(std::time::Instant::now());
@@ -2461,6 +2590,141 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list[0].made_by_termist && list[0].shown);
         assert_eq!(list[0].base.as_deref(), Some("main"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_is_removed_only_when_nothing_of_it_would_be_lost_unasked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let fix = tmp.path().join("site-worktrees").join("fix");
+        run_git(
+            &site,
+            &["worktree", "add", "-q", "-b", "fix", fix.to_str().unwrap()],
+        );
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.clone(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &site, "acme", "site").unwrap();
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: fix.clone(),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut stopped = stored(&p, "shell-1");
+        stopped.cwd = fix.join("src");
+        let mut live = stored(&p, "claude-2");
+        live.cwd = fix.clone();
+        store.upsert_session(&stopped, false).unwrap();
+        store.upsert_session(&live, false).unwrap();
+        let mut reg = registry_on(store);
+        let mut removed = reg.removed_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        let ask = |reg: &mut Registry, path: &Path, force| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::RemoveWorktree {
+                    path: path.to_path_buf(),
+                    force,
+                },
+            })
+        };
+        let failed = |rx: &mut UnboundedReceiver<ServerEvent>| match rx.try_recv() {
+            Ok(ServerEvent::RemoveFailed { message, .. }) => message,
+            other => panic!("{other:?}"),
+        };
+        ask(&mut reg, &site, false);
+        assert_eq!(failed(&mut rx), "not a worktree termist knows of");
+        reg.session_mut(live.id).unwrap().info.status = AgentStatus::Running;
+        ask(&mut reg, &fix, false);
+        assert_eq!(failed(&mut rx), "stop its cards first");
+        reg.session_mut(live.id).unwrap().info.status = AgentStatus::Disconnected;
+        std::fs::write(fix.join("notes.txt"), "half done").unwrap();
+        ask(&mut reg, &fix, false);
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerEvent::RemoveRefused {
+                path: fix.clone(),
+                files: 1
+            }
+        );
+        assert!(fix.is_dir(), "asked first");
+        ask(&mut reg, &fix, true);
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        let mut events = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(events.contains(&ServerEvent::WorktreeRemoved { path: fix.clone() }));
+        assert!(!fix.exists(), "the folder is gone");
+        let branch = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&site)
+            .args(["branch", "--list", "fix"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branch.stdout).contains("fix"),
+            "the branch stays"
+        );
+        assert!(reg.store.worktrees().unwrap().is_empty());
+        assert!(
+            reg.session(stopped.id).unwrap().info.archived,
+            "its stopped cards archived"
+        );
+        assert!(reg.session(live.id).unwrap().info.archived);
+    }
+
+    #[test]
+    fn a_worktree_shown_or_hidden_is_kept_and_sent() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let path = PathBuf::from("/w/site/.claude/worktrees/x");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: None,
+                path: path.clone(),
+                branch: Some("x".into()),
+                base: None,
+                pr: None,
+                made_by_termist: false,
+                shown: false,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::SetWorktreeShown {
+                path: path.clone(),
+                shown: true,
+            },
+        });
+        assert!(reg.store.worktrees().unwrap()[0].shown);
+        let Ok(ServerEvent::Worktrees { list, .. }) = rx.try_recv() else {
+            panic!("the worktrees again")
+        };
+        assert!(list[0].shown);
     }
 
     #[test]
