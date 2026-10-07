@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-10-07
 
 From a pull request to an agent: its branch in a worktree, its review comments to the agent working
 on it.

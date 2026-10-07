@@ -282,7 +282,7 @@
   <h1 class="name">termist</h1>
   <p class="gloss">terminal istanbul</p>
   <p class="pitch">Mission control for your coding agents. Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.</p>
-  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.1.4</a>: write to a pull request (comments, replies, line comments, your review with <kbd>A</kbd>) and the pane on any side, on top of 0.1.3's diff and mouse and 0.1.2's pull requests. <code>termist update</code> keeps it current.</p>
+  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.0</a>: from a pull request to an agent: <kbd>w</kbd> opens a worktree on its branch, <kbd>Space</kbd> and <kbd>a</kbd> hand its review comments to the agent, and cards stand in bands by worktree; with 0.1.4's comments and reviews and 0.1.3's diff. <code>termist update</code> keeps it current.</p>
 
   <h2 id="install">Install</h2>
   <dl class="install">
@@ -344,7 +344,7 @@
     <li>Start a task without leaving the grid: <kbd>p</kbd>, type the prompt, pick the agent with <kbd>Tab</kbd> and the model with <kbd>^O</kbd>.</li>
     <li>Send the next instruction to a finished agent with <kbd>Space</kbd>, without opening its terminal.</li>
     <li>Projects as tabs, cards that scroll, rename and archive, and a real terminal for each agent when you want to type into it.</li>
-    <li>Your pull requests next to your agents: <kbd>v</kbd> lists a project's open ones, repo by repo for a folder of repos, with the reviews asked of you, checks and conflicts; <kbd>Enter</kbd> opens one with its conversation and line threads, <kbd>d</kbd> its diff: a file tree beside unified or side-by-side changes, line comments under their lines, <kbd>Ctrl+r</kbd> to mark a file viewed on GitHub. <kbd>c</kbd> comments on the pull request, a line or a range, <kbd>r</kbd> replies, <kbd>x</kbd> resolves, <kbd>A</kbd> sends your review.</li>
+    <li>Your pull requests next to your agents: <kbd>v</kbd> lists a project's open ones, repo by repo for a folder of repos, with the reviews asked of you, checks and conflicts; <kbd>Enter</kbd> opens one with its conversation and line threads, <kbd>d</kbd> its diff: a file tree beside unified or side-by-side changes, line comments under their lines, <kbd>Ctrl+r</kbd> to mark a file viewed on GitHub. <kbd>c</kbd> comments on the pull request, a line or a range, <kbd>r</kbd> replies, <kbd>x</kbd> resolves, <kbd>A</kbd> sends your review. <kbd>w</kbd> opens a worktree on its branch with an agent there; <kbd>Space</kbd> marks review threads and <kbd>a</kbd> hands them to the agent.</li>
   </ul>
 
   <h2 id="keys">Keys</h2>
@@ -362,6 +362,8 @@
       <tr><td><kbd>v</kbd></td><td>Pull requests of the project, through the GitHub CLI</td></tr>
       <tr><td><kbd>d</kbd></td><td>In a pull request: its diff, unified or side by side (<kbd>s</kbd>)</td></tr>
       <tr><td><kbd>c</kbd> <kbd>A</kbd></td><td>In a pull request: comment (on a line or a <kbd>v</kbd> range in the diff), send your review</td></tr>
+      <tr><td><kbd>w</kbd> <kbd>Space</kbd> <kbd>a</kbd></td><td>In a pull request: a worktree and an agent on its branch; mark review threads, hand them to the agent</td></tr>
+      <tr><td><kbd>Shift</kbd>+<kbd>V</kbd></td><td>The selected card's pull request in the browser</td></tr>
       <tr><td><kbd>s</kbd></td><td>Settings: theme, colours, prefix, pane, keys</td></tr>
       <tr><td><kbd>?</kbd></td><td>Every key, as it is bound now</td></tr>
       <tr><td><kbd>q</kbd></td><td>Quit the TUI; the agents keep running</td></tr>
