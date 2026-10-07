@@ -1511,6 +1511,21 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_prompt_for_a_new_worktree() {
+        let mut app = banded(0);
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        for c in "fix the login redirect".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let mut t = render(&mut app, 80, 18);
+        let text = screen_text(&t);
+        assert!(text.contains(" new worktree ⎇ fix-the-login-redirect "));
+        assert!(text.contains("site ^P · ⎇ new ^N ^T · "));
+        insta::assert_snapshot!(t.backend_mut());
+    }
+
+    #[test]
     fn bands_above_the_pane() {
         let mut app = banded(0);
         insta::assert_snapshot!(render(&mut app, 80, 24).backend());
