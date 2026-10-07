@@ -173,7 +173,7 @@
   <h1 class="name">termist</h1>
   <p class="gloss">terminal istanbul</p>
   <p class="pitch">Mission control for your coding agents. Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.</p>
-  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.0</a>: <a href="#prs">pull requests next to your agents</a>. Read them, review them, and hand their review comments to an agent on their branch. <code>termist update</code> keeps it current.</p>
+  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.1</a>: worktrees of their own (<kbd>Ctrl</kbd>+<kbd>N</kbd> in the new-task prompt, <kbd>W</kbd>, <kbd>X</kbd>), on top of 0.2.0's <a href="#prs">pull requests next to your agents</a>. <code>termist update</code> keeps it current.</p>
 
   <h2 id="install">Install</h2>
   <dl class="install">
@@ -287,6 +287,8 @@
       <tr><td><kbd>d</kbd></td><td>In a pull request: its diff, unified or side by side (<kbd>s</kbd>); <kbd>Ctrl+r</kbd> marks a file viewed</td></tr>
       <tr><td><kbd>c</kbd> <kbd>A</kbd></td><td>In a pull request: comment (on a line or a <kbd>v</kbd> range in the diff), send your review</td></tr>
       <tr><td><kbd>r</kbd> <kbd>x</kbd></td><td>On a thread: reply, resolve</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>In the new-task prompt: a new worktree for the task, named from the prompt / where the task starts</td></tr>
+      <tr><td><kbd>W</kbd> <kbd>X</kbd></td><td>The worktrees: show, hide, remove / remove the selected one (the branch stays)</td></tr>
       <tr><td><kbd>w</kbd> <kbd>Space</kbd> <kbd>a</kbd></td><td>In a pull request: a worktree and an agent on its branch; mark review threads, hand them to the agent</td></tr>
       <tr><td><kbd>Shift</kbd>+<kbd>V</kbd></td><td>The selected card's pull request in the browser</td></tr>
       <tr><td><kbd>s</kbd></td><td>Settings: theme, colours, prefix, pane, keys</td></tr>

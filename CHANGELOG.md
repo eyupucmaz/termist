@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-10-07
 
 Worktrees of their own, for agents that work in parallel.
 
