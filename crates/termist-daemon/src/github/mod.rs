@@ -37,6 +37,8 @@ const DETAILS: usize = 50;
 const DIFFS: usize = 10;
 /// Below this many points left in the hour, an account is read slowly.
 const RATE_FLOOR: u32 = 300;
+/// A pull request still open when its end was asked is asked again after this long.
+const ASK_END_AGAIN: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// A folder with more repos than this shows only its first ones at first; the repos
 /// window shows the others. Every shown repo spends the hourly budget.
 const SHOWN_AT_FIRST: usize = 10;
@@ -346,8 +348,11 @@ pub struct GitHub {
     writing: HashSet<PrRef>,
     /// The clients waiting for a pull request's worktree; one job makes it for all.
     worktrees: HashMap<PrRef, Vec<ClientId>>,
-    /// Pull requests no longer open: how they ended (asked once), or being asked.
-    pr_ends: HashMap<PrRef, Option<termist_core::PrEnd>>,
+    /// Pull requests no longer open: how they ended, once GitHub said.
+    pr_ends: HashMap<PrRef, termist_core::PrEnd>,
+    /// When each pull request's end was last asked: one still open (or a failed ask) is
+    /// asked again after `ASK_END_AGAIN`.
+    pr_asked: HashMap<PrRef, Instant>,
     asking_ends: HashSet<RepoId>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
@@ -387,6 +392,7 @@ impl GitHub {
             writing: HashSet::new(),
             worktrees: HashMap::new(),
             pr_ends: HashMap::new(),
+            pr_asked: HashMap::new(),
             asking_ends: HashSet::new(),
             slow_until: HashMap::new(),
             seen,
@@ -903,12 +909,12 @@ impl GitHub {
     /// Answers every client waiting for `pr`'s worktree.
     /// How a pull request no longer open ended, once asked.
     pub fn pr_end(&self, pr: PrRef) -> Option<termist_core::PrEnd> {
-        self.pr_ends.get(&pr).copied().flatten()
+        self.pr_ends.get(&pr).copied()
     }
 
     /// Asks how each of `prs` ended, those no longer in the open list and not asked
     /// before: one job a repo.
-    pub fn ask_pr_ends(&mut self, prs: &[PrRef]) -> Effects {
+    pub fn ask_pr_ends(&mut self, prs: &[PrRef], now: Instant) -> Effects {
         let mut fx = Effects::default();
         let Some((gh, accounts)) = self.ready() else {
             return fx;
@@ -918,7 +924,11 @@ impl GitHub {
             let open = self
                 .repo(pr.repo)
                 .is_some_and(|r| r.prs.iter().any(|p| p.number == pr.number));
-            if !open && !self.pr_ends.contains_key(pr) {
+            let recently = self
+                .pr_asked
+                .get(pr)
+                .is_some_and(|t| now.saturating_duration_since(*t) < ASK_END_AGAIN);
+            if !open && !self.pr_ends.contains_key(pr) && !recently {
                 by_repo.entry(pr.repo).or_default().push(pr.number);
             }
         }
@@ -935,6 +945,9 @@ impl GitHub {
             let (owner, name) = (r.stored.owner.clone(), r.stored.name.clone());
             if !self.asking_ends.insert(repo) {
                 continue;
+            }
+            for n in &numbers {
+                self.pr_asked.insert(PrRef { repo, number: *n }, now);
             }
             fx.jobs.push(Job::PrEnds {
                 gh: gh.clone(),
@@ -1468,8 +1481,11 @@ impl GitHub {
             }
             Done::PrEnds { repo, ends } => {
                 self.asking_ends.remove(&repo);
+                // Only an end is kept for good; an open one is asked again later.
                 for (number, end) in ends.unwrap_or_default() {
-                    self.pr_ends.insert(PrRef { repo, number }, end);
+                    if let Some(end) = end {
+                        self.pr_ends.insert(PrRef { repo, number }, end);
+                    }
                 }
             }
             Done::Worktree { pr, reply } => {
@@ -2975,14 +2991,44 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr, pr])), [vec![212]]);
-        assert!(jobs(&w.gh.ask_pr_ends(&[pr])).is_empty(), "on its way");
+        let now = w.now;
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr, pr], now)), [vec![212]]);
+        assert!(jobs(&w.gh.ask_pr_ends(&[pr], now)).is_empty(), "on its way");
         w.done(Done::PrEnds {
             repo: pr.repo,
             ends: Ok(vec![(212, Some(termist_core::PrEnd::Merged))]),
         });
         assert_eq!(w.gh.pr_end(pr), Some(termist_core::PrEnd::Merged));
-        assert!(jobs(&w.gh.ask_pr_ends(&[pr])).is_empty(), "known");
+        let later = now + std::time::Duration::from_secs(3600);
+        assert!(
+            jobs(&w.gh.ask_pr_ends(&[pr], later)).is_empty(),
+            "an end stays known"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_still_open_when_asked_is_asked_again_later() {
+        let (mut w, pr) = looking(false);
+        let jobs = |fx: &Effects| {
+            fx.jobs
+                .iter()
+                .filter(|j| matches!(j, Job::PrEnds { .. }))
+                .count()
+        };
+        let now = w.now;
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr], now)), 1);
+        w.done(Done::PrEnds {
+            repo: pr.repo,
+            ends: Ok(vec![(212, None)]),
+        });
+        assert_eq!(w.gh.pr_end(pr), None);
+        assert_eq!(jobs(&w.gh.ask_pr_ends(&[pr], now)), 0, "not at once");
+        let later = now + std::time::Duration::from_secs(11 * 60);
+        assert_eq!(
+            jobs(&w.gh.ask_pr_ends(&[pr], later)),
+            1,
+            "it may have merged since"
+        );
     }
 
     #[test]

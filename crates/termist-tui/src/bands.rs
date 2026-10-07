@@ -69,12 +69,15 @@ pub fn bands<'a>(
 }
 
 /// Band headers are drawn when there is more than one band, or the one band has a
-/// pull request: a project without worktrees looks as it always did.
-pub fn headers(bands: &[Band]) -> bool {
+/// pull request or is a worktree: a project without worktrees looks as it always did.
+pub fn headers(project: &Path, bands: &[Band]) -> bool {
+    // A band away from the project's own folder (a worktree) says which one it is.
     bands.len() > 1
-        || bands
-            .iter()
-            .any(|b| b.place.is_some_and(|p| p.pr.is_some()))
+        || bands.iter().any(|b| {
+            // Known to be one: git placed a card there, or the daemon keeps it.
+            let worktree = b.worktree.is_some() || b.place.is_some_and(|p| !p.gone);
+            b.place.is_some_and(|p| p.pr.is_some()) || (worktree && !project.starts_with(&b.root))
+        })
 }
 
 /// A place in the grid that can be selected: a card, or the stand-in of a band with
@@ -188,7 +191,22 @@ mod tests {
             .map(|b| b.cards.iter().map(|s| s.name.as_str()).collect())
             .collect();
         assert_eq!(names, [vec!["b", "d"], vec!["a", "c"]]);
-        assert!(headers(&bands));
+        assert!(headers(Path::new("/w/site"), &bands));
+    }
+
+    #[test]
+    fn a_band_that_is_a_worktree_has_its_header_even_alone() {
+        let a = card(
+            "a",
+            "/w/site-worktrees/fix",
+            Some(("/w/site-worktrees/fix", None)),
+        );
+        let bands = bands(Path::new("/w/site"), &[&a], &[]);
+        assert_eq!(bands.len(), 1);
+        assert!(
+            headers(Path::new("/w/site"), &bands),
+            "its branch must show"
+        );
     }
 
     #[test]
@@ -197,9 +215,12 @@ mod tests {
         let b = card("b", "/w/site", None);
         let bands = bands(Path::new("/w/site"), &[&a, &b], &[]);
         assert_eq!(bands.len(), 1);
-        assert!(!headers(&bands));
+        assert!(!headers(Path::new("/w/site"), &bands));
         let a = card("a", "/w/site", Some(("/w/site", Some(212))));
-        assert!(headers(&super::bands(Path::new("/w/site"), &[&a], &[])));
+        assert!(headers(
+            Path::new("/w/site"),
+            &super::bands(Path::new("/w/site"), &[&a], &[])
+        ));
     }
 
     #[test]

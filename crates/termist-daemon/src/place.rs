@@ -90,7 +90,23 @@ pub fn main_of(path: &Path) -> PathBuf {
 
 /// The path with links and `..` resolved, for comparing; as it is when that fails.
 pub fn resolved(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    plain(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Windows' resolved paths start with `\\?\` (`\\?\C:\…`, `\\?\UNC\host\…`), which git
+/// never prints: the plain form, so they compare equal. Other paths as they are.
+pub fn plain(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        // A drive: `C:\…`.
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// The place of a session in `cwd`, from what git said and the project's repos.
@@ -277,6 +293,24 @@ mod tests {
         assert_eq!(
             main_of(&tmp.path().join("nothing")),
             tmp.path().join("nothing")
+        );
+    }
+
+    #[test]
+    fn windows_resolved_paths_lose_their_verbatim_prefix() {
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\C:\Users\a\site")),
+            PathBuf::from(r"C:\Users\a\site")
+        );
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\host\share\site")),
+            PathBuf::from(r"\\host\share\site")
+        );
+        assert_eq!(plain(PathBuf::from("/w/site")), PathBuf::from("/w/site"));
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\Volume{x}\site")),
+            PathBuf::from(r"\\?\Volume{x}\site"),
+            "no drive: left as it is"
         );
     }
 

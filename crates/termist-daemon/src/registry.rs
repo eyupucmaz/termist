@@ -42,6 +42,8 @@ pub struct PlaceRead(pub PathBuf, pub Option<GitFacts>);
 pub struct WorktreeScan {
     pub project: ProjectId,
     pub repo: termist_core::github::RepoId,
+    /// The worktrees' generation when the scan started (see `Registry::worktree_epoch`).
+    pub epoch: u64,
     pub found: Option<Vec<(Listed, Option<termist_core::Stat>)>>,
 }
 
@@ -52,8 +54,8 @@ pub struct Made {
     pub project: ProjectId,
     pub repo: termist_core::github::RepoId,
     pub branch: String,
-    /// The folder, its base branch and a note; or why not.
-    pub result: Result<(PathBuf, String, Option<String>), String>,
+    /// What was made; or why not.
+    pub result: Result<crate::worktrees::Made, String>,
     /// The repo's own folder: a branch open there is not a worktree to keep.
     pub own: PathBuf,
 }
@@ -180,6 +182,9 @@ pub struct Registry {
     scans_rx: Option<UnboundedReceiver<WorktreeScan>>,
     /// Repos whose worktrees are being read.
     scanning: HashSet<termist_core::github::RepoId>,
+    /// Bumped when termist makes or removes a worktree: a scan started before saw
+    /// another list and must not undo it.
+    worktree_epoch: u64,
     /// What each worktree's branch changed, as last read.
     worktree_stats: HashMap<PathBuf, termist_core::Stat>,
     /// Each project's worktrees as last sent.
@@ -274,6 +279,7 @@ impl Registry {
             scans_tx,
             scans_rx: Some(scans_rx),
             scanning: HashSet::new(),
+            worktree_epoch: 0,
             worktree_stats: HashMap::new(),
             worktrees_sent: HashMap::new(),
             made_tx,
@@ -338,7 +344,7 @@ impl Registry {
                 })
             })
             .collect();
-        let fx = self.github.ask_pr_ends(&prs);
+        let fx = self.github.ask_pr_ends(&prs, std::time::Instant::now());
         self.github_effects(fx);
         let bases: HashMap<PathBuf, String> = kept
             .into_iter()
@@ -351,6 +357,7 @@ impl Registry {
                 }
                 let (tx, bases, own) = (self.scans_tx.clone(), bases.clone(), p.path.clone());
                 let (project, repo, path) = (p.id, view.id, view.path.clone());
+                let epoch = self.worktree_epoch;
                 tokio::task::spawn_blocking(move || {
                     let base = |w: &Path| bases.get(w).cloned();
                     let found =
@@ -358,6 +365,7 @@ impl Registry {
                     let _ = tx.send(WorktreeScan {
                         project,
                         repo,
+                        epoch,
                         found,
                     });
                 });
@@ -369,6 +377,11 @@ impl Registry {
     /// has their branch), ones git no longer lists are dropped.
     pub fn worktrees_scanned(&mut self, scan: WorktreeScan) {
         self.scanning.remove(&scan.repo);
+        if scan.epoch != self.worktree_epoch {
+            // It read the list before a worktree was made or removed: read it again.
+            self.scan_worktrees();
+            return;
+        }
         let Some(found) = scan.found else {
             return;
         };
@@ -465,14 +478,20 @@ impl Registry {
     /// Keeps the worktree made, tells the client, and reads the worktrees again.
     pub fn worktree_made(&mut self, m: Made) {
         match m.result {
-            Ok((path, base, note)) => {
+            Ok(crate::worktrees::Made {
+                path,
+                branch,
+                base,
+                note,
+            }) => {
                 // A branch already open in the repo's own folder is no worktree to keep.
+                self.worktree_epoch += 1;
                 if place::resolved(&path) != place::resolved(&m.own) {
                     let made = StoredWorktree {
                         project: m.project,
                         repo: Some(m.repo),
                         path: path.clone(),
-                        branch: Some(m.branch.clone()),
+                        branch: Some(branch.clone()),
                         base: Some(base),
                         pr: None,
                         made_by_termist: true,
@@ -487,7 +506,7 @@ impl Registry {
                     ServerEvent::WorktreeMade {
                         ticket: m.ticket,
                         path,
-                        branch: m.branch,
+                        branch,
                         note,
                     },
                 );
@@ -566,6 +585,7 @@ impl Registry {
                 },
             ),
             Ok(None) => {
+                self.worktree_epoch += 1;
                 if let Err(e) = self.store.delete_worktree(&r.path) {
                     tracing::warn!(error = %e, "could not forget a worktree");
                 }
@@ -586,6 +606,7 @@ impl Registry {
                 }
                 self.send(r.client, ServerEvent::WorktreeRemoved { path: r.path });
                 self.send_worktrees(r.project);
+                self.scan_worktrees();
             }
             Err(why) => {
                 let name = r
@@ -838,6 +859,16 @@ impl Registry {
 
     /// A GitHub job finished; what it found may start the next step at once.
     pub fn github_done(&mut self, done: Done) {
+        // `w` made a worktree: a scan already on its way saw the list without it.
+        if matches!(
+            &done,
+            Done::Worktree {
+                reply: Ok((_, true)),
+                ..
+            }
+        ) {
+            self.worktree_epoch += 1;
+        }
         let fx = self
             .github
             .done(done, std::time::Instant::now(), &self.store, &self.projects);
@@ -2522,6 +2553,7 @@ mod tests {
         let scan = |found: Vec<(Listed, Option<termist_core::Stat>)>| WorktreeScan {
             project: p.id,
             repo: repo.id,
+            epoch: 0,
             found: Some(found),
         };
         reg.worktrees_scanned(scan(vec![
@@ -2564,6 +2596,7 @@ mod tests {
         reg.worktrees_scanned(WorktreeScan {
             project: p.id,
             repo: repo.id,
+            epoch: 0,
             found: None,
         });
         assert_eq!(
@@ -2775,6 +2808,42 @@ mod tests {
         }));
         reg.note_worktree_pr(&card);
         assert_eq!(reg.store.worktrees().unwrap()[0].pr, Some(212));
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_started_before_a_worktree_was_made_or_removed_changes_nothing() {
+        let p = project();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store.upsert_repo(p.id, &p.path, "acme", "site").unwrap();
+        let made = PathBuf::from("/w/site-worktrees/new");
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: Some(repo.id),
+                path: made.clone(),
+                branch: Some("new".into()),
+                base: Some("origin/main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        let mut reg = registry_on(store);
+        reg.worktree_epoch = 1; // a worktree was made after the scan below started
+        reg.scanning.insert(repo.id);
+        reg.worktrees_scanned(WorktreeScan {
+            project: p.id,
+            repo: repo.id,
+            epoch: 0,
+            found: Some(vec![]),
+        });
+        assert_eq!(
+            reg.store.worktrees().unwrap().len(),
+            1,
+            "the new worktree is not dropped by a list read before it existed"
+        );
+        assert!(reg.scanning.contains(&repo.id), "read again at once");
     }
 
     #[test]

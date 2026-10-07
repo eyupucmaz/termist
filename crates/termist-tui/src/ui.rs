@@ -270,7 +270,10 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         return;
     }
     let sessions = app.project_sessions();
-    if sessions.is_empty() && app.connected && !app.archive_view() {
+    // A shown worktree with no cards still has its band: the grid, not the scene.
+    let nothing = sessions.is_empty()
+        && (app.archive_view() || !app.project_worktrees().iter().any(|w| w.shown));
+    if nothing && app.connected && !app.archive_view() {
         let hint = empty_hint(app);
         draw_scene(
             f,
@@ -279,7 +282,7 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
             areas.body,
             vec![Line::from(Span::styled(hint, app.theme.dim))],
         );
-    } else if sessions.is_empty() {
+    } else if nothing {
         let text = if !app.connected {
             "Connecting to the termist daemon…".to_string()
         } else {
@@ -1538,6 +1541,47 @@ mod tests {
         assert!(text.contains(" new worktree ⎇ fix-the-login-redirect "));
         assert!(text.contains("site ^P · ⎇ new ^N ^T · "));
         insta::assert_snapshot!(t.backend_mut());
+    }
+
+    #[test]
+    fn a_project_with_no_cards_but_a_shown_worktree_draws_and_selects_its_stand_in() {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let mut app = App::new();
+        app.connected = true;
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p.clone()],
+            sessions: vec![],
+            ..StateSnapshot::default()
+        }));
+        app.on_event(ServerEvent::Worktrees {
+            project: p.id,
+            list: vec![termist_core::WorktreeInfo {
+                path: "/w/site-worktrees/docs".into(),
+                repo: None,
+                branch: Some("docs".into()),
+                base: None,
+                made_by_termist: true,
+                shown: true,
+                stat: None,
+                pr_end: None,
+            }],
+        });
+        let text = screen_text(&render(&mut app, 100, 30));
+        assert!(
+            text.contains("┃no cards"),
+            "the stand-in, selected; not the scene"
+        );
+        assert_eq!(
+            app.empty.as_deref(),
+            Some(std::path::Path::new("/w/site-worktrees/docs"))
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(app.mode, crate::app::Mode::ConfirmRemove { files: 0 });
     }
 
     #[test]

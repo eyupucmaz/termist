@@ -98,7 +98,14 @@ pub fn stat(path: &Path, base: &str, git: Git) -> Option<Stat> {
         return None;
     }
     let short = git(path, &["diff", "--shortstat", since]).ok()?;
-    let (files, added, removed) = parse_shortstat(&short);
+    let (mut files, mut added, removed) = parse_shortstat(&short);
+    // New files not added yet are changes too: git's diff does not see them.
+    let others =
+        git(path, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
+    for name in others.split('\0').filter(|n| !n.is_empty()) {
+        files += 1;
+        added += new_lines(&path.join(name));
+    }
     let dirty = git(path, &["status", "--porcelain"]).is_ok_and(|s| !s.trim().is_empty());
     Some(Stat {
         files,
@@ -138,53 +145,63 @@ pub fn scan(
     )
 }
 
-/// A new worktree of the repo at `repo` on `branch`: the branch as it is when it exists
-/// (or the worktree that already has it), else a new branch from the default one,
-/// fetched first when `fetch` can (else the local one, and the note says so). Returns
-/// the folder, the base branch and the note.
-pub fn create(
-    repo: &Path,
-    branch: &str,
-    git: Git,
-    fetch: Git,
-) -> Result<(PathBuf, String, Option<String>), String> {
+/// What `create` made: the folder, the branch it is on, the ref it started from (what
+/// its summary is measured against), and a note on what was not as asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Made {
+    pub path: PathBuf,
+    pub branch: String,
+    pub base: String,
+    pub note: Option<String>,
+}
+
+/// A new worktree of the repo at `repo` on `branch`: the worktree that already has the
+/// branch open, else the branch as it is when it exists, else a new branch from the
+/// default one, fetched first when `fetch` can (else the local one, and the note says so).
+pub fn create(repo: &Path, branch: &str, git: Git, fetch: Git) -> Result<Made, String> {
     if git(repo, &["check-ref-format", "--branch", branch]).is_err() || branch.starts_with('-') {
         return Err(format!("not a branch name: {branch}"));
     }
     let default = default_branch(repo, git);
-    let exists = git(
-        repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .is_ok();
-    if exists {
+    let taken = |name: &str| {
+        git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ],
+        )
+        .is_ok()
+    };
+    if taken(branch) {
         let list = git(repo, &["worktree", "list", "--porcelain"])?;
         if let Some(open) = parse_list(&list)
             .into_iter()
             .find(|w| w.branch.as_deref() == Some(branch))
         {
-            return Ok((
-                open.path,
-                default,
-                Some("the branch was open there already".into()),
-            ));
+            return Ok(Made {
+                path: open.path,
+                branch: branch.to_string(),
+                base: default,
+                note: Some("the branch was open there already".into()),
+            });
         }
     }
-    let dest = crate::github::worktree::free(&crate::github::worktree::folder(repo, branch));
-    let dest_text = dest.to_string_lossy().into_owned();
-    if exists {
-        git(repo, &["worktree", "add", &dest_text, branch])?;
-        return Ok((dest, default, None));
-    }
+    // A branch of that name open nowhere may be an old one: not taken as it is.
+    let name = if taken(branch) {
+        (2..)
+            .map(|n| format!("{branch}-{n}"))
+            .find(|b| !taken(b))
+            .expect("a free name")
+    } else {
+        branch.to_string()
+    };
     let fetched = fetch(repo, &["fetch", "--quiet", "origin", &default]).is_ok();
     let origin = format!("origin/{default}");
     let has_origin = git(repo, &["rev-parse", "--verify", "--quiet", &origin]).is_ok();
-    let (start, note) = match (fetched, has_origin) {
+    let (start, mut note) = match (fetched, has_origin) {
         (true, true) => (origin, None),
         (false, true) => (
             origin,
@@ -197,8 +214,38 @@ pub fn create(
             Some(format!("made from local {default}: no fetch from origin")),
         ),
     };
-    git(repo, &["worktree", "add", "-b", branch, &dest_text, &start])?;
-    Ok((dest, default, note))
+    if name != branch {
+        let why = format!("{branch} is taken: made {name}");
+        note = Some(match note {
+            Some(more) => format!("{why} · {more}"),
+            None => why,
+        });
+    }
+    let dest = crate::github::worktree::free(&crate::github::worktree::folder(repo, &name));
+    let dest_text = dest.to_string_lossy().into_owned();
+    git(repo, &["worktree", "add", "-b", &name, &dest_text, &start])?;
+    // Measured from where it started: a stale local main would count origin's work.
+    Ok(Made {
+        path: dest,
+        branch: name,
+        base: start,
+        note,
+    })
+}
+
+/// The lines of a new text file; none for one past 1 MB or binary.
+fn new_lines(file: &Path) -> u32 {
+    match std::fs::metadata(file) {
+        Ok(m) if m.len() <= 1 << 20 => {}
+        _ => return 0,
+    }
+    match std::fs::read(file) {
+        Ok(bytes) if !bytes.contains(&0) => {
+            let ends = bytes.iter().filter(|b| **b == b'\n').count();
+            (ends + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))) as u32
+        }
+        _ => 0,
+    }
 }
 
 /// Removes the worktree at `path` of the repo at `repo` (its branch stays). Without
@@ -307,7 +354,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_new_worktree_takes_a_new_branch_from_the_default_or_the_branch_as_it_is() {
+    fn a_new_worktree_takes_a_new_branch_from_the_default_or_a_number_after_a_taken_one() {
         let tmp = tempfile::tempdir().unwrap();
         let site = tmp.path().join("site");
         std::fs::create_dir(&site).unwrap();
@@ -316,30 +363,37 @@ mod tests {
         run(&site, &["branch", "old"]);
         let git = crate::github::worktree::git;
         let no_net = |_: &Path, _: &[&str]| Err::<String, String>("no network".into());
-        let (path, base, note) = create(&site, "fix-login", &git, &no_net).unwrap();
-        assert_eq!(path, tmp.path().join("site-worktrees").join("fix-login"));
-        assert_eq!(base, "main");
+        let made = create(&site, "fix-login", &git, &no_net).unwrap();
         assert_eq!(
-            note.as_deref(),
+            made.path,
+            tmp.path().join("site-worktrees").join("fix-login")
+        );
+        assert_eq!(
+            (made.branch.as_str(), made.base.as_str()),
+            ("fix-login", "main")
+        );
+        assert_eq!(
+            made.note.as_deref(),
             Some("made from local main: no fetch from origin")
         );
         let head = std::process::Command::new("git")
             .arg("-C")
-            .arg(&path)
+            .arg(&made.path)
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "fix-login");
         // The branch is open there now: asked again, that folder.
-        let (again, _, note) = create(&site, "fix-login", &git, &no_net).unwrap();
+        let again = create(&site, "fix-login", &git, &no_net).unwrap();
         let resolved = crate::place::resolved;
-        assert_eq!((resolved(&again), note.is_some()), (resolved(&path), true));
-        // A branch that exists but is open nowhere: as it is, no new branch.
-        let (old, _, note) = create(&site, "old", &git, &no_net).unwrap();
-        assert_eq!(
-            (old, note),
-            (tmp.path().join("site-worktrees").join("old"), None)
-        );
+        assert_eq!(resolved(&again.path), resolved(&made.path));
+        assert!(again.note.is_some());
+        // A branch that exists but is open nowhere (an old one, maybe merged) is not
+        // taken as it is: a new branch with a number, and the note says why.
+        let other = create(&site, "old", &git, &no_net).unwrap();
+        assert_eq!(other.branch, "old-2");
+        assert_eq!(other.path, tmp.path().join("site-worktrees").join("old-2"));
+        assert!(other.note.unwrap().starts_with("old is taken: made old-2"));
         assert_eq!(
             create(&site, "a..b", &git, &no_net),
             Err("not a branch name: a..b".into())
@@ -347,6 +401,67 @@ mod tests {
         assert_eq!(
             create(&site, "-x", &git, &no_net),
             Err("not a branch name: -x".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_branch_is_measured_from_where_it_started_not_a_stale_local_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        run(&origin, &["init", "-q", "-b", "main"]);
+        run(&origin, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let site = tmp.path().join("site");
+        run(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                site.to_str().unwrap(),
+            ],
+        );
+        // origin moves on; the clone's main stays behind.
+        std::fs::write(origin.join("big.txt"), "a\nb\nc\n").unwrap();
+        run(&origin, &["add", "."]);
+        run(&origin, &["commit", "-q", "-m", "two"]);
+        let git = crate::github::worktree::git;
+        let made = create(&site, "fix", &git, &git).unwrap();
+        assert_eq!(made.base, "origin/main");
+        assert_eq!(made.note, None);
+        assert_eq!(
+            stat(&made.path, &made.base, &git),
+            Some(Stat::default()),
+            "a new branch has changed nothing yet"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_file_not_yet_added_counts_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run(&site, &["init", "-q", "-b", "main"]);
+        run(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let fix = tmp.path().join("fix");
+        run(
+            &site,
+            &["worktree", "add", "-q", "-b", "fix", fix.to_str().unwrap()],
+        );
+        std::fs::write(fix.join("notes.md"), "one\ntwo\n").unwrap();
+        std::fs::write(fix.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let git = crate::github::worktree::git;
+        assert_eq!(
+            stat(&fix, "main", &git),
+            Some(Stat {
+                files: 2,
+                added: 2,
+                removed: 0,
+                dirty: true
+            }),
+            "two new files; the text one's lines"
         );
     }
 

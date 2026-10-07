@@ -114,9 +114,9 @@ pub struct App {
     pub empty: Option<PathBuf>,
     /// The worktree `X` asked to remove, until the daemon answers.
     removing: Option<PathBuf>,
-    /// A task waiting for its new worktree: the `CreateWorktree` ticket and what to
-    /// start once it is made.
-    task_for: Option<(u64, QuickPrompt)>,
+    /// Tasks waiting for their new worktrees, by `CreateWorktree` ticket: what to start
+    /// once each is made.
+    task_for: HashMap<u64, QuickPrompt>,
     /// Each project's worktrees, as the daemon last sent them.
     pub worktrees: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
     pub mode: Mode,
@@ -271,7 +271,7 @@ impl App {
             selected: None,
             empty: None,
             removing: None,
-            task_for: None,
+            task_for: HashMap::new(),
             worktrees: HashMap::new(),
             mode: Mode::Grid,
             screens: HashMap::new(),
@@ -773,9 +773,7 @@ impl App {
                 branch,
                 note,
             } => {
-                if self.task_for.as_ref().is_some_and(|(t, _)| *t == ticket)
-                    && let Some((_, mut q)) = self.task_for.take()
-                {
+                if let Some(mut q) = self.task_for.remove(&ticket) {
                     self.message = note;
                     q.new_worktree = None;
                     q.worktree = Some((path, branch));
@@ -783,9 +781,7 @@ impl App {
                 }
             }
             ServerEvent::WorktreeNotMade { ticket, message } => {
-                if self.task_for.as_ref().is_some_and(|(t, _)| *t == ticket)
-                    && let Some((_, q)) = self.task_for.take()
-                {
+                if let Some(q) = self.task_for.remove(&ticket) {
                     // The words come back, with why.
                     self.message = Some(message);
                     self.overlays.push(Overlay::QuickPrompt(q));
@@ -2170,7 +2166,7 @@ impl App {
             let ticket = self.next_ticket;
             self.message = Some(format!("making a worktree {branch}…"));
             let project = q.project;
-            self.task_for = Some((ticket, q));
+            self.task_for.insert(ticket, q);
             return vec![Action::Send(ClientRequest::CreateWorktree {
                 project,
                 repo: new.repo,
@@ -3783,7 +3779,7 @@ impl App {
             return (vec![all], false);
         }
         let bands = crate::bands::bands(&path, sessions, self.project_worktrees());
-        let headers = crate::bands::headers(&bands);
+        let headers = crate::bands::headers(&path, &bands);
         (bands, headers)
     }
 
@@ -3944,6 +3940,13 @@ impl App {
             self.selected = self.project_sessions().first().map(|s| s.id);
             if matches!(self.mode, Mode::Focus | Mode::FocusPrefix) {
                 self.mode = Mode::Grid;
+            }
+            // No card: the first band's stand-in, if a worktree is shown.
+            if self.selected.is_none()
+                && let Some(Slot::Empty(path)) =
+                    self.grid_rows().into_iter().flat_map(|r| r.slots).next()
+            {
+                self.empty = Some(path);
             }
         }
     }
@@ -6451,6 +6454,48 @@ mod tests {
             app.message.as_deref(),
             Some("made from local main: no fetch from origin")
         );
+    }
+
+    #[test]
+    fn two_new_worktrees_on_their_way_each_start_their_own_task() {
+        let (mut app, _, _) = linked();
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        let mut tickets = vec![];
+        for text in ["first task", "second task"] {
+            app.on_key(k(K::Char('p')));
+            app.on_key(ctrl('u'));
+            for c in text.chars() {
+                app.on_key(k(K::Char(c)));
+            }
+            app.on_key(ctrl('n'));
+            let actions = app.on_key(k(K::Enter));
+            tickets.push(
+                sent(&actions)
+                    .iter()
+                    .find_map(|r| match r {
+                        ClientRequest::CreateWorktree { ticket, .. } => Some(*ticket),
+                        _ => None,
+                    })
+                    .unwrap(),
+            );
+        }
+        let mut prompts = vec![];
+        for (ticket, branch) in tickets.into_iter().zip(["first-task", "second-task"]) {
+            let actions = app.on_event(ServerEvent::WorktreeMade {
+                ticket,
+                path: format!("/w/site-worktrees/{branch}").into(),
+                branch: branch.into(),
+                note: None,
+            });
+            prompts.extend(sent(&actions).into_iter().filter_map(|r| match r {
+                ClientRequest::CreateSession { prompt, .. } => prompt.clone(),
+                _ => None,
+            }));
+        }
+        assert_eq!(prompts, ["first task", "second task"], "neither is lost");
     }
 
     #[test]
