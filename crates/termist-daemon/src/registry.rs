@@ -138,10 +138,19 @@ impl Registry {
         notes: UnboundedSender<SessionNote>,
         shutdown: oneshot::Sender<()>,
     ) -> Registry {
-        let (projects, sessions) = store.load().unwrap_or_else(|e| {
+        let (projects, mut sessions) = store.load().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "could not load stored sessions");
             (vec![], vec![])
         });
+        // Stored before sessions had folders: they ran in their project's.
+        for s in sessions
+            .iter_mut()
+            .filter(|s| s.info.cwd.as_os_str().is_empty())
+        {
+            if let Some(p) = projects.iter().find(|p| p.id == s.info.project) {
+                s.info.cwd = p.path.clone();
+            }
+        }
         // Names are `<label>-<n>`: go on from the highest n, so none repeats.
         let created = sessions
             .iter()
@@ -1176,6 +1185,12 @@ impl Registry {
         let Some(project) = self.projects.iter().find(|p| p.id == info.project) else {
             bail!("the project of {} is gone", info.name)
         };
+        // Its own folder while it is there; a worktree may have been removed since.
+        let cwd = if info.cwd.is_dir() {
+            info.cwd.clone()
+        } else {
+            project.path.clone()
+        };
         let kind = info.kind.clone();
         let (model, effort) = (info.model.clone(), info.effort.clone());
         // Without a conversation to resume (no prompt yet), start the agent fresh.
@@ -1190,7 +1205,7 @@ impl Registry {
             prompt: None,
             model: model.as_deref(),
             effort: effort.as_deref(),
-            cwd: &project.path,
+            cwd: &cwd,
             cols,
             rows,
             resume: resume.as_deref(),
@@ -1209,6 +1224,7 @@ impl Registry {
         s.resumable = resume.is_some();
         s.info.agent_session_id = launch.agent_session_id;
         s.info.last_activity_ms = now_ms();
+        s.info.cwd = cwd;
         let info = s.info.clone();
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
@@ -1780,6 +1796,32 @@ mod tests {
         reg.session_mut(id).unwrap().info.status = AgentStatus::Running;
         reg.poll_idle_titles(later(5000));
         assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_resumes_in_its_folder_or_its_project_s_when_the_folder_is_gone() {
+        let p = project();
+        let here = tempfile::tempdir().unwrap();
+        let mut old = claude(&p, "a1");
+        old.cwd = std::path::PathBuf::new(); // stored before sessions had folders
+        let mut kept = claude(&p, "a2");
+        kept.cwd = here.path().to_path_buf();
+        let mut gone = claude(&p, "a3");
+        gone.cwd = here.path().join("removed-worktree");
+        let mut reg = registry_with(&p, &[old.clone(), kept.clone(), gone.clone()]);
+        reg.launcher
+            .programs
+            .set(Harness::Claude, "/usr/bin/true".into());
+        assert_eq!(
+            reg.session(old.id).unwrap().info.cwd,
+            p.path,
+            "the project's"
+        );
+        reg.resume(kept.id, 80, 24).unwrap();
+        assert_eq!(reg.session(kept.id).unwrap().info.cwd, here.path());
+        reg.resume(gone.id, 80, 24).unwrap();
+        assert_eq!(reg.session(gone.id).unwrap().info.cwd, p.path);
     }
 
     fn cancelled_by_title(reg: &mut Registry, p: &ProjectInfo) -> SessionId {
