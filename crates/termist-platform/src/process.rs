@@ -61,7 +61,23 @@ pub fn run_without(
     stdin: Option<&str>,
     limit: Duration,
 ) -> Result<Output, RunError> {
+    run_at(None, program, args, env, remove, stdin, limit)
+}
+
+/// `run_without`, in the folder `dir` (ours when `None`).
+pub fn run_at(
+    dir: Option<&Path>,
+    program: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    remove: &[&str],
+    stdin: Option<&str>,
+    limit: Duration,
+) -> Result<Output, RunError> {
     let mut cmd = Command::new(program);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
     cmd.args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()

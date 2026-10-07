@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod poller;
 pub mod query;
 pub mod repos;
+pub mod worktree;
 pub mod write;
 
 use crate::session::ClientId;
@@ -96,6 +97,14 @@ pub enum Job {
         client: ClientId,
         ticket: u64,
     },
+    /// A worktree on the pull request's branch, beside the repo at `repo`.
+    Worktree {
+        gh: GhHandle,
+        pr: PrRef,
+        account: Account,
+        repo: PathBuf,
+        branch: String,
+    },
     /// Marks a file viewed on GitHub, or not, as `client` asked.
     MarkViewed {
         gh: GhHandle,
@@ -155,6 +164,11 @@ pub enum Done {
         viewed: bool,
         client: ClientId,
         reply: Result<(), GhState>,
+    },
+    /// The worktree's folder and whether it was made now, or why there is none.
+    Worktree {
+        pr: PrRef,
+        reply: Result<(PathBuf, bool), String>,
     },
 }
 
@@ -316,6 +330,8 @@ pub struct GitHub {
     /// never open two pending reviews.
     writes: HashMap<PrRef, VecDeque<(ClientId, u64, PrWrite)>>,
     writing: HashSet<PrRef>,
+    /// The clients waiting for a pull request's worktree; one job makes it for all.
+    worktrees: HashMap<PrRef, Vec<ClientId>>,
     /// Accounts low on their hourly budget, until when.
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
@@ -352,6 +368,7 @@ impl GitHub {
             diff_stale: HashSet::new(),
             writes: HashMap::new(),
             writing: HashSet::new(),
+            worktrees: HashMap::new(),
             slow_until: HashMap::new(),
             seen,
         }
@@ -593,6 +610,11 @@ impl GitHub {
             return fx;
         }
         if !self.enabled {
+            // The asking client waits for an answer; the others hear nothing while off.
+            if let ClientRequest::OpenWorktree { pr } = req {
+                self.worktrees.entry(pr).or_default().push(client);
+                self.worktree_done(pr, Err("GitHub is off".into()), &mut fx);
+            }
             return fx;
         }
         match req {
@@ -666,6 +688,17 @@ impl GitHub {
                         self.diff_failed.remove(&pr);
                         self.diff_stale.insert(pr);
                     }
+                }
+            }
+            ClientRequest::OpenWorktree { pr } => {
+                let waiting = self.worktrees.entry(pr).or_default();
+                waiting.push(client);
+                if waiting.len() > 1 {
+                    return fx; // on its way: the answer goes to every client waiting
+                }
+                match self.worktree_job(pr) {
+                    Ok(job) => fx.jobs.push(job),
+                    Err(why) => self.worktree_done(pr, Err(why.into()), &mut fx),
                 }
             }
             ClientRequest::WritePr { pr, ticket, write } => {
@@ -814,6 +847,54 @@ impl GitHub {
         }
         fx.extend(self.rounds(now, projects, &gh, &accounts));
         fx
+    }
+
+    /// The job that opens `pr`'s worktree, or why it cannot start.
+    fn worktree_job(&self, pr: PrRef) -> Result<Job, &'static str> {
+        let (gh, accounts) = self.ready().ok_or("gh is not ready")?;
+        let r = self.repo(pr.repo).ok_or("not loaded yet")?;
+        let login = r.account().ok_or("no account for this repo")?;
+        let account = accounts
+            .into_iter()
+            .find(|a| a.login == login)
+            .ok_or("no account for this repo")?;
+        let branch = r
+            .prs
+            .iter()
+            .find(|p| p.number == pr.number)
+            .or_else(|| self.cached(pr).map(|d| &d.summary))
+            .map(|p| p.head.clone())
+            .ok_or("not loaded yet")?;
+        Ok(Job::Worktree {
+            gh,
+            pr,
+            account,
+            repo: r.stored.path.clone(),
+            branch,
+        })
+    }
+
+    /// Answers every client waiting for `pr`'s worktree.
+    fn worktree_done(
+        &mut self,
+        pr: PrRef,
+        reply: Result<(PathBuf, bool), String>,
+        fx: &mut Effects,
+    ) {
+        for client in self.worktrees.remove(&pr).unwrap_or_default() {
+            let event = match &reply {
+                Ok((path, created)) => ServerEvent::WorktreeReady {
+                    pr,
+                    path: path.clone(),
+                    created: *created,
+                },
+                Err(why) => ServerEvent::WorktreeFailed {
+                    pr,
+                    message: format!("couldn't open a worktree · {why}"),
+                },
+            };
+            fx.send(To::One(client), event);
+        }
     }
 
     fn cached(&self, pr: PrRef) -> Option<&PrDetail> {
@@ -1286,6 +1367,7 @@ impl GitHub {
                 };
                 self.to_diff_watchers(pr, event, &mut fx);
             }
+            Done::Worktree { pr, reply } => self.worktree_done(pr, reply, &mut fx),
             Done::Written {
                 pr,
                 client,
@@ -2754,6 +2836,103 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn worktree_jobs(fx: &Effects) -> Vec<(String, String, PathBuf)> {
+        fx.jobs
+            .iter()
+            .filter_map(|j| match j {
+                Job::Worktree {
+                    branch,
+                    account,
+                    repo,
+                    ..
+                } => Some((branch.clone(), account.login.clone(), repo.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_worktree_is_made_once_for_every_client_waiting_and_says_why_it_cannot() {
+        let mut w = world(&["api"]);
+        let nowhere = PrRef {
+            repo: RepoId(99),
+            number: 1,
+        };
+        let failed = |pr, why: &str| ServerEvent::WorktreeFailed {
+            pr,
+            message: format!("couldn't open a worktree · {why}"),
+        };
+        let fx = w.request(ClientRequest::OpenWorktree { pr: nowhere });
+        assert_eq!(
+            fx.events,
+            [(To::One(w.client), failed(nowhere, "GitHub is off"))]
+        );
+        w.join(w.client);
+        let fx = w.request(ClientRequest::OpenWorktree { pr: nowhere });
+        assert_eq!(
+            fx.events,
+            [(To::One(w.client), failed(nowhere, "gh is not ready"))]
+        );
+        let (mut w, pr) = looking(false);
+        let fx = w.request(ClientRequest::OpenWorktree { pr });
+        assert_eq!(
+            fx.events,
+            [(To::One(w.client), failed(pr, "not loaded yet"))]
+        );
+        let mut detail = detail_at("h1");
+        detail.summary.head = "fix/login".into();
+        w.done(Done::Detail {
+            pr,
+            reply: Ok(detail),
+        });
+        let fx = w.request(ClientRequest::OpenWorktree { pr });
+        let site = w.gh.repo(pr.repo).unwrap().stored.path.clone();
+        assert_eq!(
+            worktree_jobs(&fx),
+            [("fix/login".to_string(), "work".to_string(), site)],
+            "as the repo's reader"
+        );
+        let other = ClientId(2);
+        w.join(other);
+        let fx = w.gh.request(
+            other,
+            ClientRequest::OpenWorktree { pr },
+            &w.store,
+            &w.projects,
+            w.now,
+        );
+        assert!(
+            fx.jobs.is_empty() && fx.events.is_empty(),
+            "on its way already"
+        );
+        let path = PathBuf::from("/w/site-worktrees/fix/login");
+        let fx = w.done(Done::Worktree {
+            pr,
+            reply: Ok((path.clone(), true)),
+        });
+        let ready = ServerEvent::WorktreeReady {
+            pr,
+            path,
+            created: true,
+        };
+        assert_eq!(
+            fx.events,
+            [(To::One(w.client), ready.clone()), (To::One(other), ready)]
+        );
+        w.request(ClientRequest::OpenWorktree { pr });
+        let fx = w.done(Done::Worktree {
+            pr,
+            reply: Err("could not find pull request 212".into()),
+        });
+        assert_eq!(
+            fx.events,
+            [(
+                To::One(w.client),
+                failed(pr, "could not find pull request 212")
+            )]
+        );
     }
 
     #[test]
