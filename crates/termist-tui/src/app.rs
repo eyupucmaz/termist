@@ -199,6 +199,9 @@ pub struct App {
     pub drafts: HashMap<(PrRef, Target), String>,
     /// Writes on their way, by ticket: the draft to forget once GitHub took them.
     writes: HashMap<u64, Option<(PrRef, Target)>>,
+    /// The worktree asked for with `w` (or `a`): its pull request, and the words the
+    /// quick prompt opens with there (`None`: the pull request's own line).
+    worktree_for: Option<(PrRef, Option<String>)>,
     /// The comment `D` asked to delete, waiting for a yes.
     pub deleting: Option<(PrRef, String, CommentKind)>,
     next_ticket: u64,
@@ -303,6 +306,7 @@ impl App {
             pr_diffs: HashMap::new(),
             drafts: HashMap::new(),
             writes: HashMap::new(),
+            worktree_for: None,
             deleting: None,
             next_ticket: 0,
             pr_layout: RefCell::default(),
@@ -730,7 +734,34 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
-            ServerEvent::WorktreeReady { .. } | ServerEvent::WorktreeFailed { .. } => {}
+            ServerEvent::WorktreeReady { pr, path, .. } => {
+                // Only the one asked for; another client's answer leaves it waiting.
+                if self
+                    .worktree_for
+                    .as_ref()
+                    .is_some_and(|(want, _)| *want == pr)
+                    && let Some((_, text)) = self.worktree_for.take()
+                {
+                    return self.worktree_ready(pr, path, text);
+                }
+            }
+            ServerEvent::WorktreeFailed { pr, message } => {
+                if self
+                    .worktree_for
+                    .as_ref()
+                    .is_some_and(|(want, _)| *want == pr)
+                {
+                    self.worktree_for = None;
+                    match self.view {
+                        View::Prs(_) => self.message = Some(message),
+                        _ => self.toasts.push(Toast {
+                            text: format!("✗ {message}"),
+                            kind: ToastKind::Failed,
+                            until: Instant::now() + toast::AGENT_FOR,
+                        }),
+                    }
+                }
+            }
             ServerEvent::PrWritten { ticket, .. } => {
                 if let Some(Some(target)) = self.writes.remove(&ticket) {
                     self.drafts.remove(&target);
@@ -1534,6 +1565,17 @@ impl App {
             self.message = Some("no project open".into());
             return vec![];
         };
+        let text = self.prompt_draft.clone().unwrap_or_default();
+        self.quick_prompt_in(project, &text, None)
+    }
+
+    /// The quick prompt for `project` with `text` in it, for its folder or a worktree.
+    fn quick_prompt_in(
+        &mut self,
+        project: ProjectId,
+        text: &str,
+        worktree: Option<(PathBuf, String)>,
+    ) -> Vec<Action> {
         let launch = self
             .state
             .last_launch
@@ -1552,12 +1594,13 @@ impl App {
                 model: None,
                 effort: None,
             });
-        let mut input = TextInput::with_text(self.prompt_draft.as_deref().unwrap_or(""), true);
+        let mut input = TextInput::with_text(text, true);
         input.set_history(self.prompt_history.clone());
         self.overlays.push(Overlay::QuickPrompt(QuickPrompt {
             input,
             project,
             launch,
+            worktree,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -1622,6 +1665,9 @@ impl App {
     /// A quick prompt closed without starting: its text waits for the next, unless it is
     /// blank or an earlier prompt recalled and left as it was (`↑` brings that back).
     fn keep_draft(&mut self, q: &QuickPrompt) {
+        if q.worktree.is_some() {
+            return; // words for a pull request's worktree, not a draft for `p`
+        }
         let text = q.input.text();
         let own = !text.trim().is_empty() && !q.input.is_from_history();
         self.prompt_draft = own.then(|| text.to_string());
@@ -1656,7 +1702,7 @@ impl App {
             Action::Send(ClientRequest::CreateSession {
                 project: q.project,
                 kind: SessionKind::Agent { harness },
-                cwd: None,
+                cwd: q.worktree.map(|(path, _)| path),
                 prompt,
                 model: q.launch.model,
                 effort: q.launch.effort,
@@ -1832,8 +1878,11 @@ impl App {
             && let Some(id) = picker.selected().map(|p| p.id)
         {
             self.overlays.pop();
-            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut()
+                && q.project != id
+            {
                 q.project = id;
+                q.worktree = None; // the worktree was the other project's
             }
         }
         vec![]
@@ -2267,6 +2316,44 @@ impl App {
         };
     }
 
+    /// Asks the daemon for `pr`'s worktree; the quick prompt opens there with `text`
+    /// (or the pull request's own line) when it is ready.
+    fn ask_worktree(&mut self, pr: PrRef, text: Option<String>) -> Vec<Action> {
+        self.worktree_for = Some((pr, text));
+        self.message = Some(format!("opening a worktree for #{}…", pr.number));
+        vec![Action::Send(ClientRequest::OpenWorktree { pr })]
+    }
+
+    /// The pull request as the inbox last read it, with its project.
+    fn pr_summary(&self, pr: PrRef) -> Option<(ProjectId, &termist_core::github::PrSummary)> {
+        self.prs.iter().find_map(|(project, data)| {
+            let summary = data
+                .repos
+                .iter()
+                .find(|r| r.repo == pr.repo)?
+                .prs
+                .iter()
+                .find(|p| p.number == pr.number)?;
+            Some((*project, summary))
+        })
+    }
+
+    /// The worktree is there: the quick prompt opens in it.
+    fn worktree_ready(&mut self, pr: PrRef, path: PathBuf, text: Option<String>) -> Vec<Action> {
+        self.message = None;
+        let Some((project, summary)) = self.pr_summary(pr) else {
+            return vec![];
+        };
+        let branch = summary.head.clone();
+        let text = text.unwrap_or_else(|| {
+            format!(
+                "Pull request #{} \"{}\" ({}): {} into {}. ",
+                pr.number, summary.title, summary.url, summary.head, summary.base
+            )
+        });
+        self.quick_prompt_in(project, &text, Some((path, branch)))
+    }
+
     /// The open pull request of the selected card's branch.
     pub fn card_pr(&self) -> Option<PrRef> {
         let id = self.selected?;
@@ -2390,6 +2477,16 @@ impl App {
                 vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
             }
             Some(PrAction::Repos) => self.open_repos(),
+            Some(PrAction::Worktree) => {
+                let pr = match &self.view {
+                    View::Prs(v) => v.detail.as_ref().map(|d| d.pr).or(v.selected),
+                    _ => None,
+                };
+                match pr {
+                    Some(pr) => self.ask_worktree(pr, None),
+                    None => vec![],
+                }
+            }
             Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
             Some(PrAction::Viewed { pr, path, viewed }) => {
                 vec![Action::Send(ClientRequest::SetFileViewed {
@@ -5458,6 +5555,77 @@ mod tests {
             repos: vec![crate::prs::fixtures::repo(7, "site", listed)],
         });
         (app, s, pr)
+    }
+
+    #[test]
+    fn w_opens_a_worktree_and_the_quick_prompt_starts_the_agent_there() {
+        let (mut app, s, pr) = linked();
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('w')))),
+            [&ClientRequest::OpenWorktree { pr }]
+        );
+        assert_eq!(app.message.as_deref(), Some("opening a worktree for #212…"));
+        let other = PrRef { number: 198, ..pr };
+        app.on_event(ServerEvent::WorktreeReady {
+            pr: other,
+            path: "/w/elsewhere".into(),
+            created: true,
+        });
+        assert!(app.overlays.is_empty(), "not the one asked for");
+        let path = PathBuf::from("/w/site-worktrees/feat");
+        app.on_event(ServerEvent::WorktreeReady {
+            pr,
+            path: path.clone(),
+            created: true,
+        });
+        let Some(Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("the quick prompt")
+        };
+        assert_eq!(q.worktree, Some((path.clone(), "feat".to_string())));
+        assert_eq!(
+            q.input.text(),
+            "Pull request #212 \"Fix login\" (https://github.com/acme/site/pull/212): feat into main. "
+        );
+        assert!(crate::overlay_view::launch_line(&app, q).starts_with("site ⎇ feat ^P"));
+        let actions = app.on_key(k(K::Enter));
+        let created = sent(&actions).into_iter().find_map(|r| match r {
+            ClientRequest::CreateSession { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        });
+        assert_eq!(created, Some(Some(path)));
+        assert_eq!(app.prompt_draft, None);
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_be_made_says_why_where_you_are() {
+        let (mut app, s, pr) = linked();
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('w')));
+        let why = "couldn't open a worktree · fatal: invalid reference";
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: why.into(),
+        });
+        assert_eq!(app.message.as_deref(), Some(why));
+        app.on_key(k(K::Char('w')));
+        app.on_key(k(K::Char('v'))); // back to the grid while it is on its way
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: why.into(),
+        });
+        let texts: Vec<String> = app.toasts.items().map(|t| t.text.clone()).collect();
+        assert_eq!(
+            texts,
+            [format!("✗ {why}")],
+            "a toast where the list is gone"
+        );
     }
 
     #[test]

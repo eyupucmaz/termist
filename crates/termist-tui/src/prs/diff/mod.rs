@@ -407,6 +407,7 @@ impl DiffView {
                     _ => Ask::Delete(Subject::Thread(thread)),
                 })));
             }
+            KeyCode::Char('w') if !ctrl => return Some(DiffAction::Pr(PrAction::Worktree)),
             KeyCode::Char('b') => {
                 let i = self.index(diff)?;
                 return Some(DiffAction::Pr(PrAction::Browser(diff.files[i].url.clone())));

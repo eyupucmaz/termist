@@ -255,7 +255,8 @@ fn text_box(
     }
 }
 
-/// `orbit-api ^P · claude Tab · opus · high ^O`
+/// `orbit-api ^P · claude Tab · opus · high ^O`; `orbit-api ⎇ fix/login ^P · …` in a
+/// pull request's worktree.
 pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
     let project = app
         .state
@@ -280,8 +281,13 @@ pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
         .as_deref()
         .map(|e| format!(" · {e}"))
         .unwrap_or_default();
+    let worktree = q
+        .worktree
+        .as_ref()
+        .map(|(_, branch)| format!(" ⎇ {branch}"))
+        .unwrap_or_default();
     format!(
-        "{project} ^P · {}{missing} Tab · {model}{effort} ^O",
+        "{project}{worktree} ^P · {}{missing} Tab · {model}{effort} ^O",
         harness.id()
     )
 }

@@ -276,6 +276,9 @@ pub struct QuickPrompt {
     pub input: TextInput,
     pub project: ProjectId,
     pub launch: LaunchOptions,
+    /// The worktree the agent starts in and its branch (from `w`); `None` is the
+    /// project's folder.
+    pub worktree: Option<(std::path::PathBuf, String)>,
 }
 
 impl QuickPrompt {
@@ -602,6 +605,7 @@ mod tests {
             input: TextInput::new(true),
             project: ProjectId::new(),
             launch: launch(Harness::Claude, Some("opus"), Some("high")),
+            worktree: None,
         };
         q.set_harness(Harness::Codex);
         assert_eq!(q.launch, launch(Harness::Codex, None, Some("high")));

@@ -231,6 +231,8 @@ pub enum PrAction {
     Ask(Ask),
     /// Why a key did nothing, for the footer.
     Note(&'static str),
+    /// `w`: a worktree on the pull request's branch, and an agent there.
+    Worktree,
 }
 
 /// A write asked for by a key.
@@ -427,6 +429,7 @@ impl PrView {
                 self.repair(&list);
             }
             KeyCode::Char('m') => return Some(PrAction::Repos),
+            KeyCode::Char('w') => return Some(PrAction::Worktree),
             KeyCode::Char('b') => {
                 return self
                     .selection(data)
@@ -615,6 +618,7 @@ impl PrView {
                     d.toggled.insert(id.clone());
                 }
             }
+            KeyCode::Char('w') => return Some(PrAction::Worktree),
             KeyCode::Char('b') => {
                 let check = if checks {
                     layout.checks.get(d.check).cloned().flatten()
