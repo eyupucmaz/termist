@@ -357,6 +357,25 @@ impl GitHub {
         }
     }
 
+    /// The project's repos with their open pull requests as last read, for telling
+    /// which pull request a session's branch is.
+    pub fn repo_views(&self, project: ProjectId) -> Vec<crate::place::RepoView> {
+        self.repos
+            .iter()
+            .filter(|r| r.stored.project == project && r.present)
+            .map(|r| crate::place::RepoView {
+                id: r.stored.id,
+                path: crate::place::resolved(&r.stored.path),
+                slug: format!("{}/{}", r.stored.owner, r.stored.name),
+                prs: r
+                    .prs
+                    .iter()
+                    .map(|p| (p.number, p.head.clone(), p.head_repo.clone()))
+                    .collect(),
+            })
+            .collect()
+    }
+
     pub fn gone(&mut self, client: ClientId) {
         self.clients.remove(&client);
     }

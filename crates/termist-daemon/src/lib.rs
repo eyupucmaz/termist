@@ -8,6 +8,7 @@ pub mod launch;
 pub mod logging;
 pub mod models;
 pub mod opencode;
+pub mod place;
 pub mod registry;
 pub mod resolve;
 pub mod server;
