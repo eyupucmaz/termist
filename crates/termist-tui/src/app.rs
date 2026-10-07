@@ -997,13 +997,17 @@ impl App {
                 if self.overlays.is_empty()
                     && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
                 {
-                    let (card, more) = {
+                    let (card, more, band_pr) = {
                         let hits = self.hits.borrow();
                         (
                             hits.card_at(ev.column, ev.row),
                             hits.more_at(ev.column, ev.row),
+                            hits.band_pr_at(ev.column, ev.row),
                         )
                     };
+                    if let (Some(pr), Some(project)) = (band_pr, self.project) {
+                        return self.reveal_pr(project, pr);
+                    }
                     if let Some(id) = card {
                         return self.click_card(id);
                     }
@@ -2254,8 +2258,47 @@ impl App {
         self.mode = Mode::Grid;
         self.view = match self.view {
             View::Prs(_) => View::Grid,
-            _ => View::Prs(PrView::for_project(self.project)),
+            _ => {
+                // On the selected card's pull request, when its branch has one.
+                let mut view = PrView::for_project(self.project);
+                view.selected = self.card_pr();
+                View::Prs(view)
+            }
         };
+    }
+
+    /// The open pull request of the selected card's branch.
+    pub fn card_pr(&self) -> Option<PrRef> {
+        let id = self.selected?;
+        let s = self.state.sessions.iter().find(|s| s.id == id)?;
+        s.place.as_ref()?.pr
+    }
+
+    /// `Shift+V`: the selected card's pull request in the browser.
+    fn card_pr_in_browser(&mut self) -> Vec<Action> {
+        let url = self.card_pr().and_then(|pr| {
+            let repo = self
+                .prs
+                .values()
+                .flat_map(|d| &d.repos)
+                .find(|r| r.repo == pr.repo)?;
+            Some(
+                repo.prs
+                    .iter()
+                    .find(|p| p.number == pr.number)
+                    .map(|p| p.url.clone())
+                    .unwrap_or_else(|| {
+                        format!("https://github.com/{}/pull/{}", repo.slug, pr.number)
+                    }),
+            )
+        });
+        match url {
+            Some(url) => vec![Action::OpenUrl(url)],
+            None => {
+                self.message = Some("no pull request for this branch".into());
+                vec![]
+            }
+        }
     }
 
     /// Keeps the PR view on the current project's data, and tells the daemon what is
@@ -2438,6 +2481,7 @@ impl App {
             }
             KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
             KeyAction::PullRequests => self.toggle_prs(),
+            KeyAction::PullRequestInBrowser => return self.card_pr_in_browser(),
             KeyAction::RefreshGitHub => {
                 if let Some(project) = self.project
                     && self.config.github.enabled
@@ -5366,6 +5410,98 @@ mod tests {
         }
         app.set_card_window(2, 2 * crate::ui::CARD_H);
         assert_eq!(app.card_scroll, 0);
+    }
+
+    /// A project with a card on pull request #212's branch and one on main.
+    fn linked() -> (App, Vec<SessionInfo>, PrRef) {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(7),
+            number: 212,
+        };
+        let at = |name: &str, root: &str, pr: Option<PrRef>| {
+            let mut s = session(p.id, name, AgentStatus::Finished);
+            s.cwd = root.into();
+            s.place = Some(Box::new(termist_core::Place {
+                root: root.into(),
+                branch: Some("b".into()),
+                commit: None,
+                repo: Some(termist_core::github::RepoId(7)),
+                pr,
+                gone: false,
+            }));
+            s
+        };
+        let s = vec![
+            at("main", "/w/site", None),
+            at("fix", "/w/site-worktrees/fix", Some(pr)),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p.clone()],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        let listed = vec![
+            crate::prs::fixtures::summary(198, "Add a filter", "carol"),
+            crate::prs::fixtures::summary(212, "Fix login", "bob"),
+        ];
+        app.on_event(ServerEvent::Prs {
+            project: p.id,
+            state: GhState::Ok,
+            discovered: 1,
+            repos: vec![crate::prs::fixtures::repo(7, "site", listed)],
+        });
+        (app, s, pr)
+    }
+
+    #[test]
+    fn shift_v_opens_the_card_s_pull_request_in_the_browser() {
+        let (mut app, s, _) = linked();
+        app.select(s[1].id);
+        assert_eq!(
+            app.on_key(k(K::Char('V'))),
+            [Action::OpenUrl(
+                "https://github.com/acme/site/pull/212".into()
+            )]
+        );
+        app.select(s[0].id);
+        assert!(app.on_key(k(K::Char('V'))).is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("no pull request for this branch")
+        );
+    }
+
+    #[test]
+    fn v_on_a_card_with_a_pull_request_opens_the_list_on_it_and_a_band_s_number_opens_it() {
+        let (mut app, s, pr) = linked();
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        let View::Prs(view) = &app.view else {
+            panic!("the pull requests")
+        };
+        assert_eq!((view.selected, view.detail.is_none()), (Some(pr), true));
+        app.on_key(k(K::Char('v')));
+        app.select(s[0].id);
+        app.on_key(k(K::Char('v')));
+        let View::Prs(view) = &app.view else { panic!() };
+        assert_ne!(view.selected, Some(pr), "a card without one: as before");
+        app.on_key(k(K::Char('v')));
+        app.hits
+            .borrow_mut()
+            .band_prs
+            .push((pr, ratatui::layout::Rect::new(20, 6, 4, 1)));
+        click(&mut app, (21, 6));
+        let View::Prs(view) = &app.view else {
+            panic!("the pull request")
+        };
+        assert_eq!(view.detail.as_ref().map(|d| d.pr), Some(pr));
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub enum Action {
     ArchiveView,
     /// The pull requests of the project (the view, or back to the grid).
     PullRequests,
+    /// The selected card's pull request, in the browser.
+    PullRequestInBrowser,
     /// Read GitHub again now.
     RefreshGitHub,
     Palette,
@@ -91,6 +93,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     Archive,
     ArchiveView,
     PullRequests,
+    PullRequestInBrowser,
     RefreshGitHub,
     Kill,
     Settings,
@@ -132,6 +135,7 @@ impl Action {
             Archive => "archive",
             ArchiveView => "archive_view",
             PullRequests => "pull_requests",
+            PullRequestInBrowser => "pull_request_in_browser",
             RefreshGitHub => "refresh_github",
             Palette => "palette",
             HalfPageDown => "half_page_down",
@@ -177,6 +181,7 @@ impl Action {
             Archive => "archive",
             ArchiveView => "archived",
             PullRequests => "pull requests",
+            PullRequestInBrowser => "PR in browser",
             RefreshGitHub => "refresh",
             Palette => "sessions",
             HalfPageDown => "half page down",
@@ -211,6 +216,7 @@ impl Action {
             Archive => "archive the card",
             ArchiveView => "show archived cards",
             PullRequests => "the project's pull requests",
+            PullRequestInBrowser => "the card's pull request in the browser",
             RefreshGitHub => "read GitHub again now",
             Palette => "find a session",
             HalfPageDown => "half a page down",
@@ -424,6 +430,7 @@ impl Keymap {
             ("a", Archive),
             ("A", ArchiveView),
             ("v", PullRequests),
+            ("V", PullRequestInBrowser),
             ("R", RefreshGitHub),
             ("d", Kill),
             ("s", Settings),
