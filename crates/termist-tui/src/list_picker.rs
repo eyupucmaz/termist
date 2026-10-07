@@ -116,6 +116,11 @@ impl<T> ListPicker<T> {
             .map(|(pos, &i)| (i, &self.items[i], pos == self.highlight))
     }
 
+    /// What item `i` is shown as.
+    pub fn label(&self, i: usize) -> &str {
+        &self.labels[i]
+    }
+
     pub fn visible_len(&self) -> usize {
         self.visible.len()
     }

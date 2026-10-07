@@ -4,6 +4,7 @@
 pub mod compose;
 pub mod detail_view;
 pub mod diff;
+pub mod hand;
 pub mod inbox_view;
 pub mod markdown;
 pub mod timeline;
@@ -233,6 +234,10 @@ pub enum PrAction {
     Note(&'static str),
     /// `w`: a worktree on the pull request's branch, and an agent there.
     Worktree,
+    /// `Space`: mark this thread to hand to an agent, or unmark it.
+    Mark(String),
+    /// `a`: hand the marked threads (else this one) to an agent.
+    Hand(Option<String>),
 }
 
 /// A write asked for by a key.
@@ -546,6 +551,15 @@ impl PrView {
                 } else {
                     Ask::Resolve { thread }
                 }));
+            }
+            KeyCode::Char(' ') if talk => {
+                return Some(match item.and_then(|i| i.thread.clone()) {
+                    Some(thread) => PrAction::Mark(thread),
+                    None => PrAction::Note("not on a thread"),
+                });
+            }
+            KeyCode::Char('a') if !ctrl && talk => {
+                return Some(PrAction::Hand(item.and_then(|i| i.thread.clone())));
             }
             KeyCode::Char(c @ ('e' | 'D')) if talk => {
                 let Some(mine) = item.and_then(|i| i.mine.clone()) else {

@@ -744,6 +744,28 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let area = centered(body, 68, lines.len() as u16 + 2);
             boxed(f, t, area, "new key", lines);
         }
+        Overlay::Hand { pr, picker, .. } => {
+            let rows = picker
+                .visible()
+                .map(|(i, _, on)| {
+                    let label = format!(" {}", picker.label(i));
+                    Line::from(Span::styled(label, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: format!("review comments of #{} to", pr.number),
+                    width: 56,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -866,6 +888,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::ModelName(_) => "Enter use this model · Esc back",
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
         Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",
+        Overlay::Hand { .. } => "↑/↓ choose · Enter there · Esc cancel",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
         Overlay::OpenProject(_) => {

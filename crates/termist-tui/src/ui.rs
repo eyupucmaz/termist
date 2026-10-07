@@ -2486,6 +2486,98 @@ mod tests {
         app
     }
 
+    /// The detail's conversation with the cursor on thread `id`.
+    fn on_thread(app: &mut App, id: &str) {
+        render(app, 90, 40);
+        let layout = app.pr_layout.borrow().clone();
+        let at = layout
+            .items
+            .iter()
+            .position(|i| i.thread.as_deref() == Some(id))
+            .unwrap();
+        for _ in 0..at {
+            press(app, 'j');
+        }
+    }
+
+    #[test]
+    fn space_marks_threads_and_a_hands_them_to_a_new_agent_or_the_card_on_the_branch() {
+        use crate::overlay::{HandTo, Overlay};
+        use termist_core::github::{PrRef, RepoId};
+        let pr = PrRef {
+            repo: RepoId(1),
+            number: 212,
+        };
+        let mut app = detail_with_yours();
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        on_thread(&mut app, "T2");
+        press(&mut app, 'a');
+        assert_eq!(
+            app.message.as_deref(),
+            Some("resolved: mark it with Space to send it")
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        on_thread(&mut app, "T1");
+        press(&mut app, ' ');
+        press(&mut app, ' ');
+        assert!(!app.marks.contains_key(&pr), "Space again unmarks");
+        press(&mut app, ' ');
+        assert_eq!(app.marks[&pr].iter().collect::<Vec<_>>(), ["T1"]);
+        assert!(screen_text(&render(&mut app, 90, 40)).contains("src/search/DealerFilter.tsx:"));
+        assert!(screen_text(&render(&mut app, 90, 40)).contains(" ◆ · open"));
+        // No card on its branch: a new agent, in its worktree.
+        let actions = press(&mut app, 'a');
+        assert!(actions.contains(&crate::app::Action::Send(
+            termist_core::ClientRequest::OpenWorktree { pr }
+        )));
+        app.on_event(ServerEvent::WorktreeReady {
+            pr,
+            path: "/x-worktrees/feat".into(),
+            created: false,
+        });
+        let Some(Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("the quick prompt")
+        };
+        assert!(
+            q.input
+                .text()
+                .starts_with("Review comments on #212 (feat):\n\n1. src/search/DealerFilter.tsx:")
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.marks.contains_key(&pr), "not sent: still marked");
+        // A live agent on the branch: it can take them as a follow-up.
+        let mut card = app.state.sessions[0].clone();
+        card.id = SessionId::new();
+        card.status = AgentStatus::Running;
+        card.place = Some(Box::new(termist_core::Place {
+            root: "/x-worktrees/feat".into(),
+            branch: Some("feat".into()),
+            commit: None,
+            repo: Some(RepoId(1)),
+            pr: Some(pr),
+            gone: false,
+        }));
+        app.on_event(ServerEvent::SessionUpdated(card.clone()));
+        press(&mut app, 'a');
+        let Some(Overlay::Hand { picker, .. }) = app.overlays.last() else {
+            panic!("whom to")
+        };
+        assert_eq!(picker.items(), [HandTo::Card(card.id), HandTo::New]);
+        assert_eq!(picker.label(1), "new agent in ⎇ feat");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(Overlay::FollowUp { session, input }) = app.overlays.last() else {
+            panic!("the follow-up")
+        };
+        assert_eq!(*session, card.id);
+        assert!(input.text().starts_with("Review comments on #212"));
+        let sent = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(sent.iter().any(|a| matches!(
+            a,
+            crate::app::Action::Send(termist_core::ClientRequest::Input { session, .. }) if *session == card.id
+        )));
+        assert!(!app.marks.contains_key(&pr), "sent: the marks are done");
+    }
+
     #[test]
     fn c_writes_on_the_pull_request_and_a_reviews_it() {
         use crate::prs::compose::Target;

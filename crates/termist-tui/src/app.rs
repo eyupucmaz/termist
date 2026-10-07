@@ -3,8 +3,8 @@ use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
-    self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
-    QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
+    self, BrowseEntry, Capture, CaptureTarget, HandTo, ModelChoice, ModelPicker, OpenProject,
+    Overlay, QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
 use crate::prs::compose::{Compose, ComposeAction, Sending, Target};
 use crate::prs::{self, Ask, Mine, PrAction, PrLayout, PrView, ProjectPrs, Subject};
@@ -19,7 +19,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
@@ -202,6 +202,11 @@ pub struct App {
     /// The worktree asked for with `w` (or `a`): its pull request, and the words the
     /// quick prompt opens with there (`None`: the pull request's own line).
     worktree_for: Option<(PrRef, Option<String>)>,
+    /// Review threads marked with `Space`, by pull request, to hand to an agent.
+    pub marks: HashMap<PrRef, BTreeSet<String>>,
+    /// Threads of this pull request are on their way to an agent: its marks go once
+    /// they are sent.
+    hand_for: Option<PrRef>,
     /// The comment `D` asked to delete, waiting for a yes.
     pub deleting: Option<(PrRef, String, CommentKind)>,
     next_ticket: u64,
@@ -307,6 +312,8 @@ impl App {
             drafts: HashMap::new(),
             writes: HashMap::new(),
             worktree_for: None,
+            marks: HashMap::new(),
+            hand_for: None,
             deleting: None,
             next_ticket: 0,
             pr_layout: RefCell::default(),
@@ -1483,6 +1490,7 @@ impl App {
             Some(Overlay::ModelName(_)) => self.model_name_key(key),
             Some(Overlay::Project(_)) => self.project_key(key),
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
+            Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
@@ -1620,6 +1628,7 @@ impl App {
                 if let Some(Overlay::QuickPrompt(q)) = self.overlays.pop() {
                     self.keep_draft(&q);
                 }
+                self.hand_for = None;
             }
             KeyCode::Tab => {
                 let current = q.launch.harness;
@@ -1693,6 +1702,9 @@ impl App {
         let text = q.input.text();
         let prompt = (!text.trim().is_empty()).then(|| text.to_string());
         self.prompt_draft = None;
+        if let Some(pr) = self.hand_for.take() {
+            self.marks.remove(&pr);
+        }
         // The daemon stores it without sending the state again: keep our copy current.
         self.state.last_launch = Some(q.launch.clone());
         self.focus_next_created = true;
@@ -1925,6 +1937,7 @@ impl App {
         };
         if key.code == KeyCode::Esc {
             self.overlays.pop();
+            self.hand_for = None;
             return vec![];
         }
         if input.key(key) != Edit::Submit {
@@ -1938,6 +1951,10 @@ impl App {
         if let Some(why) = self.follow_up_refused(session) {
             self.message = Some(why.into());
             return vec![];
+        }
+        // Review threads handed over: their marks are done.
+        if let Some(pr) = self.hand_for.take() {
+            self.marks.remove(&pr);
         }
         let modes = self
             .screens
@@ -2354,6 +2371,100 @@ impl App {
         self.quick_prompt_in(project, &text, Some((path, branch)))
     }
 
+    /// `a`: the marked threads of `pr` (else the one at `here`) as words for an agent:
+    /// to a live card on its branch, or to a new agent in its worktree.
+    fn hand(&mut self, pr: PrRef, here: Option<String>) -> Vec<Action> {
+        let Some(detail) = self.pr_details.get(&pr).and_then(|(_, d)| d.as_ref()) else {
+            self.message = Some("not loaded yet".into());
+            return vec![];
+        };
+        let threads: Vec<&termist_core::github::Thread> =
+            match self.marks.get(&pr).filter(|m| !m.is_empty()) {
+                Some(marked) => detail
+                    .threads
+                    .iter()
+                    .filter(|th| marked.contains(&th.id))
+                    .collect(),
+                None => match here.and_then(|id| detail.threads.iter().find(|th| th.id == id)) {
+                    None => {
+                        self.message = Some("mark threads with Space first".into());
+                        return vec![];
+                    }
+                    Some(th) if th.resolved => {
+                        self.message = Some("resolved: mark it with Space to send it".into());
+                        return vec![];
+                    }
+                    Some(th) => vec![th],
+                },
+            };
+        let branch = detail.summary.head.clone();
+        let text = crate::prs::hand::text(pr.number, &branch, &threads);
+        let cards: Vec<&SessionInfo> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| {
+                !s.archived
+                    && matches!(s.kind, SessionKind::Agent { .. })
+                    && s.status.is_live()
+                    && s.place.as_ref().is_some_and(|p| p.pr == Some(pr))
+            })
+            .collect();
+        self.hand_for = Some(pr);
+        if cards.is_empty() {
+            return self.ask_worktree(pr, Some(text));
+        }
+        let labels: HashMap<HandTo, String> = cards
+            .iter()
+            .map(|s| {
+                let (_, _, word) = crate::ui::status_style(&self.theme, s.status);
+                (
+                    HandTo::Card(s.id),
+                    format!("{} · {} · {word}", s.kind.label(), s.display_name()),
+                )
+            })
+            .chain([(HandTo::New, format!("new agent in ⎇ {branch}"))])
+            .collect();
+        let mut items: Vec<HandTo> = cards.iter().map(|s| HandTo::Card(s.id)).collect();
+        items.push(HandTo::New);
+        let picker = ListPicker::new(items, move |to| labels[to].clone(), false);
+        self.overlays.push(Overlay::Hand { pr, text, picker });
+        vec![]
+    }
+
+    fn hand_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Hand { picker, .. }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            self.hand_for = None;
+            return vec![];
+        }
+        if picker.key(key) != Pick::Chosen {
+            return vec![];
+        }
+        let Some(Overlay::Hand { pr, text, picker }) = self.overlays.pop() else {
+            return vec![];
+        };
+        match picker.selected().cloned() {
+            Some(HandTo::Card(session)) => {
+                if let Some(why) = self.follow_up_refused(session) {
+                    self.message = Some(why.into());
+                    self.hand_for = None;
+                    return vec![];
+                }
+                self.overlays.push(Overlay::FollowUp {
+                    session,
+                    input: TextInput::with_text(&text, true),
+                });
+                vec![]
+            }
+            Some(HandTo::New) => self.ask_worktree(pr, Some(text)),
+            None => vec![],
+        }
+    }
+
     /// The open pull request of the selected card's branch.
     pub fn card_pr(&self) -> Option<PrRef> {
         let id = self.selected?;
@@ -2496,6 +2607,30 @@ impl App {
                 })]
             }
             Some(PrAction::Ask(ask)) => self.ask(ask),
+            Some(PrAction::Mark(thread)) => {
+                if let View::Prs(view) = &self.view
+                    && let Some(pr) = view.detail.as_ref().map(|d| d.pr)
+                {
+                    let marks = self.marks.entry(pr).or_default();
+                    if !marks.remove(&thread) {
+                        marks.insert(thread);
+                    }
+                    if marks.is_empty() {
+                        self.marks.remove(&pr);
+                    }
+                }
+                vec![]
+            }
+            Some(PrAction::Hand(here)) => {
+                let pr = match &self.view {
+                    View::Prs(view) => view.detail.as_ref().map(|d| d.pr),
+                    _ => None,
+                };
+                match pr {
+                    Some(pr) => self.hand(pr, here),
+                    None => vec![],
+                }
+            }
             Some(PrAction::Note(why)) => {
                 self.message = Some(why.into());
                 vec![]

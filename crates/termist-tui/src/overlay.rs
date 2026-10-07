@@ -23,6 +23,12 @@ pub enum Overlay {
     ModelName(TextInput),
     /// Ctrl+P in the quick prompt: the project to start in.
     Project(ListPicker<ProjectInfo>),
+    /// `a` in a pull request: who its review threads go to, as `text`.
+    Hand {
+        pr: termist_core::github::PrRef,
+        text: String,
+        picker: ListPicker<HandTo>,
+    },
     /// `Space`: the next instruction for a card's agent, sent without entering the card.
     FollowUp {
         session: SessionId,
@@ -167,6 +173,13 @@ impl Overlay {
             _ => None,
         }
     }
+}
+
+/// Where review threads go: a card on the pull request's branch, or a new agent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HandTo {
+    Card(termist_core::SessionId),
+    New,
 }
 
 /// The harness picker, opened on the first CLI that is installed.

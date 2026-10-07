@@ -408,6 +408,16 @@ impl DiffView {
                 })));
             }
             KeyCode::Char('w') if !ctrl => return Some(DiffAction::Pr(PrAction::Worktree)),
+            KeyCode::Char(' ') if !tree => {
+                return Some(DiffAction::Pr(match self.thread_here(area) {
+                    Some(thread) => PrAction::Mark(thread.to_string()),
+                    None => PrAction::Note("not on a thread"),
+                }));
+            }
+            KeyCode::Char('a') if !ctrl && !tree => {
+                let here = self.thread_here(area).map(str::to_string);
+                return Some(DiffAction::Pr(PrAction::Hand(here)));
+            }
             KeyCode::Char('b') => {
                 let i = self.index(diff)?;
                 return Some(DiffAction::Pr(PrAction::Browser(diff.files[i].url.clone())));
@@ -787,6 +797,30 @@ mod tests {
         key(&mut v, K::Char('v'));
         assert_eq!(v.anchor, None, "no range from a thread");
         assert_eq!(v.thread_here(&area()), Some("T1"));
+    }
+
+    #[test]
+    fn space_marks_the_thread_here_and_a_hands_it_over() {
+        let mut v = DiffView::new(Some("src/App.tsx".into()));
+        v.line = 4;
+        assert_eq!(
+            key(&mut v, K::Char(' ')),
+            Some(DiffAction::Pr(PrAction::Mark("T1".into())))
+        );
+        assert_eq!(
+            key(&mut v, K::Char('a')),
+            Some(DiffAction::Pr(PrAction::Hand(Some("T1".into()))))
+        );
+        v.line = 14;
+        assert_eq!(
+            key(&mut v, K::Char(' ')),
+            Some(DiffAction::Pr(PrAction::Note("not on a thread")))
+        );
+        assert_eq!(
+            key(&mut v, K::Char('a')),
+            Some(DiffAction::Pr(PrAction::Hand(None))),
+            "the marked ones, if any"
+        );
     }
 
     #[test]

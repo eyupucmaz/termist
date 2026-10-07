@@ -4,7 +4,7 @@ use super::{Item, Mine};
 use crate::theme::Theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use termist_core::AgentStatus;
 use termist_core::github::{
     Comment, CommentKind, PrDetail, Review, ReviewState, Thread, age, unix_secs,
@@ -86,6 +86,7 @@ pub fn lines(
     d: &PrDetail,
     width: usize,
     toggled: &HashSet<String>,
+    marked: &BTreeSet<String>,
     t: &Theme,
     now: i64,
 ) -> (Vec<Line<'static>>, Vec<Item>) {
@@ -173,11 +174,14 @@ pub fn lines(
                         .find(|c| c.mine)
                         .and_then(|c| mine(c, CommentKind::Review)),
                 });
-                let mut head = vec![
-                    bar(),
-                    Span::styled(place, t.accent),
-                    Span::styled(format!(" · {status} · {count} comment{plural}"), t.dim),
-                ];
+                let mut head = vec![bar(), Span::styled(place, t.accent)];
+                if marked.contains(&th.id) {
+                    head.push(Span::styled(" ◆", t.warn));
+                }
+                head.push(Span::styled(
+                    format!(" · {status} · {count} comment{plural}"),
+                    t.dim,
+                ));
                 if folded {
                     head.push(Span::styled("  ▸ Enter", t.dim));
                 }
@@ -275,7 +279,7 @@ mod tests {
         let d = detail(summary(212, "x", "bob"));
         let t = Theme::terminal();
         let now = unix_secs("2026-10-02T12:00:00Z").unwrap();
-        let (shown, anchors) = lines(&d, 80, &HashSet::new(), &t, now);
+        let (shown, anchors) = lines(&d, 80, &HashSet::new(), &BTreeSet::new(), &t, now);
         let text: Vec<String> = shown
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -302,7 +306,14 @@ mod tests {
             !text.iter().any(|l| l.trim_end().ends_with(" nit")),
             "the folded thread hides its comments"
         );
-        let (lines, _) = lines(&d, 80, &HashSet::from(["T2".to_string()]), &t, now);
+        let (lines, _) = lines(
+            &d,
+            80,
+            &HashSet::from(["T2".to_string()]),
+            &BTreeSet::new(),
+            &t,
+            now,
+        );
         assert!(
             lines
                 .iter()

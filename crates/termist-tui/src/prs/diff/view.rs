@@ -347,6 +347,8 @@ fn draw_diff(
     let width = inner.width as usize;
     let mut opened: Vec<&String> = view.opened.iter().collect();
     opened.sort();
+    let none = std::collections::BTreeSet::new();
+    let marked = app.marks.get(&pr).unwrap_or(&none);
     let mut hasher = DefaultHasher::new();
     (
         pr,
@@ -356,6 +358,7 @@ fn draw_diff(
         width,
         view.hscroll,
         opened,
+        marked,
         threads
             .iter()
             // A comment sent or written turns its thread over.
@@ -383,6 +386,7 @@ fn draw_diff(
                 layout,
                 &threads,
                 &view.opened,
+                marked,
                 width,
                 view.hscroll,
                 t,
@@ -540,6 +544,7 @@ fn lines(
     layout: DiffLayout,
     threads: &[&Thread],
     opened: &std::collections::HashSet<String>,
+    marked: &std::collections::BTreeSet<String>,
     width: usize,
     hscroll: usize,
     t: &Theme,
@@ -609,7 +614,8 @@ fn lines(
                 let th = threads[i];
                 d.threads.push((d.lines.len(), th.id.clone()));
                 let before = d.lines.len();
-                thread_lines(&mut d.lines, th, opened.contains(&th.id), width, t, now);
+                let (open, mark) = (opened.contains(&th.id), marked.contains(&th.id));
+                thread_lines(&mut d.lines, th, open, mark, width, t, now);
                 spots.extend((before..d.lines.len()).map(|_| Spot::Thread {
                     hunk,
                     id: th.id.clone(),
@@ -669,6 +675,7 @@ fn thread_lines(
     out: &mut Vec<Line<'static>>,
     th: &Thread,
     open: bool,
+    marked: bool,
     width: usize,
     t: &Theme,
     now: i64,
@@ -705,8 +712,12 @@ fn thread_lines(
         ""
     };
     let head = format!("{mark} {author}{others} · {status}");
-    let room = width.saturating_sub(3 + width_of(&head) + pending.len() + 3);
+    let mark_width = if marked { 2 } else { 0 };
+    let room = width.saturating_sub(3 + width_of(&head) + mark_width + pending.len() + 3);
     let mut spans = vec![bar(), Span::styled(head, t.accent)];
+    if marked {
+        spans.push(Span::styled(" ◆", t.warn));
+    }
     if !pending.is_empty() {
         spans.push(Span::styled(pending, t.warn));
     }
@@ -811,6 +822,7 @@ mod tests {
                 layout,
                 &[&thread],
                 &opened,
+                &std::collections::BTreeSet::new(),
                 80,
                 0,
                 &t,
