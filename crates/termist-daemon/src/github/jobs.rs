@@ -101,17 +101,10 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             pr,
             account,
             repo,
-            branch,
+            head,
         } => Done::Worktree {
             pr,
-            reply: worktree::open(
-                &repo,
-                &branch,
-                pr.number,
-                &worktree::git,
-                &*gh.0,
-                &account.token,
-            ),
+            reply: worktree::open(&repo, &head, &worktree::git, &*gh.0, &account.token),
         },
         Job::Write {
             gh,

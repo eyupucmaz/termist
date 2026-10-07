@@ -105,7 +105,12 @@ pub fn layout(area: Rect, shape: impl Into<Shape>, position: PanePosition) -> Ar
         (Rect { x, width, ..body }, 1)
     } else {
         let per_row = (body.width / CARD_W).max(1) as usize;
-        let height = shape.height(per_row).min(body.height / 2);
+        let want = shape.height(per_row);
+        let mut height = want.min(body.height / 2);
+        if shape.headers {
+            // Room for a band's header and its row of cards, with a line for the rest.
+            height = height.max(want.min(CARD_H + 2)).min(body.height);
+        }
         let y = if pane_first {
             body.bottom() - height
         } else {
@@ -122,7 +127,8 @@ pub fn layout(area: Rect, shape: impl Into<Shape>, position: PanePosition) -> Ar
             height: cards_zone
                 .height
                 .saturating_sub(2)
-                .max(CARD_H)
+                // A band's first row: its header and its cards.
+                .max(CARD_H + u16::from(shape.headers))
                 .min(cards_zone.height.saturating_sub(1)),
             ..cards_zone
         }
@@ -552,15 +558,19 @@ fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: R
             }
         };
         let at = spans.iter().map(|s| s.width()).sum::<usize>() as u16 + 3;
-        app.hits.borrow_mut().band_prs.push((
-            pr,
-            Rect {
-                x: area.x + at,
-                width: number.chars().count() as u16,
-                height: 1,
-                y: area.y,
-            },
-        ));
+        let wide = number.chars().count() as u16;
+        // Only where it is drawn: past the header's width lies the pane.
+        if at + wide <= area.width {
+            app.hits.borrow_mut().band_prs.push((
+                pr,
+                Rect {
+                    x: area.x + at,
+                    width: wide,
+                    height: 1,
+                    y: area.y,
+                },
+            ));
+        }
         spans.push(Span::styled(" · ", t.dim));
         spans.push(Span::styled(number, t.accent));
         spans.push(Span::raw(" "));
@@ -1272,6 +1282,38 @@ mod tests {
     fn bands_beside_the_pane() {
         let mut app = banded(0);
         insta::assert_snapshot!(render(&mut app, 190, 22).backend());
+    }
+
+    #[test]
+    fn a_band_s_number_that_does_not_fit_beside_the_pane_takes_no_click_from_it() {
+        let mut app = banded(0);
+        let mut long = app.state.sessions[1].clone();
+        if let Some(p) = long.place.as_mut() {
+            p.branch = Some("feature/a-much-longer-branch".into());
+        }
+        app.on_event(ServerEvent::SessionUpdated(long));
+        let areas = layout(
+            Rect::new(0, 0, 190, 22),
+            app.card_shape(),
+            app.pane_position(),
+        );
+        render(&mut app, 190, 22);
+        for (_, r) in &app.hits.borrow().band_prs {
+            assert!(
+                r.right() <= areas.cards.right(),
+                "{r:?} reaches into the pane"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_screen_still_shows_a_band_s_first_row() {
+        let shape = Shape {
+            counts: vec![1, 1],
+            headers: true,
+        };
+        let areas = layout(Rect::new(0, 0, 60, 12), shape, PanePosition::Bottom);
+        assert!(areas.card_lines > CARD_H, "a header and a row of cards");
     }
 
     #[test]

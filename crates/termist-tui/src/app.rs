@@ -759,6 +759,7 @@ impl App {
                     .is_some_and(|(want, _)| *want == pr)
                 {
                     self.worktree_for = None;
+                    self.hand_for = None; // nothing was handed over
                     match self.view {
                         View::Prs(_) => self.message = Some(message),
                         _ => self.toasts.push(Toast {
@@ -1574,6 +1575,8 @@ impl App {
             return vec![];
         };
         let text = self.prompt_draft.clone().unwrap_or_default();
+        // A task of its own: what it sends is not review threads.
+        self.hand_for = None;
         self.quick_prompt_in(project, &text, None)
     }
 
@@ -1922,6 +1925,7 @@ impl App {
             self.message = Some(why.into());
             return;
         }
+        self.hand_for = None; // its own words, not review threads
         self.overlays.push(Overlay::FollowUp {
             session,
             input: TextInput::new(true),
@@ -5761,6 +5765,34 @@ mod tests {
             [format!("✗ {why}")],
             "a toast where the list is gone"
         );
+    }
+
+    #[test]
+    fn marks_wait_for_their_own_hand_over_not_any_send() {
+        let (mut app, _, pr) = linked();
+        let summary = crate::prs::fixtures::summary(212, "Fix login", "bob");
+        app.on_event(ServerEvent::PrDetail {
+            pr,
+            state: GhState::Ok,
+            detail: Some(Box::new(crate::prs::fixtures::detail(summary))),
+        });
+        app.marks.insert(pr, BTreeSet::from(["T1".to_string()]));
+        app.hand(pr, None);
+        assert_eq!(app.hand_for, Some(pr), "on its way to a new agent");
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: "couldn't open a worktree · no".into(),
+        });
+        assert_eq!(app.hand_for, None, "a failed worktree hands nothing over");
+        app.hand(pr, None);
+        app.open_quick_prompt();
+        assert_eq!(app.hand_for, None, "a plain new task is not the hand-over");
+        app.overlays.clear();
+        app.hand(pr, None);
+        app.selected = Some(app.state.sessions[0].id);
+        app.open_follow_up();
+        assert_eq!(app.hand_for, None, "nor is a plain follow-up");
+        assert!(app.marks.contains_key(&pr), "still marked");
     }
 
     #[test]

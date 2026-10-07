@@ -1281,7 +1281,7 @@ impl Registry {
             self.github
                 .repo_views(project)
                 .iter()
-                .any(|r| r.path == f.main)
+                .any(|r| r.main == f.main)
         });
         if !ours {
             bail!("{} is not a folder of this project", dir.display());

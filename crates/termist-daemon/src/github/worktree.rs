@@ -8,18 +8,33 @@ use std::time::Duration;
 /// Runs git in a folder: its output, or the first line of what it said when it failed.
 pub type Git<'a> = &'a dyn Fn(&Path, &[&str]) -> Result<String, String>;
 
-/// The worktree for pull request `number` of the repo at `repo`, whose head is `branch`;
-/// `true` when it was made now.
+/// What a pull request's worktree is for: its head branch, its number, the repo's
+/// `owner/name`, and whether the head lives in another repo (a fork).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Head {
+    pub branch: String,
+    pub number: u32,
+    pub slug: String,
+    pub fork: bool,
+}
+
+/// The worktree for pull request `head` of the repo at `repo`; `true` when it was made
+/// now.
 pub fn open(
     repo: &Path,
-    branch: &str,
-    number: u32,
+    head: &Head,
     git: Git,
     gh: &dyn Gh,
     token: &str,
 ) -> Result<(PathBuf, bool), String> {
+    let (branch, number) = (head.branch.as_str(), head.number);
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
-    if let Some(path) = with_branch(&list, branch) {
+    let found = match head.fork {
+        // A fork's `main` is not the clone's `main`: only a folder made for it counts.
+        true => made_for(&list, &folder(repo, branch)),
+        false => with_branch(&list, branch),
+    };
+    if let Some(path) = found {
         return Ok((path, false));
     }
     let dest = free(&folder(repo, branch));
@@ -27,7 +42,12 @@ pub fn open(
     git(repo, &["worktree", "add", "--detach", &dest_text])?;
     let number = number.to_string();
     let checkout = gh
-        .run_in(&dest, &["pr", "checkout", &number], Some(token))
+        // The repo named: a clone with two remotes leaves gh asking which one.
+        .run_in(
+            &dest,
+            &["pr", "checkout", &number, "-R", &head.slug],
+            Some(token),
+        )
         .map_err(|state| said(&state))
         .and_then(|out| match out.success {
             true => Ok(()),
@@ -41,16 +61,43 @@ pub fn open(
     Ok((dest, true))
 }
 
-/// The worktree that has `branch` checked out, from `git worktree list --porcelain`.
+/// The worktrees in `git worktree list --porcelain` that are there: one whose folder
+/// was deleted without `git worktree prune` is listed as `prunable`.
+fn present(list: &str) -> impl Iterator<Item = (PathBuf, &str)> {
+    list.split("\n\n").filter_map(|block| {
+        let path = PathBuf::from(block.lines().find_map(|l| l.strip_prefix("worktree "))?);
+        let gone = block.lines().any(|l| l.starts_with("prunable")) || !path.exists();
+        (!gone).then_some((path, block))
+    })
+}
+
+/// The worktree that has `branch` checked out.
 fn with_branch(list: &str, branch: &str) -> Option<PathBuf> {
     let want = format!("branch refs/heads/{branch}");
-    list.split("\n\n").find_map(|block| {
-        let path = block.lines().find_map(|l| l.strip_prefix("worktree "))?;
-        block
-            .lines()
-            .any(|l| l.trim() == want)
-            .then(|| PathBuf::from(path))
-    })
+    present(list)
+        .find(|(_, block)| block.lines().any(|l| l.trim() == want))
+        .map(|(path, _)| path)
+}
+
+/// The worktree termist made at `dir` (or `dir-2`, `dir-3`… when the name was taken).
+fn made_for(list: &str, dir: &Path) -> Option<PathBuf> {
+    present(list)
+        .find(|(path, _)| is_made_for(path, dir))
+        .map(|(path, _)| path)
+}
+
+/// `path` is `dir` or a numbered `dir-n` beside it.
+pub fn is_made_for(path: &Path, dir: &Path) -> bool {
+    let (Some(name), Some(want)) = (path.file_name(), dir.file_name()) else {
+        return false;
+    };
+    let (name, want) = (name.to_string_lossy(), want.to_string_lossy());
+    path.parent() == dir.parent()
+        && (name == want
+            || name
+                .strip_prefix(&*want)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|n| n.parse::<u32>().is_ok()))
 }
 
 /// `<repo>/../<repo>-worktrees/<branch>`, each part of the branch a folder, with the
@@ -158,6 +205,15 @@ mod tests {
         }
     }
 
+    fn at(branch: &str, fork: bool) -> Head {
+        Head {
+            branch: branch.into(),
+            number: 212,
+            slug: "acme/site".into(),
+            fork,
+        }
+    }
+
     fn checkout(ok: bool) -> Checkout {
         Checkout {
             ok,
@@ -165,25 +221,34 @@ mod tests {
         }
     }
 
-    const LIST: &str = "worktree /w/site\nHEAD 1a2b\nbranch refs/heads/main\n\n\
-                        worktree /w/site-worktrees/fix/login\nHEAD 3c4d\nbranch refs/heads/fix/login\n\n\
-                        worktree /w/site-worktrees/old\nHEAD 5e6f\ndetached\n";
-
     #[test]
     fn a_branch_already_checked_out_is_used_where_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (site, fix) = (
+            tmp.path().join("site"),
+            tmp.path().join("site-worktrees/fix/login"),
+        );
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::create_dir_all(&fix).unwrap();
+        let list = format!(
+            "worktree {}\nHEAD 1a2b\nbranch refs/heads/main\n\n\
+             worktree {}\nHEAD 3c4d\nbranch refs/heads/fix/login\n\n\
+             worktree {}\nHEAD 5e6f\ndetached\n",
+            site.display(),
+            fix.display(),
+            tmp.path().join("site-worktrees/old").display()
+        );
         let gh = checkout(true);
         let asked = RefCell::new(vec![]);
         let git = |_: &Path, args: &[&str]| {
             asked.borrow_mut().push(args.join(" "));
-            Ok(LIST.to_string())
+            Ok(list.clone())
         };
-        let got = open(Path::new("/w/site"), "fix/login", 212, &git, &gh, "t");
-        assert_eq!(got, Ok(("/w/site-worktrees/fix/login".into(), false)));
+        let got = open(&site, &at("fix/login", false), &git, &gh, "t");
+        assert_eq!(got, Ok((fix, false)));
         assert_eq!(
-            open(Path::new("/w/site"), "main", 3, &git, &gh, "t")
-                .unwrap()
-                .0,
-            PathBuf::from("/w/site")
+            open(&site, &at("main", false), &git, &gh, "t").unwrap().0,
+            site
         );
         assert_eq!(asked.borrow().len(), 2, "nothing added");
         assert!(gh.ran.lock().unwrap().is_empty());
@@ -199,7 +264,7 @@ mod tests {
             asked.borrow_mut().push((dir.to_path_buf(), args.join(" ")));
             Ok(String::new())
         };
-        let (path, made) = open(&repo, "fix/login", 212, &git, &gh, "tok").unwrap();
+        let (path, made) = open(&repo, &at("fix/login", false), &git, &gh, "tok").unwrap();
         let want = tmp.path().join("site-worktrees").join("fix").join("login");
         assert_eq!((path.clone(), made), (want.clone(), true));
         assert_eq!(
@@ -211,7 +276,11 @@ mod tests {
         );
         assert_eq!(
             gh.ran.lock().unwrap()[0],
-            (want, "pr checkout 212".into(), Some("tok".into())),
+            (
+                want,
+                "pr checkout 212 -R acme/site".into(),
+                Some("tok".into())
+            ),
             "in the new folder, as the repo's account"
         );
     }
@@ -226,7 +295,7 @@ mod tests {
             asked.borrow_mut().push(args.join(" "));
             Ok(String::new())
         };
-        let got = open(&repo, "fix/login", 212, &git, &gh, "tok");
+        let got = open(&repo, &at("fix/login", false), &git, &gh, "tok");
         assert_eq!(got, Err("could not find pull request 212".into()));
         let dest = tmp.path().join("site-worktrees").join("fix").join("login");
         assert_eq!(
@@ -238,8 +307,75 @@ mod tests {
             _ => Ok(String::new()),
         };
         assert_eq!(
-            open(&repo, "x", 1, &refused, &checkout(true), "t"),
+            open(&repo, &at("x", false), &refused, &checkout(true), "t"),
             Err("fatal: invalid reference".into())
+        );
+    }
+
+    #[test]
+    fn a_worktree_whose_folder_was_deleted_is_not_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("site");
+        let gone = tmp.path().join("site-worktrees").join("fix");
+        let list = format!(
+            "worktree {}\nHEAD 1a2b\nbranch refs/heads/main\n\n\
+             worktree {}\nHEAD 3c4d\nbranch refs/heads/fix\nprunable gitdir file points to non-existent location\n",
+            repo.display(),
+            gone.display()
+        );
+        let git = |_: &Path, args: &[&str]| match args[1] {
+            "list" => Ok(list.clone()),
+            _ => Ok(String::new()),
+        };
+        let gh = checkout(true);
+        let (path, made) = open(&repo, &at("fix", false), &git, &gh, "t").unwrap();
+        assert!(
+            made,
+            "made again rather than handing out a folder that is not there"
+        );
+        assert_eq!(path, gone);
+    }
+
+    #[test]
+    fn a_fork_s_branch_is_looked_for_only_in_the_folders_termist_made_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("site");
+        let ours = tmp.path().join("site-worktrees").join("main");
+        let list = |with_ours: bool| {
+            let mut l = format!(
+                "worktree {}\nHEAD 1a2b\nbranch refs/heads/main\n",
+                repo.display()
+            );
+            if with_ours {
+                std::fs::create_dir_all(&ours).unwrap();
+                l += &format!(
+                    "\nworktree {}\nHEAD 9f9f\nbranch refs/heads/bob-main\n",
+                    ours.display()
+                );
+            }
+            l
+        };
+        let gh = checkout(true);
+        let fresh = list(false);
+        let git = |_: &Path, args: &[&str]| match args[1] {
+            "list" => Ok(fresh.clone()),
+            _ => Ok(String::new()),
+        };
+        let (path, made) = open(&repo, &at("main", true), &git, &gh, "t").unwrap();
+        assert_eq!(
+            (path, made),
+            (ours.clone(), true),
+            "not the clone's own main"
+        );
+        let again = list(true);
+        let git = |_: &Path, args: &[&str]| match args[1] {
+            "list" => Ok(again.clone()),
+            _ => Ok(String::new()),
+        };
+        assert_eq!(
+            open(&repo, &at("main", true), &git, &gh, "t").unwrap(),
+            (ours, false),
+            "the one made for it before"
         );
     }
 

@@ -103,7 +103,7 @@ pub enum Job {
         pr: PrRef,
         account: Account,
         repo: PathBuf,
-        branch: String,
+        head: worktree::Head,
     },
     /// Marks a file viewed on GitHub, or not, as `client` asked.
     MarkViewed {
@@ -382,6 +382,7 @@ impl GitHub {
             .filter(|r| r.stored.project == project && r.present)
             .map(|r| crate::place::RepoView {
                 id: r.stored.id,
+                main: crate::place::main_of(&r.stored.path),
                 path: crate::place::resolved(&r.stored.path),
                 slug: format!("{}/{}", r.stored.owner, r.stored.name),
                 prs: r
@@ -858,19 +859,25 @@ impl GitHub {
             .into_iter()
             .find(|a| a.login == login)
             .ok_or("no account for this repo")?;
-        let branch = r
+        let summary = r
             .prs
             .iter()
             .find(|p| p.number == pr.number)
             .or_else(|| self.cached(pr).map(|d| &d.summary))
-            .map(|p| p.head.clone())
             .ok_or("not loaded yet")?;
+        let slug = format!("{}/{}", r.stored.owner, r.stored.name);
         Ok(Job::Worktree {
             gh,
             pr,
             account,
             repo: r.stored.path.clone(),
-            branch,
+            head: worktree::Head {
+                branch: summary.head.clone(),
+                number: pr.number,
+                // A head repo that is gone is someone else's too.
+                fork: summary.head_repo != slug,
+                slug,
+            },
         })
     }
 
@@ -2843,11 +2850,11 @@ mod tests {
             .iter()
             .filter_map(|j| match j {
                 Job::Worktree {
-                    branch,
+                    head,
                     account,
                     repo,
                     ..
-                } => Some((branch.clone(), account.login.clone(), repo.clone())),
+                } => Some((head.branch.clone(), account.login.clone(), repo.clone())),
                 _ => None,
             })
             .collect()
