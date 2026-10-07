@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+From a pull request to an agent: its branch in a worktree, its review comments to the agent working
+on it.
+
+### Added
+
+- **A worktree for a pull request.** In a pull request, `w` opens a worktree on its branch beside the
+  repo (`<repo>-worktrees/<branch>`, checked out by `gh pr checkout`), or uses the one that has the
+  branch already, and opens the new-task prompt there with the pull request's line in it.
+- **Review comments to an agent.** `Space` marks threads in the conversation or the diff; `a` hands the
+  marked ones (or the one under the cursor) to an agent: the card already on that branch, as a
+  follow-up you can edit, or a new agent in the worktree.
+- **Bands.** Cards stand in bands, one per worktree, under the branch and its pull request with its
+  checks and open threads. termist follows a Claude Code session into its own worktree.
+- **A card's pull request.** `Shift+V` opens it in the browser; `v` opens the list on it; a click on its
+  number in the band opens it.
+
+### Updating
+
+This version changes how the TUI and the daemon talk, and what the daemon keeps of each session. Run
+`termist update`, then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.1.4 - 2026-10-06
 
 Writing to pull requests from termist, and the pane on any side.

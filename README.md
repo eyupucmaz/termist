@@ -162,8 +162,11 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `/` | find any session |
 | wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
 | drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
-| `v` / `R` | the project's pull requests / read GitHub again |
+| `v` / `R` | the project's pull requests (on the selected card's, if it has one) / read GitHub again |
+| `V` | the selected card's pull request in the browser |
 | `d` | in a pull request: its files and their diff |
+| `w` | in a pull request: a worktree on its branch, and an agent there |
+| `Space` / `a` | in a pull request: mark review threads / hand them to an agent |
 | click | a project tab, a card (a second click types into it), the pane (types into it), a file, a thread |
 | wheel | moves what is under it: the cards, a session's history, a list, the diff |
 | `o` / `x` | open a project / close its tab (sessions keep running) |
@@ -193,6 +196,13 @@ And you can write back. `c` comments: on the pull request, or in the diff on the
 (`v` chooses several lines, `Ctrl+s` turns them into a suggestion). Line comments wait in your review
 until `A` sends it with a comment, an approval or a change request. On a thread `r` replies and `x`
 resolves it; `e` and `D` edit and delete your own comments. Esc keeps what you wrote for later.
+
+And you can work on it. `w` opens a worktree on the pull request's branch beside the repo
+(`<repo>-worktrees/<branch>`, made with `gh pr checkout`, or the one that already has the branch) and the
+new-task prompt for an agent there. To act on review comments, mark threads with `Space` and press `a`:
+they go, with the lines they are about, to an agent already on that branch as a follow-up, or to a new
+one in its worktree. Cards stand in bands, one per worktree, under the branch and its pull request;
+`Shift+V` opens a card's pull request in the browser.
 
 ```toml
 [github]
