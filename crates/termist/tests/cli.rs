@@ -115,9 +115,58 @@ fn config_path_check_export_and_import() {
     );
 }
 
+/// Stand-in sound players on PATH that write down what they were given and play
+/// nothing: the tests stay quiet.
+#[cfg(unix)]
+fn quiet_players(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("players");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("played");
+    for player in ["afplay", "pw-play", "paplay", "aplay"] {
+        let p = bin.join(player);
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// What the stand-in players were given, once `n` lines are there (they run detached).
+#[cfg(unix)]
+fn played(dir: &std::path::Path, n: usize) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let lines: Vec<String> = std::fs::read_to_string(dir.join("played"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if lines.len() >= n || std::time::Instant::now() > deadline {
+            return lines;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn sound_test_writes_the_sound_and_names_it() {
     let tmp = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let termist = {
+        let players = quiet_players(tmp.path());
+        move |home: &std::path::Path, args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_termist"))
+                .args(args)
+                .env("TERMIST_HOME", home)
+                .env("PATH", &players)
+                .output()
+                .unwrap()
+        }
+    };
     let out = termist(tmp.path(), &["sound", "test"]);
     assert!(out.status.success(), "{out:?}");
     let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
@@ -139,6 +188,18 @@ fn sound_test_writes_the_sound_and_names_it() {
     );
     let out = termist(tmp.path(), &["sound", "test", "vapur"]);
     assert_eq!(out.status.code(), Some(2), "there is no ferry any more");
+    #[cfg(unix)]
+    {
+        let sounds = tmp.path().join("data").join("sounds");
+        assert_eq!(
+            played(tmp.path(), 2),
+            [
+                sounds.join("marti.wav").display().to_string(),
+                sounds.join("kedi.wav").display().to_string()
+            ],
+            "each went to the player, and the player was a quiet stand-in"
+        );
+    }
 }
 
 /// A stand-in `curl` on PATH: GitHub's API names v9.9.9, and the release's installer

@@ -10,7 +10,7 @@ use termist_core::{
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -79,6 +79,13 @@ CREATE TABLE pr_seen (
     PRIMARY KEY (owner, name, number)
 );
 PRAGMA user_version = 3;
+";
+
+/// v3 brought to v4: the folder each session runs in. Empty for sessions stored before:
+/// their project's folder.
+const MIGRATE_V4: &str = "
+ALTER TABLE sessions ADD COLUMN cwd TEXT;
+PRAGMA user_version = 4;
 ";
 
 /// A GitHub repo found in a project, with the user's choices for it.
@@ -223,19 +230,25 @@ impl Store {
                 conn.execute_batch(SCHEMA_V1)?;
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
+                Self::upgrade(&mut conn, MIGRATE_V4)?;
             }
             1 => {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
+                Self::upgrade(&mut conn, MIGRATE_V4)?;
             }
-            2 => Self::upgrade(&mut conn, MIGRATE_V3)?,
+            2 => {
+                Self::upgrade(&mut conn, MIGRATE_V3)?;
+                Self::upgrade(&mut conn, MIGRATE_V4)?;
+            }
+            3 => Self::upgrade(&mut conn, MIGRATE_V4)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
         // A table of the right version but the wrong shape is as unusable as garbage.
         conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                    created_ms, resumable, model, effort, user_named, archived
+                    created_ms, resumable, model, effort, user_named, archived, cwd
              FROM sessions LIMIT 0",
         )?;
         conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
@@ -283,12 +296,12 @@ impl Store {
     pub fn upsert_session(&self, s: &SessionInfo, resumable: bool) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                                   created_ms, resumable, model, effort, user_named, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                   created_ms, resumable, model, effort, user_named, archived, cwd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_session_id = excluded.agent_session_id,
                title = excluded.title, last_activity_ms = excluded.last_activity_ms,
                resumable = excluded.resumable, model = excluded.model, effort = excluded.effort,
-               user_named = excluded.user_named, archived = excluded.archived",
+               user_named = excluded.user_named, archived = excluded.archived, cwd = excluded.cwd",
             params![
                 s.id.to_string(),
                 s.project.to_string(),
@@ -302,7 +315,8 @@ impl Store {
                 s.model,
                 s.effort,
                 s.user_named,
-                s.archived
+                s.archived,
+                s.cwd.to_string_lossy()
             ],
         )?;
         Ok(())
@@ -341,7 +355,7 @@ impl Store {
             .collect();
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms, resumable,
-                    model, effort, user_named, archived
+                    model, effort, user_named, archived, cwd
              FROM sessions ORDER BY created_ms, rowid",
         )?;
         let sessions = stmt
@@ -362,6 +376,7 @@ impl Store {
                         r.get::<_, Option<String>>(9)?,
                         r.get::<_, bool>(10)?,
                         r.get::<_, bool>(11)?,
+                        r.get::<_, Option<String>>(12)?,
                     ),
                 ))
             })?
@@ -369,7 +384,7 @@ impl Store {
             .filter_map(
                 |(
                     (id, project, kind, name, agent_session_id, title, last, resumable),
-                    (model, effort, user_named, archived),
+                    (model, effort, user_named, archived, cwd),
                 )| {
                     Some(StoredSession {
                         info: SessionInfo {
@@ -385,6 +400,8 @@ impl Store {
                             effort,
                             user_named,
                             archived,
+                            cwd: cwd.map(PathBuf::from).unwrap_or_default(),
+                            place: None,
                         },
                         resumable,
                     })
@@ -615,6 +632,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         }
     }
 
@@ -893,7 +912,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
         assert!(
             moved_aside(tmp.path()).is_empty(),
             "nothing was moved aside"
@@ -1082,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v2_database_upgrades_to_v3_and_keeps_its_projects() {
+    fn a_v2_database_upgrades_to_the_newest_and_keeps_its_projects() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("termist.db");
         {
@@ -1102,9 +1121,46 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
         store
             .upsert_repo(projects[0].id, Path::new("/api"), "acme", "api")
             .unwrap();
+    }
+
+    #[test]
+    fn a_v3_session_has_no_folder_and_a_new_one_keeps_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        let p = project("/code/api");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute_batch(MIGRATE_V2).unwrap();
+            conn.execute_batch(MIGRATE_V3).unwrap();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_ms, open) VALUES (?1, 'api', '/code/api', 1, 1)",
+                params![p.id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, kind, name, last_activity_ms, created_ms)
+                 VALUES (?1, ?2, 'shell', 'shell-1', 0, 0)",
+                params![SessionId::new().to_string(), p.id.to_string()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let (_, sessions) = store.load().unwrap();
+        assert_eq!(sessions[0].info.cwd, PathBuf::new(), "the project's folder");
+        let mut s = session(p.id, SessionKind::Shell, "shell-2");
+        s.cwd = "/code/api-worktrees/fix/login".into();
+        store.upsert_session(&s, false).unwrap();
+        s.cwd = "/code/api-worktrees/fix/login/src".into();
+        store.upsert_session(&s, false).unwrap();
+        let (_, sessions) = store.load().unwrap();
+        assert_eq!(
+            sessions[1].info.cwd,
+            PathBuf::from("/code/api-worktrees/fix/login/src")
+        );
     }
 }

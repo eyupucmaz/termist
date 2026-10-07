@@ -1,6 +1,6 @@
 //! What each job does: the gh calls, on a blocking thread.
 use super::gh::{self, GhHandle};
-use super::{Done, Job, Slug, accounts, files, query, repos, write};
+use super::{Done, Job, Slug, accounts, files, query, repos, worktree, write};
 use std::sync::Arc;
 use termist_core::github::GhState;
 
@@ -96,6 +96,16 @@ pub fn run(job: Job, locate: &Locate) -> Done {
             reply: files::fetch(&*gh.0, &account.token, &want),
             head_oid: want.head_oid,
         },
+        Job::Worktree {
+            gh,
+            pr,
+            account,
+            repo,
+            head,
+        } => Done::Worktree {
+            pr,
+            reply: worktree::open(&repo, &head, &worktree::git, &*gh.0, &account.token),
+        },
         Job::Write {
             gh,
             pr,
@@ -165,6 +175,10 @@ pub fn failed(job: &Job) -> Done {
             pr: *pr,
             head_oid: want.head_oid.clone(),
             reply: Err(why()),
+        },
+        Job::Worktree { pr, .. } => Done::Worktree {
+            pr: *pr,
+            reply: Err("internal error".into()),
         },
         Job::Write {
             pr,

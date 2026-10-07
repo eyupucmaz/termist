@@ -1,7 +1,7 @@
 //! Asking GitHub through the `gh` CLI. Every call carries one account's token as
 //! GH_TOKEN, so the user never switches accounts; tokens stay in this process.
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use termist_core::github::GhState;
@@ -9,6 +9,8 @@ use termist_platform::process::{self, RunError};
 
 /// How long one call may take.
 pub const LIMIT: Duration = Duration::from_secs(20);
+/// A checkout fetches the branch: it may take longer than an API call.
+pub const CHECKOUT_LIMIT: Duration = Duration::from_secs(120);
 
 /// Variables that would point gh at another host than github.com.
 const OTHER_HOST: &[&str] = &["GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
@@ -29,6 +31,12 @@ pub trait Gh: Send + Sync {
         token: Option<&str>,
         stdin: Option<&str>,
     ) -> Result<GhOutput, GhState>;
+
+    /// `run` in the folder `dir`, for the commands that work on a checkout.
+    fn run_in(&self, dir: &Path, args: &[&str], token: Option<&str>) -> Result<GhOutput, GhState> {
+        let _ = dir;
+        self.run(args, token, None)
+    }
 }
 
 /// A `gh` to call, handed to the jobs.
@@ -53,6 +61,22 @@ impl Gh for CliGh {
         token: Option<&str>,
         stdin: Option<&str>,
     ) -> Result<GhOutput, GhState> {
+        self.run_at(None, args, token, stdin)
+    }
+
+    fn run_in(&self, dir: &Path, args: &[&str], token: Option<&str>) -> Result<GhOutput, GhState> {
+        self.run_at(Some(dir), args, token, None)
+    }
+}
+
+impl CliGh {
+    fn run_at(
+        &self,
+        dir: Option<&Path>,
+        args: &[&str],
+        token: Option<&str>,
+        stdin: Option<&str>,
+    ) -> Result<GhOutput, GhState> {
         // No prompts, colours or update notices in what we parse.
         let mut env = vec![
             ("GH_PROMPT_DISABLED", "1"),
@@ -62,14 +86,18 @@ impl Gh for CliGh {
         if let Some(token) = token {
             env.push(("GH_TOKEN", token));
         }
-        match process::run_without(&self.program, args, &env, OTHER_HOST, stdin, LIMIT) {
+        let limit = if dir.is_some() { CHECKOUT_LIMIT } else { LIMIT };
+        match process::run_at(dir, &self.program, args, &env, OTHER_HOST, stdin, limit) {
             Ok(out) => Ok(GhOutput {
                 success: out.success,
                 stdout: out.stdout,
                 stderr: out.stderr,
             }),
             Err(RunError::NotFound) => Err(GhState::NoGh),
-            Err(RunError::TimedOut) => Err(GhState::Failed("gh did not answer in 20 s".into())),
+            Err(RunError::TimedOut) => Err(GhState::Failed(format!(
+                "gh did not answer in {} s",
+                limit.as_secs()
+            ))),
             Err(RunError::Io(e)) => Err(GhState::Failed(format!("could not run gh: {e}"))),
         }
     }

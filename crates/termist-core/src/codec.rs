@@ -166,6 +166,7 @@ mod tests {
                 kind: crate::SessionKind::Agent {
                     harness: Harness::Codex,
                 },
+                cwd: None,
                 prompt: Some("fix it".into()),
                 model: Some("gpt 5 \"x\"".into()),
                 effort: Some("high".into()),
@@ -227,6 +228,7 @@ mod tests {
             created_at: "2026-10-01T10:00:00Z".into(),
             updated_at: "2026-10-02T10:00:00Z".into(),
             head: "feat/dealer".into(),
+            head_repo: "acme/site".into(),
             base: "main".into(),
             additions: 184,
             deletions: 32,
@@ -405,6 +407,73 @@ mod tests {
                 pr,
                 repo: "site".into(),
                 title: "Add a dealer filter".into(),
+            },
+        ];
+        for ev in events {
+            dec.push(&encode_frame(&ev).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        }
+    }
+
+    #[test]
+    fn the_worktree_messages_and_a_session_s_place_round_trip() {
+        use crate::github::{PrRef, RepoId};
+        use crate::model::{Place, SessionInfo, SessionKind};
+        let pr = PrRef {
+            repo: RepoId(7),
+            number: 212,
+        };
+        let mut dec = FrameDecoder::default();
+        let requests = [
+            ClientRequest::OpenWorktree { pr },
+            ClientRequest::CreateSession {
+                project: crate::ProjectId::new(),
+                kind: SessionKind::Shell,
+                cwd: Some("/w/site-worktrees/fix/login \"x\"".into()),
+                prompt: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let session = SessionInfo {
+            id: crate::SessionId::new(),
+            project: crate::ProjectId::new(),
+            kind: SessionKind::Shell,
+            name: "shell-1".into(),
+            status: crate::AgentStatus::Fresh,
+            agent_session_id: None,
+            title: None,
+            last_activity_ms: 0,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
+            cwd: "/w/site-worktrees/fix/login/src".into(),
+            place: Some(Box::new(Place {
+                root: "/w/site-worktrees/fix/login".into(),
+                branch: Some("fix/login".into()),
+                commit: None,
+                repo: Some(RepoId(7)),
+                pr: Some(pr),
+                gone: false,
+            })),
+        };
+        let events = [
+            ServerEvent::SessionUpdated(session),
+            ServerEvent::WorktreeReady {
+                pr,
+                path: "/w/site-worktrees/fix/login".into(),
+                created: true,
+            },
+            ServerEvent::WorktreeFailed {
+                pr,
+                message: "couldn't open a worktree · fatal: 'x' is not a valid branch name".into(),
             },
         ];
         for ev in events {

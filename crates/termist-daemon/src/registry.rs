@@ -2,6 +2,7 @@ use crate::github::gh::{CliGh, GhHandle};
 use crate::github::jobs::Locate;
 use crate::github::{self, Done, Effects, GitHub, To};
 use crate::launch::{LaunchRequest, Launcher};
+use crate::place::{self, GitFacts};
 use crate::session::{self, ClientId, SessionCmd, SessionNote};
 use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession};
 use crate::transcript::TranscriptTail;
@@ -27,6 +28,13 @@ const ACTIVITY_BROADCAST: Duration = Duration::from_secs(5);
 /// A running Claude card whose title has been idle this long, with no hook in between,
 /// was cancelled before its answer started (Claude sends no hook for that).
 const IDLE_TITLE_CANCEL: Duration = Duration::from_millis(1500);
+
+/// How often the sessions' folders are asked again which branch they are on: an agent
+/// may check out another one.
+const PLACES_ROUND: Duration = Duration::from_secs(30);
+
+/// What git said about a session folder, read on a blocking thread.
+pub struct PlaceRead(pub PathBuf, pub Option<GitFacts>);
 
 /// A rescan for missing CLIs can start a login shell; one per this window is enough.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -128,6 +136,15 @@ pub struct Registry {
     github_rx: Option<UnboundedReceiver<Done>>,
     /// Finds gh for those jobs.
     locate: Locate,
+    /// What git said about each session folder; `None` when it is not a repo.
+    git_facts: HashMap<PathBuf, Option<GitFacts>>,
+    places_tx: UnboundedSender<PlaceRead>,
+    places_rx: Option<UnboundedReceiver<PlaceRead>>,
+    places_reading: HashSet<PathBuf>,
+    /// When the folders were last asked all at once.
+    places_round: Option<std::time::Instant>,
+    /// Runs git (a stand-in in tests).
+    git: fn(&Path, &[&str]) -> Option<String>,
 }
 
 impl Registry {
@@ -138,10 +155,19 @@ impl Registry {
         notes: UnboundedSender<SessionNote>,
         shutdown: oneshot::Sender<()>,
     ) -> Registry {
-        let (projects, sessions) = store.load().unwrap_or_else(|e| {
+        let (projects, mut sessions) = store.load().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "could not load stored sessions");
             (vec![], vec![])
         });
+        // Stored before sessions had folders: they ran in their project's.
+        for s in sessions
+            .iter_mut()
+            .filter(|s| s.info.cwd.as_os_str().is_empty())
+        {
+            if let Some(p) = projects.iter().find(|p| p.id == s.info.project) {
+                s.info.cwd = p.path.clone();
+            }
+        }
         // Names are `<label>-<n>`: go on from the highest n, so none repeats.
         let created = sessions
             .iter()
@@ -153,6 +179,7 @@ impl Registry {
         let (catalog_tx, catalog_rx) = tokio::sync::mpsc::unbounded_channel();
         let github = GitHub::new(&store);
         let (github_tx, github_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (places_tx, places_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
         let locate: Locate = Arc::new(move || {
             let program = gh_bin
@@ -190,6 +217,93 @@ impl Registry {
             github_tx,
             github_rx: Some(github_rx),
             locate,
+            git_facts: HashMap::new(),
+            places_tx,
+            places_rx: Some(places_rx),
+            places_reading: HashSet::new(),
+            places_round: None,
+            git: crate::github::repos::git,
+        }
+    }
+
+    /// Asks git about a session folder on a blocking thread; `place_read` takes the answer.
+    fn read_place(&mut self, cwd: PathBuf) {
+        if !self.places_reading.insert(cwd.clone()) {
+            return;
+        }
+        let (tx, git) = (self.places_tx.clone(), self.git);
+        tokio::task::spawn_blocking(move || {
+            let facts = place::read(&cwd, &git);
+            let _ = tx.send(PlaceRead(cwd, facts));
+        });
+    }
+
+    pub fn place_read(&mut self, PlaceRead(cwd, facts): PlaceRead) {
+        self.places_reading.remove(&cwd);
+        self.git_facts.insert(cwd.clone(), facts);
+        self.refresh_places(Some(&cwd));
+    }
+
+    /// Every session folder is asked again now and then while someone looks.
+    pub fn places_tick(&mut self, now: std::time::Instant) {
+        if self.clients.is_empty()
+            || self
+                .places_round
+                .is_some_and(|t| now.saturating_duration_since(t) < PLACES_ROUND)
+        {
+            return;
+        }
+        self.places_round = Some(now);
+        let cwds: HashSet<PathBuf> = self
+            .sessions
+            .iter()
+            .filter(|s| !s.info.archived)
+            .map(|s| s.info.cwd.clone())
+            .collect();
+        for cwd in cwds {
+            self.read_place(cwd);
+        }
+    }
+
+    /// Each session's place from what git said and the pull requests last read (those
+    /// in `only` alone); a change is sent to every client.
+    fn refresh_places(&mut self, only: Option<&Path>) {
+        let mut views: HashMap<ProjectId, Vec<place::RepoView>> = HashMap::new();
+        let mut changed = vec![];
+        for s in &mut self.sessions {
+            if only.is_some_and(|cwd| s.info.cwd != cwd) {
+                continue;
+            }
+            let Some(facts) = self.git_facts.get(&s.info.cwd) else {
+                continue; // not read yet
+            };
+            let repos = views
+                .entry(s.info.project)
+                .or_insert_with(|| self.github.repo_views(s.info.project));
+            let new = Some(Box::new(place::place(&s.info.cwd, facts.as_ref(), repos)));
+            if s.info.place != new {
+                s.info.place = new;
+                changed.push(s.info.clone());
+            }
+        }
+        for info in changed {
+            self.broadcast(ServerEvent::SessionUpdated(info));
+        }
+    }
+
+    /// The agent says it works in another folder now (Claude's hooks carry it).
+    fn moved(&mut self, id: SessionId, cwd: PathBuf) {
+        let Some(s) = self.session_mut(id) else {
+            return;
+        };
+        if s.info.cwd == cwd || !cwd.is_absolute() {
+            return;
+        }
+        s.info.cwd = cwd.clone();
+        self.persist(id);
+        match self.git_facts.contains_key(&cwd) {
+            true => self.refresh_places(Some(&cwd)),
+            false => self.read_place(cwd),
         }
     }
 
@@ -331,6 +445,8 @@ impl Registry {
             .done(done, std::time::Instant::now(), &self.store, &self.projects);
         self.github_effects(fx);
         self.github_tick();
+        // A new list of pull requests may name a session's branch.
+        self.refresh_places(None);
     }
 
     pub fn note(&mut self, note: SessionNote) {
@@ -427,6 +543,7 @@ impl Registry {
             ClientRequest::CreateSession {
                 project,
                 kind,
+                cwd,
                 prompt,
                 model,
                 effort,
@@ -434,7 +551,7 @@ impl Registry {
                 rows,
             } => {
                 if let Err(e) =
-                    self.create_session(project, kind, prompt, model, effort, (cols, rows))
+                    self.create_session(project, kind, cwd, prompt, model, effort, (cols, rows))
                 {
                     self.send(
                         client,
@@ -577,7 +694,8 @@ impl Registry {
             | ClientRequest::RefreshPrs { .. }
             | ClientRequest::MarkPrSeen { .. }
             | ClientRequest::SetFileViewed { .. }
-            | ClientRequest::WritePr { .. }) => {
+            | ClientRequest::WritePr { .. }
+            | ClientRequest::OpenWorktree { .. }) => {
                 let fx = self.github.request(
                     client,
                     req,
@@ -645,6 +763,9 @@ impl Registry {
                 }
                 if let Some(path) = payload.get("transcript_path").and_then(Value::as_str) {
                     self.watch_transcript(id, Path::new(path));
+                }
+                if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
+                    self.moved(id, PathBuf::from(cwd));
                 }
                 if event == "UserPromptSubmit" {
                     self.skip_transcript_so_far(id);
@@ -1059,16 +1180,23 @@ impl Registry {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_session(
         &mut self,
         project: ProjectId,
         kind: SessionKind,
+        cwd: Option<PathBuf>,
         prompt: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         (cols, rows): (u16, u16),
     ) -> anyhow::Result<()> {
-        let Some(proj) = self.projects.iter().find(|p| p.id == project) else {
+        let Some(root) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.path.clone())
+        else {
             bail!("unknown project")
         };
         // A shell has no model or effort; an agent only takes an effort its CLI knows,
@@ -1089,6 +1217,10 @@ impl Registry {
                 (model, effort)
             }
         };
+        let cwd = match cwd {
+            None => root,
+            Some(dir) => self.folder_of(project, &root, dir)?,
+        };
         let id = SessionId::new();
         let launch = self.launcher.launch(LaunchRequest {
             id,
@@ -1096,7 +1228,7 @@ impl Registry {
             prompt: prompt.as_deref(),
             model: model.as_deref(),
             effort: effort.as_deref(),
-            cwd: &proj.path,
+            cwd: &cwd,
             cols,
             rows,
             resume: None,
@@ -1119,12 +1251,43 @@ impl Registry {
             effort,
             user_named: false,
             archived: false,
+            cwd: cwd.clone(),
+            place: None,
         };
         self.sessions
             .push(Session::new(info.clone(), Some(cmd), false));
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
+        self.read_place(cwd);
         Ok(())
+    }
+
+    /// `dir` when a session of the project may run there: a folder in the project, or a
+    /// worktree of one of its repos (a sibling folder, as termist opens them).
+    fn folder_of(
+        &mut self,
+        project: ProjectId,
+        root: &Path,
+        dir: PathBuf,
+    ) -> anyhow::Result<PathBuf> {
+        if !dir.is_dir() {
+            bail!("{} is not a folder", dir.display());
+        }
+        if place::resolved(&dir).starts_with(place::resolved(root)) {
+            return Ok(dir);
+        }
+        let facts = place::read(&dir, &self.git);
+        let ours = facts.as_ref().is_some_and(|f| {
+            self.github
+                .repo_views(project)
+                .iter()
+                .any(|r| r.main == f.main)
+        });
+        if !ours {
+            bail!("{} is not a folder of this project", dir.display());
+        }
+        self.git_facts.insert(dir.clone(), facts);
+        Ok(dir)
     }
 
     /// The model is in the cached catalog of its CLI and lists this effort.
@@ -1171,6 +1334,12 @@ impl Registry {
         let Some(project) = self.projects.iter().find(|p| p.id == info.project) else {
             bail!("the project of {} is gone", info.name)
         };
+        // Its own folder while it is there; a worktree may have been removed since.
+        let cwd = if info.cwd.is_dir() {
+            info.cwd.clone()
+        } else {
+            project.path.clone()
+        };
         let kind = info.kind.clone();
         let (model, effort) = (info.model.clone(), info.effort.clone());
         // Without a conversation to resume (no prompt yet), start the agent fresh.
@@ -1185,7 +1354,7 @@ impl Registry {
             prompt: None,
             model: model.as_deref(),
             effort: effort.as_deref(),
-            cwd: &project.path,
+            cwd: &cwd,
             cols,
             rows,
             resume: resume.as_deref(),
@@ -1204,9 +1373,11 @@ impl Registry {
         s.resumable = resume.is_some();
         s.info.agent_session_id = launch.agent_session_id;
         s.info.last_activity_ms = now_ms();
+        s.info.cwd = cwd.clone();
         let info = s.info.clone();
         self.persist(id);
         self.broadcast(ServerEvent::SessionUpdated(info));
+        self.read_place(cwd);
         Ok(())
     }
 }
@@ -1221,6 +1392,7 @@ pub async fn run(
     let mut rescans = reg.rescans_rx.take().expect("a registry runs once");
     let mut catalogs = reg.catalog_rx.take().expect("a registry runs once");
     let mut github = reg.github_rx.take().expect("a registry runs once");
+    let mut places = reg.places_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
     github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -1233,7 +1405,11 @@ pub async fn run(
             Some(found) = rescans.recv() => reg.rescanned(found),
             Some(c) = catalogs.recv() => reg.catalog_read(c, std::time::Instant::now()),
             Some(done) = github.recv() => reg.github_done(done),
-            _ = github_beat.tick() => reg.github_tick(),
+            Some(read) = places.recv() => reg.place_read(read),
+            _ = github_beat.tick() => {
+                reg.github_tick();
+                reg.places_tick(std::time::Instant::now());
+            }
             _ = transcripts.tick() => {
                 reg.poll_transcripts();
                 reg.poll_idle_titles(std::time::Instant::now());
@@ -1300,6 +1476,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: p.path.clone(),
+            place: None,
         }
     }
 
@@ -1443,6 +1621,7 @@ mod tests {
                     agent(harness),
                     None,
                     None,
+                    None,
                     Some(effort.into()),
                     (80, 24),
                 )
@@ -1475,6 +1654,7 @@ mod tests {
                 harness: Harness::Codex,
             },
             None,
+            None,
             Some("gpt-x".into()),
             Some("xhigh".into()),
             (80, 24),
@@ -1502,6 +1682,7 @@ mod tests {
                 harness: Harness::Codex,
             },
             None,
+            None,
             Some("gpt-x".into()),
             Some("xhigh".into()),
             (80, 24),
@@ -1525,6 +1706,7 @@ mod tests {
                     harness: Harness::Codex,
                 },
                 None,
+                None,
                 Some("gpt-x".into()),
                 Some("turbo".into()),
                 (80, 24),
@@ -1546,6 +1728,7 @@ mod tests {
                 .create_session(
                     p.id,
                     codex(),
+                    None,
                     None,
                     Some(model.into()),
                     Some("xhigh".into()),
@@ -1773,6 +1956,170 @@ mod tests {
         reg.session_mut(id).unwrap().info.status = AgentStatus::Running;
         reg.poll_idle_titles(later(5000));
         assert_eq!(reg.session(id).unwrap().info.status, AgentStatus::Running);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_resumes_in_its_folder_or_its_project_s_when_the_folder_is_gone() {
+        let p = project();
+        let here = tempfile::tempdir().unwrap();
+        let mut old = claude(&p, "a1");
+        old.cwd = std::path::PathBuf::new(); // stored before sessions had folders
+        let mut kept = claude(&p, "a2");
+        kept.cwd = here.path().to_path_buf();
+        let mut gone = claude(&p, "a3");
+        gone.cwd = here.path().join("removed-worktree");
+        let mut reg = registry_with(&p, &[old.clone(), kept.clone(), gone.clone()]);
+        reg.launcher
+            .programs
+            .set(Harness::Claude, "/usr/bin/true".into());
+        assert_eq!(
+            reg.session(old.id).unwrap().info.cwd,
+            p.path,
+            "the project's"
+        );
+        reg.resume(kept.id, 80, 24).unwrap();
+        assert_eq!(reg.session(kept.id).unwrap().info.cwd, here.path());
+        reg.resume(gone.id, 80, 24).unwrap();
+        assert_eq!(reg.session(gone.id).unwrap().info.cwd, p.path);
+    }
+
+    #[tokio::test]
+    async fn a_claude_hook_moves_its_card_and_git_tells_its_branch_and_repo() {
+        let p = project();
+        let site = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let repo = store
+            .upsert_repo(p.id, site.path(), "acme", "site")
+            .unwrap();
+        let card = claude(&p, "a1");
+        store.upsert_session(&card, false).unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        // Absolute on every OS; git is not asked here, so it need not exist.
+        let worktree = site.path().join("site-worktrees").join("fix-login");
+        let payload = serde_json::json!({ "cwd": worktree, "session_id": "a1" });
+        reg.hook(card.id, Harness::Claude, "PreToolUse", &payload);
+        assert_eq!(reg.session(card.id).unwrap().info.cwd, worktree);
+        assert!(reg.places_reading.contains(&worktree), "git is asked");
+        assert_eq!(
+            reg.store.load().unwrap().1[0].info.cwd,
+            worktree,
+            "kept for a restart"
+        );
+        reg.place_read(PlaceRead(
+            worktree.clone(),
+            Some(GitFacts {
+                root: worktree.clone(),
+                branch: Some("fix/login".into()),
+                commit: None,
+                main: place::resolved(site.path()),
+            }),
+        ));
+        let place = reg.session(card.id).unwrap().info.place.clone().unwrap();
+        assert_eq!(
+            (place.branch.as_deref(), place.repo, place.pr),
+            (Some("fix/login"), Some(repo.id), None)
+        );
+        let mut sent = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            sent.push(ev);
+        }
+        assert!(sent.iter().any(|e| matches!(
+            e,
+            ServerEvent::SessionUpdated(u) if u.id == card.id && u.place.is_some()
+        )));
+        // The same answer again changes nothing and is not sent again.
+        reg.place_read(PlaceRead(
+            worktree.clone(),
+            reg.git_facts[&worktree].clone(),
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_folders_are_asked_again_every_round_only_while_someone_looks() {
+        let p = project();
+        let mut reg = registry_with(&p, &[stored(&p, "shell-1")]);
+        let t0 = std::time::Instant::now();
+        reg.places_tick(t0);
+        assert_eq!(reg.places_round, None, "no client");
+        let _rx = connect(&mut reg);
+        reg.places_reading.insert(p.path.clone()); // as if on its way: nothing spawned
+        reg.places_tick(t0);
+        assert_eq!(reg.places_round, Some(t0));
+        reg.places_tick(t0 + Duration::from_secs(10));
+        assert_eq!(reg.places_round, Some(t0), "not before the round is up");
+        reg.places_tick(t0 + PLACES_ROUND);
+        assert_eq!(reg.places_round, Some(t0 + PLACES_ROUND));
+    }
+
+    /// Runs git in `dir` for a test, as a nameless author; panics when it fails.
+    #[cfg(unix)]
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_starts_in_a_project_folder_or_a_worktree_of_its_repo_and_nowhere_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("src")).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        run_git(
+            &site,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "fix/login",
+                "../site-worktrees/fix/login",
+            ],
+        );
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.clone(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        store.upsert_repo(p.id, &site, "acme", "site").unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher
+            .programs
+            .set(Harness::Claude, "/usr/bin/true".into());
+        let claude = || SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        let start = |reg: &mut Registry, dir: PathBuf| {
+            reg.create_session(p.id, claude(), Some(dir), None, None, None, (80, 24))
+        };
+        let worktree = tmp.path().join("site-worktrees/fix/login");
+        start(&mut reg, site.join("src")).unwrap();
+        start(&mut reg, worktree.clone()).unwrap();
+        let cwds: Vec<PathBuf> = reg.sessions.iter().map(|s| s.info.cwd.clone()).collect();
+        assert_eq!(cwds, [site.join("src"), worktree]);
+        std::fs::create_dir(tmp.path().join("elsewhere")).unwrap();
+        let refused = start(&mut reg, tmp.path().join("elsewhere")).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("is not a folder of this project")
+        );
+        let refused = start(&mut reg, tmp.path().join("missing")).unwrap_err();
+        assert!(refused.to_string().contains("is not a folder"));
+        assert_eq!(reg.sessions.len(), 2, "nothing started for a refusal");
     }
 
     fn cancelled_by_title(reg: &mut Registry, p: &ProjectInfo) -> SessionId {

@@ -102,6 +102,7 @@ async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> Sessio
     c.send(&ClientRequest::CreateSession {
         project,
         kind,
+        cwd: None,
         prompt: None,
         model: None,
         effort: None,
@@ -816,6 +817,7 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: None,
         model: None,
         effort: None,
@@ -1342,6 +1344,7 @@ async fn model_and_effort_reach_the_cli_and_come_back_on_resume() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: Some("fix it".into()),
         model: Some("  my model  ".into()),
         effort: Some("high".into()),
@@ -1524,6 +1527,7 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
         kind: SessionKind::Agent {
             harness: Harness::Claude,
         },
+        cwd: None,
         prompt: Some("fix the login redirect".into()),
         model: Some("opus".into()),
         effort: None,
@@ -1695,7 +1699,7 @@ fn stub_gh(dir: &std::path::Path) -> String {
     const DETAIL: &str = r#"{"data":{"viewer":{"login":"alice"},"repository":{"pullRequest":{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","id":"PR_212","headRefOid":"h1","changedFiles":1,"body":"","files":{"totalCount":1,"nodes":[{"path":"src/a.rs","additions":1,"deletions":1,"changeType":"MODIFIED","viewerViewedState":"UNVIEWED"}]}}}}}"#;
     const VIEWED: &str = r#"{"data":{"repository":{"pullRequest":{"files":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"path":"src/a.rs","viewerViewedState":"UNVIEWED"}]}}}}}"#;
     const FILES: &str = r#"[{"filename":"src/a.rs","status":"modified","additions":1,"deletions":1,"changes":2,"patch":"@@ -1 +1 @@\n-a\n+b"}]"#;
-    const INBOX: &str = r#"{"data":{"viewer":{"login":"alice"},"rateLimit":{"remaining":4990,"resetAt":"2026-10-02T11:00:00Z"},"r0":{"pullRequests":{"totalCount":1,"nodes":[{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","headRefName":"feat/dealer","baseRefName":"main","additions":1,"deletions":1,"changedFiles":1,"mergeable":"MERGEABLE","reviewDecision":"REVIEW_REQUIRED","author":{"login":"bob"},"reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"alice"}}]},"latestOpinionatedReviews":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}]}}}}"#;
+    const INBOX: &str = r#"{"data":{"viewer":{"login":"alice"},"rateLimit":{"remaining":4990,"resetAt":"2026-10-02T11:00:00Z"},"r0":{"pullRequests":{"totalCount":1,"nodes":[{"number":212,"title":"Add a dealer filter","url":"https://github.com/acme/site/pull/212","isDraft":false,"state":"OPEN","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z","headRefName":"feat/dealer","headRepository":{"nameWithOwner":"acme/site"},"baseRefName":"main","additions":1,"deletions":1,"changedFiles":1,"mergeable":"MERGEABLE","reviewDecision":"REVIEW_REQUIRED","author":{"login":"bob"},"reviewRequests":{"nodes":[{"requestedReviewer":{"__typename":"User","login":"alice"}}]},"latestOpinionatedReviews":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}]}}}}"#;
     let script = r#"#!/bin/sh
 case "$1 $2" in
   "auth status") echo '{"hosts":{"github.com":[{"login":"alice","active":true,"state":"success"}]}}' ;;
@@ -1711,6 +1715,7 @@ case "$1 $2" in
       *) echo 'INBOX' ;;
     esac ;;
   "api --hostname") printf '%s\n' '@FILES@' ;;
+  "pr checkout") git checkout -q -b feat/dealer ;;
   *) exit 1 ;;
 esac
 "#
@@ -1870,6 +1875,114 @@ async fn a_pull_requests_diff_comes_through_gh_and_a_file_is_marked_viewed() {
         matches!(e, ServerEvent::PrDiff { diff: Some(d), .. } if d.files[0].viewed == Viewed::Viewed)
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_worktree_opens_beside_the_repo_and_a_session_there_knows_its_pull_request() {
+    use termist_core::github::PrRef;
+    let tmp = tempfile::tempdir().unwrap();
+    let site = tmp.path().join("site");
+    std::fs::create_dir(&site).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    if git(&site, &["init", "-q", "-b", "main"]).is_none() {
+        return; // no git on this machine
+    }
+    git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]).unwrap();
+    git(
+        &site,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/site.git",
+        ],
+    )
+    .unwrap();
+    let d = start(DaemonConfig {
+        gh_bin: Some(stub_gh(tmp.path())),
+        ..shell_config()
+    })
+    .await;
+    let mut c = Client::connect(&d.paths).await.unwrap();
+    let project = add_project(&mut c, site.clone()).await;
+    c.send(&ClientRequest::SetGitHub { enabled: true })
+        .await
+        .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::Prs { repos, .. } if repos.first().is_some_and(|r| !r.prs.is_empty()))
+    })
+    .await;
+    let ServerEvent::Prs { repos, .. } = ev else {
+        unreachable!()
+    };
+    let pr = PrRef {
+        repo: repos[0].repo,
+        number: 212,
+    };
+    // Projects are kept by their resolved folder; the worktree goes beside it.
+    let want = std::fs::canonicalize(tmp.path())
+        .unwrap()
+        .join("site-worktrees")
+        .join("feat")
+        .join("dealer");
+    for made in [true, false] {
+        c.send(&ClientRequest::OpenWorktree { pr }).await.unwrap();
+        let ev = next_event(&mut c, |e| {
+            matches!(
+                e,
+                ServerEvent::WorktreeReady { .. } | ServerEvent::WorktreeFailed { .. }
+            )
+        })
+        .await;
+        assert_eq!(
+            ev,
+            ServerEvent::WorktreeReady {
+                pr,
+                path: want.clone(),
+                created: made,
+            },
+            "made once, then found"
+        );
+    }
+    assert_eq!(
+        git(&want, &["rev-parse", "--abbrev-ref", "HEAD"]).as_deref(),
+        Some("feat/dealer"),
+        "gh checked the branch out there"
+    );
+    c.send(&ClientRequest::CreateSession {
+        project,
+        kind: SessionKind::Shell,
+        cwd: Some(want.clone()),
+        prompt: None,
+        model: None,
+        effort: None,
+        cols: 60,
+        rows: 10,
+    })
+    .await
+    .unwrap();
+    let ev = next_event(&mut c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(s) if s.place.as_ref().is_some_and(|p| p.pr.is_some()))
+    })
+    .await;
+    let ServerEvent::SessionUpdated(s) = ev else {
+        unreachable!()
+    };
+    let place = s.place.unwrap();
+    assert_eq!(s.cwd, want);
+    assert_eq!(
+        (place.branch.as_deref(), place.repo, place.pr),
+        (Some("feat/dealer"), Some(pr.repo), Some(pr))
+    );
 }
 
 #[tokio::test]

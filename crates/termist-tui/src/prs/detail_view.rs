@@ -102,7 +102,9 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
         Some(x) => match d.tab {
             Tab::Overview => (overview(x, w, t), vec![], vec![]),
             Tab::Conversation => {
-                let (mut lines, anchors) = timeline::lines(x, w, &d.toggled, t, now);
+                let none = std::collections::BTreeSet::new();
+                let marked = app.marks.get(&d.pr).unwrap_or(&none);
+                let (mut lines, anchors) = timeline::lines(x, w, &d.toggled, marked, t, now);
                 // The highlighted item: its bar in the focus colour.
                 if let Some(a) = anchors.get(d.item.min(anchors.len().saturating_sub(1))) {
                     let end = anchors

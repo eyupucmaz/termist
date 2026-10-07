@@ -3,8 +3,8 @@ use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
-    self, BrowseEntry, Capture, CaptureTarget, ModelChoice, ModelPicker, OpenProject, Overlay,
-    QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
+    self, BrowseEntry, Capture, CaptureTarget, HandTo, ModelChoice, ModelPicker, OpenProject,
+    Overlay, QuickPrompt, SETTING_ROWS, SettingRow, SettingsView, key_rows,
 };
 use crate::prs::compose::{Compose, ComposeAction, Sending, Target};
 use crate::prs::{self, Ask, Mine, PrAction, PrLayout, PrView, ProjectPrs, Subject};
@@ -19,7 +19,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
@@ -120,7 +120,8 @@ pub struct App {
     /// The last press landed on a toast: its drag and release are not a selection.
     toast_down: bool,
     pub cards_per_row: usize,
-    /// Rows of cards that fit on screen, and the first one shown.
+    /// Lines the cards may take on screen; the rows of them shown from the first one.
+    pub card_lines: u16,
     pub card_rows: usize,
     pub card_scroll: usize,
     /// The grid, the archive, or the pull requests.
@@ -198,6 +199,14 @@ pub struct App {
     pub drafts: HashMap<(PrRef, Target), String>,
     /// Writes on their way, by ticket: the draft to forget once GitHub took them.
     writes: HashMap<u64, Option<(PrRef, Target)>>,
+    /// The worktree asked for with `w` (or `a`): its pull request, and the words the
+    /// quick prompt opens with there (`None`: the pull request's own line).
+    worktree_for: Option<(PrRef, Option<String>)>,
+    /// Review threads marked with `Space`, by pull request, to hand to an agent.
+    pub marks: HashMap<PrRef, BTreeSet<String>>,
+    /// Threads of this pull request are on their way to an agent: its marks go once
+    /// they are sent.
+    hand_for: Option<PrRef>,
     /// The comment `D` asked to delete, waiting for a yes.
     pub deleting: Option<(PrRef, String, CommentKind)>,
     next_ticket: u64,
@@ -255,6 +264,7 @@ impl App {
             toast_down: false,
             scrolling: false,
             cards_per_row: 1,
+            card_lines: crate::ui::CARD_H,
             card_rows: 1,
             card_scroll: 0,
             view: View::Grid,
@@ -301,6 +311,9 @@ impl App {
             pr_diffs: HashMap::new(),
             drafts: HashMap::new(),
             writes: HashMap::new(),
+            worktree_for: None,
+            marks: HashMap::new(),
+            hand_for: None,
             deleting: None,
             next_ticket: 0,
             pr_layout: RefCell::default(),
@@ -728,6 +741,35 @@ impl App {
                     self.pr_diffs.insert(pr, (state, diff));
                 }
             }
+            ServerEvent::WorktreeReady { pr, path, .. } => {
+                // Only the one asked for; another client's answer leaves it waiting.
+                if self
+                    .worktree_for
+                    .as_ref()
+                    .is_some_and(|(want, _)| *want == pr)
+                    && let Some((_, text)) = self.worktree_for.take()
+                {
+                    return self.worktree_ready(pr, path, text);
+                }
+            }
+            ServerEvent::WorktreeFailed { pr, message } => {
+                if self
+                    .worktree_for
+                    .as_ref()
+                    .is_some_and(|(want, _)| *want == pr)
+                {
+                    self.worktree_for = None;
+                    self.hand_for = None; // nothing was handed over
+                    match self.view {
+                        View::Prs(_) => self.message = Some(message),
+                        _ => self.toasts.push(Toast {
+                            text: format!("✗ {message}"),
+                            kind: ToastKind::Failed,
+                            until: Instant::now() + toast::AGENT_FOR,
+                        }),
+                    }
+                }
+            }
             ServerEvent::PrWritten { ticket, .. } => {
                 if let Some(Some(target)) = self.writes.remove(&ticket) {
                     self.drafts.remove(&target);
@@ -994,19 +1036,23 @@ impl App {
                 if self.overlays.is_empty()
                     && matches!(self.mode, Mode::Grid | Mode::Focus | Mode::FocusPrefix)
                 {
-                    let (card, more) = {
+                    let (card, more, band_pr) = {
                         let hits = self.hits.borrow();
                         (
                             hits.card_at(ev.column, ev.row),
                             hits.more_at(ev.column, ev.row),
+                            hits.band_pr_at(ev.column, ev.row),
                         )
                     };
+                    if let (Some(pr), Some(project)) = (band_pr, self.project) {
+                        return self.reveal_pr(project, pr);
+                    }
                     if let Some(id) = card {
                         return self.click_card(id);
                     }
                     if let Some(rows) = more {
                         self.mode = Mode::Grid;
-                        self.move_by(rows * self.cards_per_row.max(1) as isize);
+                        self.move_rows(rows);
                         return self.sync_attachment();
                     }
                 }
@@ -1042,8 +1088,7 @@ impl App {
         if !self.takes_mouse(ev) {
             let cards = self.hits.borrow().over_cards(ev.column, ev.row);
             if cards && self.overlays.is_empty() && self.mode == Mode::Grid {
-                let row = self.cards_per_row.max(1) as isize;
-                self.move_by(if up { -row } else { row });
+                self.move_rows(if up { -1 } else { 1 });
                 return self.sync_attachment();
             }
             return vec![];
@@ -1242,6 +1287,7 @@ impl App {
         vec![Action::Send(ClientRequest::CreateSession {
             project,
             kind,
+            cwd: None,
             prompt: None,
             model: None,
             effort: None,
@@ -1445,6 +1491,7 @@ impl App {
             Some(Overlay::ModelName(_)) => self.model_name_key(key),
             Some(Overlay::Project(_)) => self.project_key(key),
             Some(Overlay::FollowUp { .. }) => self.follow_up_key(key),
+            Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
@@ -1527,6 +1574,19 @@ impl App {
             self.message = Some("no project open".into());
             return vec![];
         };
+        let text = self.prompt_draft.clone().unwrap_or_default();
+        // A task of its own: what it sends is not review threads.
+        self.hand_for = None;
+        self.quick_prompt_in(project, &text, None)
+    }
+
+    /// The quick prompt for `project` with `text` in it, for its folder or a worktree.
+    fn quick_prompt_in(
+        &mut self,
+        project: ProjectId,
+        text: &str,
+        worktree: Option<(PathBuf, String)>,
+    ) -> Vec<Action> {
         let launch = self
             .state
             .last_launch
@@ -1545,12 +1605,13 @@ impl App {
                 model: None,
                 effort: None,
             });
-        let mut input = TextInput::with_text(self.prompt_draft.as_deref().unwrap_or(""), true);
+        let mut input = TextInput::with_text(text, true);
         input.set_history(self.prompt_history.clone());
         self.overlays.push(Overlay::QuickPrompt(QuickPrompt {
             input,
             project,
             launch,
+            worktree,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -1570,6 +1631,7 @@ impl App {
                 if let Some(Overlay::QuickPrompt(q)) = self.overlays.pop() {
                     self.keep_draft(&q);
                 }
+                self.hand_for = None;
             }
             KeyCode::Tab => {
                 let current = q.launch.harness;
@@ -1615,6 +1677,9 @@ impl App {
     /// A quick prompt closed without starting: its text waits for the next, unless it is
     /// blank or an earlier prompt recalled and left as it was (`↑` brings that back).
     fn keep_draft(&mut self, q: &QuickPrompt) {
+        if q.worktree.is_some() {
+            return; // words for a pull request's worktree, not a draft for `p`
+        }
         let text = q.input.text();
         let own = !text.trim().is_empty() && !q.input.is_from_history();
         self.prompt_draft = own.then(|| text.to_string());
@@ -1640,6 +1705,9 @@ impl App {
         let text = q.input.text();
         let prompt = (!text.trim().is_empty()).then(|| text.to_string());
         self.prompt_draft = None;
+        if let Some(pr) = self.hand_for.take() {
+            self.marks.remove(&pr);
+        }
         // The daemon stores it without sending the state again: keep our copy current.
         self.state.last_launch = Some(q.launch.clone());
         self.focus_next_created = true;
@@ -1649,6 +1717,7 @@ impl App {
             Action::Send(ClientRequest::CreateSession {
                 project: q.project,
                 kind: SessionKind::Agent { harness },
+                cwd: q.worktree.map(|(path, _)| path),
                 prompt,
                 model: q.launch.model,
                 effort: q.launch.effort,
@@ -1824,8 +1893,11 @@ impl App {
             && let Some(id) = picker.selected().map(|p| p.id)
         {
             self.overlays.pop();
-            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut()
+                && q.project != id
+            {
                 q.project = id;
+                q.worktree = None; // the worktree was the other project's
             }
         }
         vec![]
@@ -1853,6 +1925,7 @@ impl App {
             self.message = Some(why.into());
             return;
         }
+        self.hand_for = None; // its own words, not review threads
         self.overlays.push(Overlay::FollowUp {
             session,
             input: TextInput::new(true),
@@ -1868,6 +1941,7 @@ impl App {
         };
         if key.code == KeyCode::Esc {
             self.overlays.pop();
+            self.hand_for = None;
             return vec![];
         }
         if input.key(key) != Edit::Submit {
@@ -1881,6 +1955,10 @@ impl App {
         if let Some(why) = self.follow_up_refused(session) {
             self.message = Some(why.into());
             return vec![];
+        }
+        // Review threads handed over: their marks are done.
+        if let Some(pr) = self.hand_for.take() {
+            self.marks.remove(&pr);
         }
         let modes = self
             .screens
@@ -2111,8 +2189,8 @@ impl App {
             }
             'h' => self.move_by(-1),
             'l' => self.move_by(1),
-            'j' => self.move_by(self.cards_per_row.max(1) as isize),
-            'k' => self.move_by(-(self.cards_per_row.max(1) as isize)),
+            'j' => self.move_rows(1),
+            'k' => self.move_rows(-1),
             _ => {}
         }
         vec![]
@@ -2227,7 +2305,8 @@ impl App {
     }
 
     fn move_by(&mut self, delta: isize) {
-        let ids: Vec<SessionId> = self.project_sessions().iter().map(|s| s.id).collect();
+        // In the order drawn: band by band.
+        let ids: Vec<SessionId> = self.grid_rows().into_iter().flat_map(|r| r.cards).collect();
         if ids.is_empty() {
             return;
         }
@@ -2249,8 +2328,179 @@ impl App {
         self.mode = Mode::Grid;
         self.view = match self.view {
             View::Prs(_) => View::Grid,
-            _ => View::Prs(PrView::for_project(self.project)),
+            _ => {
+                // On the selected card's pull request, when its branch has one.
+                let mut view = PrView::for_project(self.project);
+                view.selected = self.card_pr();
+                View::Prs(view)
+            }
         };
+    }
+
+    /// Asks the daemon for `pr`'s worktree; the quick prompt opens there with `text`
+    /// (or the pull request's own line) when it is ready.
+    fn ask_worktree(&mut self, pr: PrRef, text: Option<String>) -> Vec<Action> {
+        self.worktree_for = Some((pr, text));
+        self.message = Some(format!("opening a worktree for #{}…", pr.number));
+        vec![Action::Send(ClientRequest::OpenWorktree { pr })]
+    }
+
+    /// The pull request as the inbox last read it, with its project.
+    fn pr_summary(&self, pr: PrRef) -> Option<(ProjectId, &termist_core::github::PrSummary)> {
+        self.prs.iter().find_map(|(project, data)| {
+            let summary = data
+                .repos
+                .iter()
+                .find(|r| r.repo == pr.repo)?
+                .prs
+                .iter()
+                .find(|p| p.number == pr.number)?;
+            Some((*project, summary))
+        })
+    }
+
+    /// The worktree is there: the quick prompt opens in it.
+    fn worktree_ready(&mut self, pr: PrRef, path: PathBuf, text: Option<String>) -> Vec<Action> {
+        self.message = None;
+        let Some((project, summary)) = self.pr_summary(pr) else {
+            return vec![];
+        };
+        let branch = summary.head.clone();
+        let text = text.unwrap_or_else(|| {
+            format!(
+                "Pull request #{} \"{}\" ({}): {} into {}. ",
+                pr.number, summary.title, summary.url, summary.head, summary.base
+            )
+        });
+        self.quick_prompt_in(project, &text, Some((path, branch)))
+    }
+
+    /// `a`: the marked threads of `pr` (else the one at `here`) as words for an agent:
+    /// to a live card on its branch, or to a new agent in its worktree.
+    fn hand(&mut self, pr: PrRef, here: Option<String>) -> Vec<Action> {
+        let Some(detail) = self.pr_details.get(&pr).and_then(|(_, d)| d.as_ref()) else {
+            self.message = Some("not loaded yet".into());
+            return vec![];
+        };
+        let threads: Vec<&termist_core::github::Thread> =
+            match self.marks.get(&pr).filter(|m| !m.is_empty()) {
+                Some(marked) => detail
+                    .threads
+                    .iter()
+                    .filter(|th| marked.contains(&th.id))
+                    .collect(),
+                None => match here.and_then(|id| detail.threads.iter().find(|th| th.id == id)) {
+                    None => {
+                        self.message = Some("mark threads with Space first".into());
+                        return vec![];
+                    }
+                    Some(th) if th.resolved => {
+                        self.message = Some("resolved: mark it with Space to send it".into());
+                        return vec![];
+                    }
+                    Some(th) => vec![th],
+                },
+            };
+        let branch = detail.summary.head.clone();
+        let text = crate::prs::hand::text(pr.number, &branch, &threads);
+        let cards: Vec<&SessionInfo> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| {
+                !s.archived
+                    && matches!(s.kind, SessionKind::Agent { .. })
+                    && s.status.is_live()
+                    && s.place.as_ref().is_some_and(|p| p.pr == Some(pr))
+            })
+            .collect();
+        self.hand_for = Some(pr);
+        if cards.is_empty() {
+            return self.ask_worktree(pr, Some(text));
+        }
+        let labels: HashMap<HandTo, String> = cards
+            .iter()
+            .map(|s| {
+                let (_, _, word) = crate::ui::status_style(&self.theme, s.status);
+                (
+                    HandTo::Card(s.id),
+                    format!("{} · {} · {word}", s.kind.label(), s.display_name()),
+                )
+            })
+            .chain([(HandTo::New, format!("new agent in ⎇ {branch}"))])
+            .collect();
+        let mut items: Vec<HandTo> = cards.iter().map(|s| HandTo::Card(s.id)).collect();
+        items.push(HandTo::New);
+        let picker = ListPicker::new(items, move |to| labels[to].clone(), false);
+        self.overlays.push(Overlay::Hand { pr, text, picker });
+        vec![]
+    }
+
+    fn hand_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Hand { picker, .. }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if key.code == KeyCode::Esc {
+            self.overlays.pop();
+            self.hand_for = None;
+            return vec![];
+        }
+        if picker.key(key) != Pick::Chosen {
+            return vec![];
+        }
+        let Some(Overlay::Hand { pr, text, picker }) = self.overlays.pop() else {
+            return vec![];
+        };
+        match picker.selected().cloned() {
+            Some(HandTo::Card(session)) => {
+                if let Some(why) = self.follow_up_refused(session) {
+                    self.message = Some(why.into());
+                    self.hand_for = None;
+                    return vec![];
+                }
+                self.overlays.push(Overlay::FollowUp {
+                    session,
+                    input: TextInput::with_text(&text, true),
+                });
+                vec![]
+            }
+            Some(HandTo::New) => self.ask_worktree(pr, Some(text)),
+            None => vec![],
+        }
+    }
+
+    /// The open pull request of the selected card's branch.
+    pub fn card_pr(&self) -> Option<PrRef> {
+        let id = self.selected?;
+        let s = self.state.sessions.iter().find(|s| s.id == id)?;
+        s.place.as_ref()?.pr
+    }
+
+    /// `Shift+V`: the selected card's pull request in the browser.
+    fn card_pr_in_browser(&mut self) -> Vec<Action> {
+        let url = self.card_pr().and_then(|pr| {
+            let repo = self
+                .prs
+                .values()
+                .flat_map(|d| &d.repos)
+                .find(|r| r.repo == pr.repo)?;
+            Some(
+                repo.prs
+                    .iter()
+                    .find(|p| p.number == pr.number)
+                    .map(|p| p.url.clone())
+                    .unwrap_or_else(|| {
+                        format!("https://github.com/{}/pull/{}", repo.slug, pr.number)
+                    }),
+            )
+        });
+        match url {
+            Some(url) => vec![Action::OpenUrl(url)],
+            None => {
+                self.message = Some("no pull request for this branch".into());
+                vec![]
+            }
+        }
     }
 
     /// Keeps the PR view on the current project's data, and tells the daemon what is
@@ -2342,6 +2592,16 @@ impl App {
                 vec![Action::Send(ClientRequest::MarkPrSeen { pr, updated_at })]
             }
             Some(PrAction::Repos) => self.open_repos(),
+            Some(PrAction::Worktree) => {
+                let pr = match &self.view {
+                    View::Prs(v) => v.detail.as_ref().map(|d| d.pr).or(v.selected),
+                    _ => None,
+                };
+                match pr {
+                    Some(pr) => self.ask_worktree(pr, None),
+                    None => vec![],
+                }
+            }
             Some(PrAction::Browser(url)) => vec![Action::OpenUrl(url)],
             Some(PrAction::Viewed { pr, path, viewed }) => {
                 vec![Action::Send(ClientRequest::SetFileViewed {
@@ -2351,6 +2611,30 @@ impl App {
                 })]
             }
             Some(PrAction::Ask(ask)) => self.ask(ask),
+            Some(PrAction::Mark(thread)) => {
+                if let View::Prs(view) = &self.view
+                    && let Some(pr) = view.detail.as_ref().map(|d| d.pr)
+                {
+                    let marks = self.marks.entry(pr).or_default();
+                    if !marks.remove(&thread) {
+                        marks.insert(thread);
+                    }
+                    if marks.is_empty() {
+                        self.marks.remove(&pr);
+                    }
+                }
+                vec![]
+            }
+            Some(PrAction::Hand(here)) => {
+                let pr = match &self.view {
+                    View::Prs(view) => view.detail.as_ref().map(|d| d.pr),
+                    _ => None,
+                };
+                match pr {
+                    Some(pr) => self.hand(pr, here),
+                    None => vec![],
+                }
+            }
             Some(PrAction::Note(why)) => {
                 self.message = Some(why.into());
                 vec![]
@@ -2433,6 +2717,7 @@ impl App {
             }
             KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
             KeyAction::PullRequests => self.toggle_prs(),
+            KeyAction::PullRequestInBrowser => return self.card_pr_in_browser(),
             KeyAction::RefreshGitHub => {
                 if let Some(project) = self.project
                     && self.config.github.enabled
@@ -2901,35 +3186,116 @@ impl App {
         actions
     }
 
-    /// Each frame's layout: cards per row and rows that fit. Scrolls just enough to
-    /// keep the selected card on screen.
-    pub fn set_card_window(&mut self, per_row: usize, rows: usize) {
+    /// Each frame's layout: cards per row and the lines they may take. Scrolls just
+    /// enough to keep the selected card on screen.
+    pub fn set_card_window(&mut self, per_row: usize, lines: u16) {
         self.cards_per_row = per_row.max(1);
-        self.card_rows = rows.max(1);
-        let sessions = self.project_sessions();
-        let total_rows = sessions.len().div_ceil(self.cards_per_row);
-        if let Some(pos) = sessions.iter().position(|s| Some(s.id) == self.selected) {
-            let row = pos / self.cards_per_row;
-            if row < self.card_scroll {
-                self.card_scroll = row;
-            } else if row >= self.card_scroll + self.card_rows {
-                self.card_scroll = row + 1 - self.card_rows;
+        self.card_lines = lines.max(1);
+        let rows = self.grid_rows();
+        let span = |rows: &[crate::bands::Row]| rows.iter().map(|r| r.height()).sum::<u16>();
+        if let Some(r) = self.selected_row(&rows) {
+            self.card_scroll = self.card_scroll.min(r);
+            while self.card_scroll < r && span(&rows[self.card_scroll..=r]) > self.card_lines {
+                self.card_scroll += 1;
             }
         }
-        self.card_scroll = self
-            .card_scroll
-            .min(total_rows.saturating_sub(self.card_rows));
+        // No room left empty below the last row.
+        let mut first = rows.len();
+        while first > 0 && span(&rows[first - 1..]) <= self.card_lines {
+            first -= 1;
+        }
+        self.card_scroll = self.card_scroll.min(first);
+        self.card_rows = (self.card_scroll..rows.len())
+            .take_while(|&i| span(&rows[self.card_scroll..=i]) <= self.card_lines)
+            .count()
+            .max(1);
+    }
+
+    /// The rows of the grid as drawn now: the cards by band, `cards_per_row` to a row.
+    pub fn grid_rows(&self) -> Vec<crate::bands::Row> {
+        let sessions = self.project_sessions();
+        let (bands, headers) = self.grid_bands(&sessions);
+        crate::bands::rows(&bands, self.cards_per_row, headers)
+    }
+
+    /// The bands of `sessions` and whether they get headers; the archive is one band.
+    pub fn grid_bands<'a>(
+        &self,
+        sessions: &[&'a SessionInfo],
+    ) -> (Vec<crate::bands::Band<'a>>, bool) {
+        let path = self
+            .state
+            .projects
+            .iter()
+            .find(|p| Some(p.id) == self.project)
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
+        if self.archive_view() {
+            let all = crate::bands::Band {
+                root: path,
+                place: None,
+                cards: sessions.to_vec(),
+            };
+            return (vec![all], false);
+        }
+        let bands = crate::bands::bands(&path, sessions);
+        let headers = crate::bands::headers(&bands);
+        (bands, headers)
+    }
+
+    /// What the cards take, for the layout.
+    pub fn card_shape(&self) -> crate::ui::Shape {
+        let sessions = self.project_sessions();
+        let (bands, headers) = self.grid_bands(&sessions);
+        crate::ui::Shape {
+            counts: bands.iter().map(|b| b.cards.len()).collect(),
+            headers,
+        }
+    }
+
+    fn selected_row(&self, rows: &[crate::bands::Row]) -> Option<usize> {
+        let id = self.selected?;
+        rows.iter().position(|r| r.cards.contains(&id))
+    }
+
+    /// `delta` rows down (up when negative), in the same column as far as the row goes;
+    /// past the last row (or the first) to the last card (or the first).
+    fn move_rows(&mut self, delta: isize) {
+        let rows = self.grid_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let (r, col) = match self.selected_row(&rows) {
+            Some(r) => (
+                r,
+                rows[r]
+                    .cards
+                    .iter()
+                    .position(|id| Some(*id) == self.selected),
+            ),
+            None => (0, Some(0)),
+        };
+        let to = r as isize + delta;
+        let last = rows.len() as isize - 1;
+        self.selected = Some(match to {
+            ..0 => rows[0].cards[0],
+            _ if to > last => *rows[last as usize].cards.last().expect("rows have cards"),
+            _ => {
+                let row = &rows[to as usize].cards;
+                row[col.unwrap_or(0).min(row.len() - 1)]
+            }
+        });
     }
 
     /// Ctrl+D / Ctrl+U: half a screen of cards down or up, selection and view together.
     fn half_page(&mut self, direction: isize) {
         let half = (self.card_rows / 2).max(1);
-        self.move_by(direction * (half * self.cards_per_row) as isize);
+        self.move_rows(direction * half as isize);
         self.card_scroll = self
             .card_scroll
             .saturating_add_signed(direction * half as isize);
-        let (per_row, rows) = (self.cards_per_row, self.card_rows);
-        self.set_card_window(per_row, rows);
+        let (per_row, lines) = (self.cards_per_row, self.card_lines);
+        self.set_card_window(per_row, lines);
     }
 
     fn switch_project(&mut self, delta: isize) {
@@ -3076,6 +3442,8 @@ mod tests {
             effort: None,
             user_named: false,
             archived: false,
+            cwd: "/p".into(),
+            place: None,
         }
     }
 
@@ -3101,7 +3469,7 @@ mod tests {
         ];
         let mut app = App::new();
         app.pane_resized(80, 20);
-        app.set_card_window(2, 4);
+        app.set_card_window(2, 4 * crate::ui::CARD_H);
         app.on_event(ServerEvent::State(StateSnapshot {
             projects: vec![api, web],
             sessions: s.clone(),
@@ -3255,6 +3623,7 @@ mod tests {
                 kind: SessionKind::Agent {
                     harness: Harness::Claude
                 },
+                cwd: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -3290,6 +3659,7 @@ mod tests {
                 kind: SessionKind::Agent {
                     harness: Harness::Codex
                 },
+                cwd: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -3686,6 +4056,7 @@ mod tests {
                     kind: SessionKind::Agent {
                         harness: Harness::Claude
                     },
+                    cwd: None,
                     prompt: Some("fix the login redirect\nand add a test".into()),
                     model: Some("opus".into()),
                     effort: Some("max".into()),
@@ -5257,7 +5628,7 @@ mod tests {
             sessions: s.clone(),
             ..StateSnapshot::default()
         }));
-        app.set_card_window(2, rows);
+        app.set_card_window(2, rows as u16 * crate::ui::CARD_H);
         (app, s)
     }
 
@@ -5267,14 +5638,258 @@ mod tests {
         for _ in 0..3 {
             app.on_key(k(K::Char('j')));
         }
-        app.set_card_window(2, 2);
+        app.set_card_window(2, 2 * crate::ui::CARD_H);
         assert_eq!(app.selected, Some(s[6].id));
         assert_eq!(app.card_scroll, 2, "row 3 is the last row on screen");
         for _ in 0..3 {
             app.on_key(k(K::Char('k')));
         }
-        app.set_card_window(2, 2);
+        app.set_card_window(2, 2 * crate::ui::CARD_H);
         assert_eq!(app.card_scroll, 0);
+    }
+
+    /// A project with a card on pull request #212's branch and one on main.
+    fn linked() -> (App, Vec<SessionInfo>, PrRef) {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let pr = PrRef {
+            repo: termist_core::github::RepoId(7),
+            number: 212,
+        };
+        let at = |name: &str, root: &str, pr: Option<PrRef>| {
+            let mut s = session(p.id, name, AgentStatus::Finished);
+            s.cwd = root.into();
+            s.place = Some(Box::new(termist_core::Place {
+                root: root.into(),
+                branch: Some("b".into()),
+                commit: None,
+                repo: Some(termist_core::github::RepoId(7)),
+                pr,
+                gone: false,
+            }));
+            s
+        };
+        let s = vec![
+            at("main", "/w/site", None),
+            at("fix", "/w/site-worktrees/fix", Some(pr)),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p.clone()],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        let listed = vec![
+            crate::prs::fixtures::summary(198, "Add a filter", "carol"),
+            crate::prs::fixtures::summary(212, "Fix login", "bob"),
+        ];
+        app.on_event(ServerEvent::Prs {
+            project: p.id,
+            state: GhState::Ok,
+            discovered: 1,
+            repos: vec![crate::prs::fixtures::repo(7, "site", listed)],
+        });
+        (app, s, pr)
+    }
+
+    #[test]
+    fn w_opens_a_worktree_and_the_quick_prompt_starts_the_agent_there() {
+        let (mut app, s, pr) = linked();
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        assert_eq!(
+            sent(&app.on_key(k(K::Char('w')))),
+            [&ClientRequest::OpenWorktree { pr }]
+        );
+        assert_eq!(app.message.as_deref(), Some("opening a worktree for #212…"));
+        let other = PrRef { number: 198, ..pr };
+        app.on_event(ServerEvent::WorktreeReady {
+            pr: other,
+            path: "/w/elsewhere".into(),
+            created: true,
+        });
+        assert!(app.overlays.is_empty(), "not the one asked for");
+        let path = PathBuf::from("/w/site-worktrees/feat");
+        app.on_event(ServerEvent::WorktreeReady {
+            pr,
+            path: path.clone(),
+            created: true,
+        });
+        let Some(Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("the quick prompt")
+        };
+        assert_eq!(q.worktree, Some((path.clone(), "feat".to_string())));
+        assert_eq!(
+            q.input.text(),
+            "Pull request #212 \"Fix login\" (https://github.com/acme/site/pull/212): feat into main. "
+        );
+        assert!(crate::overlay_view::launch_line(&app, q).starts_with("site ⎇ feat ^P"));
+        let actions = app.on_key(k(K::Enter));
+        let created = sent(&actions).into_iter().find_map(|r| match r {
+            ClientRequest::CreateSession { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        });
+        assert_eq!(created, Some(Some(path)));
+        assert_eq!(app.prompt_draft, None);
+    }
+
+    #[test]
+    fn a_worktree_that_cannot_be_made_says_why_where_you_are() {
+        let (mut app, s, pr) = linked();
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        app.on_key(k(K::Char('w')));
+        let why = "couldn't open a worktree · fatal: invalid reference";
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: why.into(),
+        });
+        assert_eq!(app.message.as_deref(), Some(why));
+        app.on_key(k(K::Char('w')));
+        app.on_key(k(K::Char('v'))); // back to the grid while it is on its way
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: why.into(),
+        });
+        let texts: Vec<String> = app.toasts.items().map(|t| t.text.clone()).collect();
+        assert_eq!(
+            texts,
+            [format!("✗ {why}")],
+            "a toast where the list is gone"
+        );
+    }
+
+    #[test]
+    fn marks_wait_for_their_own_hand_over_not_any_send() {
+        let (mut app, _, pr) = linked();
+        let summary = crate::prs::fixtures::summary(212, "Fix login", "bob");
+        app.on_event(ServerEvent::PrDetail {
+            pr,
+            state: GhState::Ok,
+            detail: Some(Box::new(crate::prs::fixtures::detail(summary))),
+        });
+        app.marks.insert(pr, BTreeSet::from(["T1".to_string()]));
+        app.hand(pr, None);
+        assert_eq!(app.hand_for, Some(pr), "on its way to a new agent");
+        app.on_event(ServerEvent::WorktreeFailed {
+            pr,
+            message: "couldn't open a worktree · no".into(),
+        });
+        assert_eq!(app.hand_for, None, "a failed worktree hands nothing over");
+        app.hand(pr, None);
+        app.open_quick_prompt();
+        assert_eq!(app.hand_for, None, "a plain new task is not the hand-over");
+        app.overlays.clear();
+        app.hand(pr, None);
+        app.selected = Some(app.state.sessions[0].id);
+        app.open_follow_up();
+        assert_eq!(app.hand_for, None, "nor is a plain follow-up");
+        assert!(app.marks.contains_key(&pr), "still marked");
+    }
+
+    #[test]
+    fn shift_v_opens_the_card_s_pull_request_in_the_browser() {
+        let (mut app, s, _) = linked();
+        app.select(s[1].id);
+        assert_eq!(
+            app.on_key(k(K::Char('V'))),
+            [Action::OpenUrl(
+                "https://github.com/acme/site/pull/212".into()
+            )]
+        );
+        app.select(s[0].id);
+        assert!(app.on_key(k(K::Char('V'))).is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("no pull request for this branch")
+        );
+    }
+
+    #[test]
+    fn v_on_a_card_with_a_pull_request_opens_the_list_on_it_and_a_band_s_number_opens_it() {
+        let (mut app, s, pr) = linked();
+        app.select(s[1].id);
+        app.on_key(k(K::Char('v')));
+        let View::Prs(view) = &app.view else {
+            panic!("the pull requests")
+        };
+        assert_eq!((view.selected, view.detail.is_none()), (Some(pr), true));
+        app.on_key(k(K::Char('v')));
+        app.select(s[0].id);
+        app.on_key(k(K::Char('v')));
+        let View::Prs(view) = &app.view else { panic!() };
+        assert_ne!(view.selected, Some(pr), "a card without one: as before");
+        app.on_key(k(K::Char('v')));
+        app.hits
+            .borrow_mut()
+            .band_prs
+            .push((pr, ratatui::layout::Rect::new(20, 6, 4, 1)));
+        click(&mut app, (21, 6));
+        let View::Prs(view) = &app.view else {
+            panic!("the pull request")
+        };
+        assert_eq!(view.detail.as_ref().map(|d| d.pr), Some(pr));
+    }
+
+    #[test]
+    fn j_and_k_go_band_by_band_and_l_goes_in_the_order_drawn() {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: "/w/site".into(),
+            open: true,
+        };
+        let at = |name: &str, root: &str| {
+            let mut s = session(p.id, name, AgentStatus::Finished);
+            s.cwd = root.into();
+            s.place = Some(Box::new(termist_core::Place {
+                root: root.into(),
+                branch: Some("b".into()),
+                commit: None,
+                repo: None,
+                pr: None,
+                gone: false,
+            }));
+            s
+        };
+        // Started in this order; drawn as main: m1 m2 m3, then the worktree: w1.
+        let s = vec![
+            at("m1", "/w/site"),
+            at("w1", "/w/site-worktrees/fix"),
+            at("m2", "/w/site"),
+            at("m3", "/w/site"),
+        ];
+        let mut app = App::new();
+        app.on_event(ServerEvent::State(StateSnapshot {
+            projects: vec![p],
+            sessions: s.clone(),
+            ..StateSnapshot::default()
+        }));
+        app.set_card_window(2, 2 * (crate::ui::CARD_H + 1));
+        app.select(s[0].id);
+        for (key, want) in [
+            ('l', 2),
+            ('l', 3),
+            ('l', 1),
+            ('k', 3),
+            ('k', 0),
+            ('j', 3),
+            ('j', 1),
+        ] {
+            app.on_key(k(K::Char(key)));
+            assert_eq!(app.selected, Some(s[want].id), "{key} to {}", s[want].name);
+        }
+        let (per_row, lines) = (app.cards_per_row, app.card_lines);
+        app.set_card_window(per_row, lines);
+        assert_eq!(app.card_scroll, 1, "the worktree's row is on screen");
     }
 
     #[test]

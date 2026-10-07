@@ -23,6 +23,12 @@ pub enum Overlay {
     ModelName(TextInput),
     /// Ctrl+P in the quick prompt: the project to start in.
     Project(ListPicker<ProjectInfo>),
+    /// `a` in a pull request: who its review threads go to, as `text`.
+    Hand {
+        pr: termist_core::github::PrRef,
+        text: String,
+        picker: ListPicker<HandTo>,
+    },
     /// `Space`: the next instruction for a card's agent, sent without entering the card.
     FollowUp {
         session: SessionId,
@@ -169,6 +175,13 @@ impl Overlay {
     }
 }
 
+/// Where review threads go: a card on the pull request's branch, or a new agent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HandTo {
+    Card(termist_core::SessionId),
+    New,
+}
+
 /// The harness picker, opened on the first CLI that is installed.
 pub fn harness_picker(harnesses: &[HarnessInfo]) -> ListPicker<HarnessInfo> {
     let mut picker = ListPicker::new(harnesses.to_vec(), harness_label, false);
@@ -276,6 +289,9 @@ pub struct QuickPrompt {
     pub input: TextInput,
     pub project: ProjectId,
     pub launch: LaunchOptions,
+    /// The worktree the agent starts in and its branch (from `w`); `None` is the
+    /// project's folder.
+    pub worktree: Option<(std::path::PathBuf, String)>,
 }
 
 impl QuickPrompt {
@@ -602,6 +618,7 @@ mod tests {
             input: TextInput::new(true),
             project: ProjectId::new(),
             launch: launch(Harness::Claude, Some("opus"), Some("high")),
+            worktree: None,
         };
         q.set_harness(Harness::Codex);
         assert_eq!(q.launch, launch(Harness::Codex, None, Some("high")));

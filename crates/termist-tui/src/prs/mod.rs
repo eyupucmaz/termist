@@ -4,6 +4,7 @@
 pub mod compose;
 pub mod detail_view;
 pub mod diff;
+pub mod hand;
 pub mod inbox_view;
 pub mod markdown;
 pub mod timeline;
@@ -231,6 +232,12 @@ pub enum PrAction {
     Ask(Ask),
     /// Why a key did nothing, for the footer.
     Note(&'static str),
+    /// `w`: a worktree on the pull request's branch, and an agent there.
+    Worktree,
+    /// `Space`: mark this thread to hand to an agent, or unmark it.
+    Mark(String),
+    /// `a`: hand the marked threads (else this one) to an agent.
+    Hand(Option<String>),
 }
 
 /// A write asked for by a key.
@@ -427,6 +434,7 @@ impl PrView {
                 self.repair(&list);
             }
             KeyCode::Char('m') => return Some(PrAction::Repos),
+            KeyCode::Char('w') => return Some(PrAction::Worktree),
             KeyCode::Char('b') => {
                 return self
                     .selection(data)
@@ -544,6 +552,15 @@ impl PrView {
                     Ask::Resolve { thread }
                 }));
             }
+            KeyCode::Char(' ') if talk => {
+                return Some(match item.and_then(|i| i.thread.clone()) {
+                    Some(thread) => PrAction::Mark(thread),
+                    None => PrAction::Note("not on a thread"),
+                });
+            }
+            KeyCode::Char('a') if !ctrl && talk => {
+                return Some(PrAction::Hand(item.and_then(|i| i.thread.clone())));
+            }
             KeyCode::Char(c @ ('e' | 'D')) if talk => {
                 let Some(mine) = item.and_then(|i| i.mine.clone()) else {
                     return Some(PrAction::Note("not your comment"));
@@ -615,6 +632,7 @@ impl PrView {
                     d.toggled.insert(id.clone());
                 }
             }
+            KeyCode::Char('w') => return Some(PrAction::Worktree),
             KeyCode::Char('b') => {
                 let check = if checks {
                     layout.checks.get(d.check).cloned().flatten()
@@ -653,6 +671,11 @@ pub fn hint(app: &App, view: &PrView) -> String {
         return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
     }
     if let Some(d) = &view.detail {
+        // Threads marked for an agent come first, with how to send them.
+        let marked = match app.marks.get(&d.pr).map_or(0, |m| m.len()) {
+            0 => String::new(),
+            n => format!("◆ {n} marked · a agent · "),
+        };
         if let Some(open) = &d.diff {
             if open.typing {
                 return "type to search the paths · ↑/↓ choose · Enter keep · Esc clear".into();
@@ -662,13 +685,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
                 termist_core::config::DiffLayout::Split => "unified",
             };
             return format!(
-                "#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · ^R viewed · s {other} · A review · Esc back",
+                "{marked}#{} · Tab panel · J/K file · {{/}} hunk · v range · c comment · r reply · Space mark · ^R viewed · s {other} · A review · w worktree · Esc back",
                 d.pr.number
             );
         }
         if d.tab == Tab::Conversation {
             return format!(
-                "#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · A review · Esc list",
+                "{marked}#{} · j/k item · n/N thread · Enter fold · c comment · r reply · x resolve · e/D yours · Space mark · A review · w worktree · Esc list",
                 d.pr.number
             );
         }
@@ -680,13 +703,13 @@ pub fn hint(app: &App, view: &PrView) -> String {
             );
         }
         return format!(
-            "#{} · Tab section · j/k scroll · d diff · c comment · A review · b browser · {} refresh · Esc list",
+            "{marked}#{} · Tab section · j/k scroll · d diff · c comment · A review · w worktree · b browser · {} refresh · Esc list",
             d.pr.number,
             key(Action::RefreshGitHub)
         );
     }
     format!(
-        "pull requests · Enter open · / search · f {} · m repos · b browser · {} refresh · Esc grid",
+        "pull requests · Enter open · / search · f {} · m repos · w worktree · b browser · {} refresh · Esc grid",
         view.filter.next().label(),
         key(Action::RefreshGitHub)
     )
@@ -752,6 +775,7 @@ pub mod fixtures {
             created_at: "2026-10-01T10:00:00Z".into(),
             updated_at: "2026-10-02T10:00:00Z".into(),
             head: "feat".into(),
+            head_repo: "acme/site".into(),
             base: "main".into(),
             additions: 184,
             deletions: 32,

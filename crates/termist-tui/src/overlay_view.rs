@@ -255,7 +255,8 @@ fn text_box(
     }
 }
 
-/// `orbit-api ^P · claude Tab · opus · high ^O`
+/// `orbit-api ^P · claude Tab · opus · high ^O`; `orbit-api ⎇ fix/login ^P · …` in a
+/// pull request's worktree.
 pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
     let project = app
         .state
@@ -280,8 +281,13 @@ pub fn launch_line(app: &App, q: &QuickPrompt) -> String {
         .as_deref()
         .map(|e| format!(" · {e}"))
         .unwrap_or_default();
+    let worktree = q
+        .worktree
+        .as_ref()
+        .map(|(_, branch)| format!(" ⎇ {branch}"))
+        .unwrap_or_default();
     format!(
-        "{project} ^P · {}{missing} Tab · {model}{effort} ^O",
+        "{project}{worktree} ^P · {}{missing} Tab · {model}{effort} ^O",
         harness.id()
     )
 }
@@ -738,6 +744,28 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             let area = centered(body, 68, lines.len() as u16 + 2);
             boxed(f, t, area, "new key", lines);
         }
+        Overlay::Hand { pr, picker, .. } => {
+            let rows = picker
+                .visible()
+                .map(|(i, _, on)| {
+                    let label = format!(" {}", picker.label(i));
+                    Line::from(Span::styled(label, highlighted(Style::default(), on)))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: format!("review comments of #{} to", pr.number),
+                    width: 56,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::Project(picker) => {
             let rows = picker
                 .visible()
@@ -860,6 +888,7 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::ModelName(_) => "Enter use this model · Esc back",
         Overlay::Project(_) => "type to filter · ↑/↓ choose · Enter pick · Esc back",
         Overlay::FollowUp { .. } => "Enter send to the agent · Alt+Enter newline · Esc cancel",
+        Overlay::Hand { .. } => "↑/↓ choose · Enter there · Esc cancel",
         Overlay::Rename { .. } => "Enter rename · Esc cancel",
         Overlay::Palette(_) => "type to filter · ↑/↓ choose · Enter go there · Esc close",
         Overlay::OpenProject(_) => {
@@ -964,6 +993,9 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("x", "on a thread: resolve, or unresolve"),
         ("e / D", "on a comment of yours: edit / delete"),
         ("A", "send your review: comment, approve, request changes"),
+        ("w", "a worktree on its branch, and an agent there"),
+        ("Space", "on a thread: mark it for an agent"),
+        ("a", "the marked threads (or this one) to an agent"),
         ("Esc", "back"),
     ] {
         lines.push(row(key.into(), what));
@@ -987,6 +1019,7 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ("← →", "move long lines sideways"),
         ("/", "search the paths"),
         ("b", "the file on GitHub"),
+        ("Space / a", "mark the thread / the marked ones to an agent"),
         ("Esc", "back to the pull request"),
     ] {
         lines.push(row(key.into(), what));

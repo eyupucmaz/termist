@@ -93,6 +93,9 @@ pub struct PrSummary {
     pub created_at: String,
     pub updated_at: String,
     pub head: String,
+    /// The repo the head branch lives in, `owner/name`; another one's for a fork,
+    /// empty when that repo is gone.
+    pub head_repo: String,
     pub base: String,
     pub additions: u32,
     pub deletions: u32,
