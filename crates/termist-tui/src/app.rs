@@ -1337,10 +1337,15 @@ impl App {
         };
         self.focus_next_created = true;
         let (cols, rows) = self.pane;
+        // In the worktree of the selection: a band's stand-in, else the card's.
+        let cwd = self
+            .empty_worktree()
+            .or_else(|| self.card_worktree())
+            .map(|(path, _)| path);
         vec![Action::Send(ClientRequest::CreateSession {
             project,
             kind,
-            cwd: None,
+            cwd,
             prompt: None,
             model: None,
             effort: None,
@@ -1739,6 +1744,29 @@ impl App {
             }
         }
         vec![]
+    }
+
+    /// `Shift+P`: a new task like the selected card's: its CLI, model and effort, in its
+    /// worktree.
+    fn same_task(&mut self) -> Vec<Action> {
+        let Some(info) = self.selected_info().cloned() else {
+            return self.open_quick_prompt();
+        };
+        let SessionKind::Agent { harness } = info.kind else {
+            self.message = Some("a shell has no agent to start again".into());
+            return vec![];
+        };
+        self.hand_for = None;
+        let target = self.card_worktree();
+        let actions = self.quick_prompt_in(info.project, "", target);
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            q.launch = LaunchOptions {
+                harness,
+                model: info.model.clone(),
+                effort: info.effort.clone(),
+            };
+        }
+        actions
     }
 
     /// The selected card's worktree, when it is not in the project's own folder.
@@ -3022,6 +3050,7 @@ impl App {
             KeyAction::Grid => self.mode = Mode::Grid,
             KeyAction::NewSession => return self.open_picker(),
             KeyAction::QuickPrompt => return self.open_quick_prompt(),
+            KeyAction::SameTask => return self.same_task(),
             KeyAction::NewShell => return self.create(SessionKind::Shell),
             KeyAction::FollowUp => self.open_follow_up(),
             KeyAction::Rename => self.open_rename(),
@@ -6264,6 +6293,67 @@ mod tests {
         assert!(
             quick(&app).new_worktree.is_some(),
             "new by default from the folder"
+        );
+    }
+
+    #[test]
+    fn shift_p_starts_a_task_like_the_card_and_t_opens_a_shell_in_its_worktree() {
+        let (mut app, s, _) = linked();
+        let mut agent = s[1].clone();
+        agent.kind = SessionKind::Agent {
+            harness: Harness::Codex,
+        };
+        agent.model = Some("gpt-5".into());
+        agent.effort = Some("high".into());
+        app.on_event(ServerEvent::SessionUpdated(agent.clone()));
+        app.select(agent.id);
+        app.on_key(k(K::Char('P')));
+        let q = quick(&app);
+        assert_eq!(
+            (
+                q.launch.harness,
+                q.launch.model.as_deref(),
+                q.launch.effort.as_deref()
+            ),
+            (Harness::Codex, Some("gpt-5"), Some("high"))
+        );
+        assert_eq!(
+            q.worktree,
+            Some(("/w/site-worktrees/fix".into(), "b".to_string()))
+        );
+        assert_eq!(q.input.text(), "");
+        app.on_key(k(K::Esc));
+        let shell_in = |app: &mut App| {
+            sent(&app.on_key(k(K::Char('t'))))
+                .into_iter()
+                .find_map(|r| match r {
+                    ClientRequest::CreateSession { cwd, .. } => Some(cwd.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(shell_in(&mut app), Some("/w/site-worktrees/fix".into()));
+        app.select(s[0].id);
+        assert_eq!(shell_in(&mut app), None, "the project's folder");
+        app.selected = None;
+        app.empty = Some("/w/site-worktrees/docs".into());
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![termist_core::WorktreeInfo {
+                path: "/w/site-worktrees/docs".into(),
+                repo: Some(termist_core::github::RepoId(7)),
+                branch: Some("docs".into()),
+                base: None,
+                made_by_termist: true,
+                shown: true,
+                stat: None,
+                pr_end: None,
+            }],
+        });
+        assert_eq!(
+            shell_in(&mut app),
+            Some("/w/site-worktrees/docs".into()),
+            "a band's stand-in"
         );
     }
 

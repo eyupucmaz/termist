@@ -22,6 +22,8 @@ pub enum Action {
     Grid,
     NewSession,
     QuickPrompt,
+    /// A new task like the selected card's: its CLI, model and effort, in its worktree.
+    SameTask,
     NewShell,
     FollowUp,
     Rename,
@@ -69,6 +71,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     PrevAttention,
     NewSession,
     NewShell,
+    SameTask,
     Left,
     Down,
     Up,
@@ -129,6 +132,7 @@ impl Action {
             Grid => "grid",
             NewSession => "new_session",
             QuickPrompt => "quick_prompt",
+            SameTask => "same_task",
             NewShell => "new_shell",
             FollowUp => "follow_up",
             Rename => "rename",
@@ -175,6 +179,7 @@ impl Action {
             Grid => "grid",
             NewSession => "agent",
             QuickPrompt => "new task",
+            SameTask => "same task",
             NewShell => "shell",
             FollowUp => "follow-up",
             Rename => "rename",
@@ -210,6 +215,7 @@ impl Action {
             Grid => "back to the grid",
             NewSession => "new agent session",
             QuickPrompt => "new task: prompt, CLI, model",
+            SameTask => "new task like the card, in its worktree",
             NewShell => "new shell",
             FollowUp => "send the next instruction without entering",
             Rename => "rename the card",
@@ -408,6 +414,7 @@ impl Keymap {
         let k = |s: &str| KeySpec::parse(s).expect("a default key");
         let mut grid: Vec<(KeySpec, Action)> = [
             ("p", QuickPrompt),
+            ("P", SameTask),
             ("Space", FollowUp),
             ("Enter", Focus),
             ("/", Palette),
