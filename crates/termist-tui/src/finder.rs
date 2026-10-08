@@ -51,6 +51,8 @@ pub struct Finder {
     pub waiting: bool,
     /// When `F` asks, after the last key.
     pub due: Option<Instant>,
+    /// What `F` last asked for: an answer for other words is not shown.
+    pub asked: Option<String>,
     /// Why the last ask failed.
     pub failed: Option<String>,
 }
@@ -70,6 +72,7 @@ impl Finder {
             ticket: 0,
             waiting: false,
             due: None,
+            asked: None,
             failed: None,
         }
     }
@@ -100,6 +103,9 @@ impl Finder {
     /// `F`'s lines came.
     pub fn set_grep(&mut self, root: PathBuf, matches: Vec<GrepMatch>, more: bool) {
         self.root = Some(root);
+        if self.asked.as_deref() != Some(self.query.as_str()) {
+            return;
+        }
         self.waiting = false;
         self.failed = None;
         self.more = more;
@@ -117,6 +123,10 @@ impl Finder {
 
     /// The query changed: `f` ranks again now, `F` asks a moment later.
     pub fn typed(&mut self, now: Instant) {
+        if self.kind == FindKind::Grep {
+            // What was asked is for other words now.
+            self.waiting = false;
+        }
         match self.kind {
             FindKind::Files => self.refilter(),
             FindKind::Grep if self.query.chars().count() >= MIN_QUERY => {
@@ -138,6 +148,7 @@ impl Finder {
         }
         self.due = None;
         self.waiting = true;
+        self.asked = Some(self.query.clone());
         Some(self.query.clone())
     }
 
@@ -294,6 +305,29 @@ mod tests {
             [4, 5, 6, 7, 8, 9, 10, 11]
         );
         assert!(marks_of("abc", "").is_empty());
+    }
+
+    #[test]
+    fn an_answer_for_words_no_longer_typed_is_dropped() {
+        let now = Instant::now();
+        let mut g = Finder::new(FindKind::Grep, "/w/site".into());
+        g.query = "re".into();
+        g.typed(now);
+        assert_eq!(g.due_query(now + WAIT), Some("re".into()));
+        g.query = "r".into();
+        g.typed(now);
+        let line = GrepMatch {
+            path: "src/a.rs".into(),
+            line: 1,
+            text: "re".into(),
+        };
+        g.set_grep("/w/site".into(), vec![line.clone()], false);
+        assert!(g.hits.is_empty(), "the answer was for re, the box says r");
+        g.query = "re".into();
+        g.typed(now);
+        g.due_query(now + WAIT);
+        g.set_grep("/w/site".into(), vec![line], false);
+        assert_eq!(g.hits.len(), 1);
     }
 
     #[test]

@@ -2062,7 +2062,7 @@ impl Registry {
 
 /// Starts a GUI editor and leaves it to run; one that ends badly within two seconds
 /// says why (its first line on stderr), else it is taken to have opened.
-fn start_window(launch: &crate::editor::Launch, folder: &Path) -> Result<(), String> {
+fn start_window(launch: &crate::editor::Launch, folder: &Path) -> Result<Option<u32>, String> {
     use std::io::Read;
     let name = launch
         .program
@@ -2097,7 +2097,7 @@ fn start_window(launch: &crate::editor::Launch, folder: &Path) -> Result<(), Str
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) if status.success() => return Ok(None),
             Ok(Some(_)) => {
                 std::thread::sleep(Duration::from_millis(100));
                 let said = said.lock().map(|s| s.clone()).unwrap_or_default();
@@ -2108,10 +2108,15 @@ fn start_window(launch: &crate::editor::Launch, folder: &Path) -> Result<(), Str
                     .map_or_else(|| format!("{name} failed"), str::to_string));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(None),
         }
     }
-    Ok(())
+    // Left to run: waited for elsewhere, so it is not left behind when it ends.
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(Some(pid))
 }
 
 pub async fn run(
@@ -2405,6 +2410,26 @@ mod tests {
                 message: "not a git repository".into()
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_window_left_running_is_reaped_when_it_ends() {
+        let launch = crate::editor::Launch {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 2.5".into()],
+            gui: true,
+        };
+        let pid = start_window(&launch, Path::new("/"))
+            .unwrap()
+            .expect("still running after two seconds");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&ps.stdout).trim().to_string();
+        assert!(!state.starts_with('Z'), "not left a zombie: {state:?}");
     }
 
     #[test]

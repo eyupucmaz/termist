@@ -6,6 +6,9 @@ use termist_platform::process::{RunError, run};
 
 /// Files past this many are counted, not sent.
 pub const MAX_FILES: usize = 200_000;
+/// Paths past this many bytes, all together, are counted, not sent: a message has
+/// to stay well inside the 16 MiB a frame may be.
+pub const MAX_BYTES: usize = 8 << 20;
 /// Lines past this many are not sent.
 pub const MAX_MATCHES: usize = 500;
 /// A line found is cut to this many characters.
@@ -30,6 +33,86 @@ fn git(dir: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
         None => Ok(String::new()),
         Some(why) => Err(why.to_string()),
     }
+}
+
+/// The first `max` lines git prints in `dir`, read as they come: git is stopped once
+/// there are more (a short query in a big repo prints a great deal), or after
+/// `GREP_FOR`. Whether there were more.
+fn first_lines(dir: &Path, args: &[&str], max: usize) -> Result<(String, bool), String> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    let (stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
+    let child = Arc::new(Mutex::new(child));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let late = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Past the time allowed, git is stopped; the reading below then ends.
+    {
+        let (child, done, late) = (child.clone(), done.clone(), late.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + GREP_FOR;
+            while std::time::Instant::now() < deadline {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            late.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+            }
+        });
+    }
+    let said = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(err) = stderr.as_mut() {
+            let _ = err.read_to_string(&mut text);
+        }
+        text
+    });
+    let mut out = String::new();
+    let mut more = false;
+    if let Some(stdout) = stdout {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut n = 0;
+        while let Some(Ok(line)) = lines.next() {
+            if n == max {
+                more = true;
+                break;
+            }
+            out.push_str(&line);
+            out.push('\n');
+            n += 1;
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let status = child.lock().ok().and_then(|mut c| {
+        if more {
+            let _ = c.kill();
+        }
+        c.wait().ok()
+    });
+    if late.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("grep took too long".into());
+    }
+    let said = said.join().unwrap_or_default();
+    // Nothing found is not a failure; something said on a failed run is.
+    if !more
+        && status.is_some_and(|s| !s.success())
+        && let Some(why) = said.lines().map(str::trim).find(|l| !l.is_empty())
+    {
+        return Err(why.to_string());
+    }
+    Ok((out, more))
 }
 
 /// The root of the repo `folder` is in.
@@ -61,20 +144,43 @@ pub fn files(folder: &Path) -> Result<(PathBuf, Vec<String>, u32), String> {
         ],
         Duration::from_secs(60),
     )?;
-    let mut names: Vec<String> = out
+    let names: Vec<String> = out
         .split('\0')
         .filter(|n| !n.is_empty())
         .map(str::to_string)
         .collect();
-    let more = names.len().saturating_sub(MAX_FILES) as u32;
-    names.truncate(MAX_FILES);
+    let (names, more) = keep(names);
     Ok((root, names, more))
+}
+
+/// The files that are sent, at most `MAX_FILES` and `MAX_BYTES`; with how many more.
+pub fn keep(mut names: Vec<String>) -> (Vec<String>, u32) {
+    let total = names.len();
+    let mut bytes = 0;
+    let fit = names
+        .iter()
+        .take(MAX_FILES)
+        .take_while(|n| {
+            bytes += n.len();
+            bytes <= MAX_BYTES
+        })
+        .count();
+    names.truncate(fit);
+    (names, (total - fit) as u32)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many lines `grep` read from git, for the tests.
+    static GREP_LINES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `git grep --null -n` output: `path\0line\0text` a line.
 pub fn parse_grep(text: &str) -> Vec<GrepMatch> {
     text.lines()
         .filter_map(|l| {
+            #[cfg(test)]
+            GREP_LINES_READ.with(|n| n.set(n.get() + 1));
             let mut parts = l.splitn(3, '\0');
             let path = parts.next()?;
             let line = parts.next()?.parse().ok()?;
@@ -108,12 +214,8 @@ pub fn grep(folder: &Path, query: &str) -> Result<(PathBuf, Vec<GrepMatch>, bool
     }
     // `-e` keeps a query that starts with `-` a query.
     args.extend(["-e", query]);
-    let out = git(&root, &args, GREP_FOR).map_err(|why| match why.as_str() {
-        "took too long" => "grep took too long".to_string(),
-        _ => why,
-    })?;
+    let (out, more) = first_lines(&root, &args, MAX_MATCHES)?;
     let mut found = parse_grep(&out);
-    let more = found.len() > MAX_MATCHES;
     found.truncate(MAX_MATCHES);
     Ok((root, found, more))
 }
@@ -121,6 +223,21 @@ pub fn grep(folder: &Path, query: &str) -> Result<(PathBuf, Vec<GrepMatch>, bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_list_stays_well_inside_one_message() {
+        // 1,000 paths of 10,000 bytes: 10 MB, more than a list may carry.
+        let long: Vec<String> = (0..1000)
+            .map(|n| format!("{n:05}{}", "x".repeat(9995)))
+            .collect();
+        let (kept, more) = keep(long);
+        let bytes: usize = kept.iter().map(String::len).sum();
+        assert!(bytes <= MAX_BYTES, "{bytes}");
+        assert_eq!(kept.len() as u32 + more, 1000, "the rest are counted");
+        let many: Vec<String> = (0..MAX_FILES + 3).map(|n| n.to_string()).collect();
+        let (kept, more) = keep(many);
+        assert_eq!((kept.len(), more), (MAX_FILES, 3));
+    }
 
     #[test]
     fn a_grep_line_is_its_path_number_and_text_cut_to_fit() {
@@ -210,7 +327,12 @@ mod tests {
         for n in 0..MAX_MATCHES + 10 {
             std::fs::write(site.join(format!("f{n}.txt")), "needle\n").unwrap();
         }
+        GREP_LINES_READ.with(|n| n.set(0));
         let (_, found, more) = grep(&site, "needle").unwrap();
         assert_eq!((found.len(), more), (MAX_MATCHES, true));
+        assert!(
+            GREP_LINES_READ.with(|n| n.get()) <= MAX_MATCHES + 1,
+            "git is stopped once there are enough"
+        );
     }
 }
