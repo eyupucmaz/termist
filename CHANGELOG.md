@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 - 2026-10-08
 
 Tools next to your agents.
 

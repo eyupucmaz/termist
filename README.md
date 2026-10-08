@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.2.2-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.2.3-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,10 +28,10 @@
 </div>
 
 > [!NOTE]
-> **termist 0.2.2 is out**: what an agent changed, in termist. `g` shows the selected card's branch,
-> file by file, and follows the agent as it works; `Ctrl+r` marks a file reviewed until it changes, and
-> the band counts them. With 0.2.1's worktrees of their own (`Ctrl+N`, `W`, `X`) and 0.2.0's pull
-> requests next to your agents (`v`, `w`, `a`). With 0.1.4's writing (comments,
+> **termist 0.2.3 is out**: tools next to your agents. `O` opens the card's folder in your editor (a
+> terminal one as a card), `L` lazygit, `f` and `F` find a file or a line, and `PgUp` is copy mode with
+> `v`, `y` and `/`. With 0.2.2's `g` (what an agent changed, file by file), 0.2.1's worktrees of their own
+> (`Ctrl+N`, `W`, `X`) and 0.2.0's pull requests next to your agents (`v`, `w`, `a`). With 0.1.4's writing (comments,
 > reviews), 0.1.3's diff and mouse, 0.1.2's pull requests (`v`), and 0.1.x's toasts, themes, scenes, sounds,
 > settings and scrolling back. It is used every day by its author; please
 > [tell us](https://github.com/eyupucmaz/termist/issues) what looks or feels wrong.
