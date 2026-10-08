@@ -3,6 +3,7 @@
 use super::*;
 use crate::mirror;
 use std::time::Instant;
+use termist_core::github::Viewed;
 use termist_core::{DiffMode, LocalDiffData, ReadState};
 
 /// How often a folder someone looks at is checked for changes.
@@ -156,14 +157,31 @@ impl Registry {
         looked.reading = false;
         looked.checked = Some(now);
         looked.print = Some(print);
+        let mut marked = None;
         let state = match result {
-            Ok(read) => {
+            Ok(mut read) => {
+                let marks = self.store.reviewed(&read.root).unwrap_or_default();
+                mirror::mark(&mut read.data, &read.hashes, &marks);
+                // The whole branch, all of it read: a mark on a file not in it is gone.
+                let whole = key.1 == DiffMode::Branch
+                    && read.data.more == 0
+                    && !read.data.base.starts_with("HEAD");
+                if whole {
+                    let files: Vec<String> =
+                        read.data.files.iter().map(|f| f.path.clone()).collect();
+                    if let Err(e) = self.store.keep_reviewed(&read.root, &files) {
+                        tracing::warn!(error = %e, "could not forget reviewed marks");
+                    }
+                }
+                marked = Some(read.root.clone());
+                let looked = self.looked.get_mut(&key).expect("looked at above");
                 looked.root = Some(read.root);
                 looked.last = Some(Box::new(read.data));
                 ReadState::Ready
             }
             Err(why) => ReadState::Failed(why),
         };
+        let looked = self.looked.get_mut(&key).expect("looked at above");
         let (lookers, diff) = (looked.lookers.clone(), looked.last.clone());
         let again = std::mem::take(&mut looked.again);
         for client in lookers {
@@ -180,6 +198,83 @@ impl Registry {
         if again {
             self.read_local(key);
         }
+        if let Some(root) = marked {
+            self.note_reviewed(&root);
+        }
+    }
+
+    /// Marks `file` of the diff at `worktree` reviewed as it is now, or not; every
+    /// client looking at that folder sees it at once, and its band counts it.
+    pub(super) fn set_reviewed(&mut self, worktree: &Path, file: &str, reviewed: bool) {
+        // The folder looked at may be inside the repo: its marks are the root's.
+        let root = self
+            .looked
+            .iter()
+            .find(|((path, _), _)| path == worktree)
+            .and_then(|(_, l)| l.root.clone())
+            .unwrap_or_else(|| place::resolved(worktree));
+        let hash = reviewed.then(|| mirror::content_hash(&root, file));
+        if let Err(e) = self.store.set_reviewed(&root, file, hash.as_deref()) {
+            tracing::warn!(error = %e, "could not keep a reviewed mark");
+            return;
+        }
+        let now = if reviewed {
+            Viewed::Viewed
+        } else {
+            Viewed::Unviewed
+        };
+        let mut sends = vec![];
+        for ((path, mode), looked) in &mut self.looked {
+            if looked.root.as_ref() != Some(&root) {
+                continue;
+            }
+            let Some(last) = looked.last.as_mut() else {
+                continue;
+            };
+            for f in last.files.iter_mut().filter(|f| f.path == file) {
+                f.viewed = now;
+            }
+            for client in &looked.lookers {
+                sends.push((*client, path.clone(), *mode, looked.last.clone()));
+            }
+        }
+        for (client, path, mode, diff) in sends {
+            self.send(
+                client,
+                ServerEvent::LocalDiff {
+                    path,
+                    mode,
+                    state: ReadState::Ready,
+                    diff,
+                },
+            );
+        }
+        self.note_reviewed(&root);
+    }
+
+    /// Counts the folder's files still as they were when marked; a kept worktree's band
+    /// shows it.
+    fn note_reviewed(&mut self, root: &Path) {
+        let marks = self.store.reviewed(root).unwrap_or_default();
+        let count = mirror::count_reviewed(root, &marks);
+        if self.reviewed_counts.insert(root.to_path_buf(), count) == Some(count) {
+            return;
+        }
+        let project = self
+            .store
+            .worktrees()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|w| place::resolved(&w.path) == root)
+            .map(|w| w.project);
+        if let Some(project) = project {
+            self.send_worktrees(project);
+        }
+    }
+
+    /// The worktree at `root` is gone (`X`): so is its count.
+    pub(super) fn forget_reviewed(&mut self, root: &Path) {
+        self.reviewed_counts.remove(root);
     }
 
     /// Every folder someone looks at, checked when its last look is two seconds old;
@@ -374,5 +469,168 @@ mod tests {
         assert_eq!(reg.looked.len(), 1, "the other still looks");
         reg.handle(Msg::Disconnected(ClientId(2)));
         assert!(reg.looked.is_empty());
+    }
+
+    /// A project whose kept worktree is `site`.
+    #[cfg(unix)]
+    fn kept(site: &Path) -> (Store, ProjectId) {
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site.parent().unwrap().to_path_buf(),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        store
+            .upsert_worktree(&StoredWorktree {
+                project: p.id,
+                repo: None,
+                path: place::resolved(site),
+                branch: Some("fix".into()),
+                base: Some("main".into()),
+                pr: None,
+                made_by_termist: true,
+                shown: true,
+            })
+            .unwrap();
+        (store, p.id)
+    }
+
+    fn mark(reg: &mut Registry, worktree: &Path, file: &str, reviewed: bool) {
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::SetReviewed {
+                worktree: worktree.to_path_buf(),
+                file: file.into(),
+                reviewed,
+            },
+        });
+    }
+
+    fn events(rx: &mut UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn viewed(evs: &[ServerEvent]) -> Option<Vec<(String, Viewed)>> {
+        evs.iter().rev().find_map(|e| match e {
+            ServerEvent::LocalDiff { diff: Some(d), .. } => {
+                Some(d.files.iter().map(|f| (f.path.clone(), f.viewed)).collect())
+            }
+            _ => None,
+        })
+    }
+
+    fn band(evs: &[ServerEvent]) -> Option<u32> {
+        evs.iter().rev().find_map(|e| match e {
+            ServerEvent::Worktrees { list, .. } => Some(list[0].reviewed),
+            _ => None,
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_marked_reviewed_stays_so_until_it_changes_and_its_band_counts_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = site(tmp.path());
+        std::fs::write(site.join("b.txt"), "new\n").unwrap();
+        let (store, _) = kept(&site);
+        let mut reg = registry_on(store);
+        let mut done = reg.mirror_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        look(&mut reg, Some(&site), DiffMode::Branch);
+        reg.mirrored(done.recv().await.unwrap(), Instant::now());
+        let a = |v| ("a.txt".to_string(), v);
+        let b = |v| ("b.txt".to_string(), v);
+        assert_eq!(
+            viewed(&events(&mut rx)),
+            Some(vec![a(Viewed::Unviewed), b(Viewed::Unviewed)])
+        );
+        mark(&mut reg, &site, "a.txt", true);
+        let evs = events(&mut rx);
+        assert_eq!(
+            viewed(&evs),
+            Some(vec![a(Viewed::Viewed), b(Viewed::Unviewed)]),
+            "at once"
+        );
+        assert_eq!(band(&evs), Some(1));
+        // Kept: a daemon that starts again knows it.
+        assert_eq!(
+            reg.store.reviewed(&place::resolved(&site)).unwrap().len(),
+            1
+        );
+        // The agent changes it again: no longer reviewed, and the band says so.
+        std::fs::write(site.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let t = Instant::now() + LOOK_EVERY;
+        reg.look_tick(t);
+        reg.mirrored(done.recv().await.unwrap(), t);
+        reg.mirrored(done.recv().await.unwrap(), t);
+        let evs = events(&mut rx);
+        assert_eq!(
+            viewed(&evs),
+            Some(vec![a(Viewed::Dismissed), b(Viewed::Unviewed)])
+        );
+        assert_eq!(band(&evs), Some(0));
+        mark(&mut reg, &site, "a.txt", true);
+        mark(&mut reg, &site, "b.txt", true);
+        assert_eq!(band(&events(&mut rx)), Some(2));
+        mark(&mut reg, &site, "b.txt", false);
+        let evs = events(&mut rx);
+        assert_eq!(
+            viewed(&evs),
+            Some(vec![a(Viewed::Viewed), b(Viewed::Unviewed)])
+        );
+        assert_eq!(band(&evs), Some(1));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_gone_from_the_branch_s_diff_loses_its_mark_but_not_from_the_uncommitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = site(tmp.path());
+        let (store, _) = kept(&site);
+        let mut reg = registry_on(store);
+        let mut done = reg.mirror_rx.take().unwrap();
+        let _rx = connect(&mut reg);
+        let root = place::resolved(&site);
+        look(&mut reg, Some(&site), DiffMode::Branch);
+        reg.mirrored(done.recv().await.unwrap(), Instant::now());
+        mark(&mut reg, &site, "a.txt", true);
+        // Committed: not in the uncommitted diff, but still reviewed.
+        run_git(&site, &["commit", "-q", "-am", "two"]);
+        look(&mut reg, Some(&site), DiffMode::Uncommitted);
+        reg.mirrored(done.recv().await.unwrap(), Instant::now());
+        assert_eq!(reg.store.reviewed(&root).unwrap().len(), 1);
+        // Undone on the branch: out of its whole diff, so the mark goes.
+        run_git(&site, &["revert", "--no-edit", "HEAD"]);
+        look(&mut reg, Some(&site), DiffMode::Branch);
+        reg.mirrored(done.recv().await.unwrap(), Instant::now());
+        assert!(reg.store.reviewed(&root).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_scan_counts_a_worktree_s_reviewed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = site(tmp.path());
+        let (store, project) = kept(&site);
+        let root = place::resolved(&site);
+        store
+            .set_reviewed(&root, "a.txt", Some(&mirror::content_hash(&root, "a.txt")))
+            .unwrap();
+        let mut reg = registry_on(store);
+        let mut rx = connect(&mut reg);
+        let repo = termist_core::github::RepoId(7);
+        reg.worktrees_scanned(WorktreeScan {
+            project,
+            repo,
+            epoch: 0,
+            found: Some(vec![]),
+            reviewed: [(root.clone(), 1)].into(),
+        });
+        assert_eq!(band(&events(&mut rx)), Some(1));
+        // `X`: its marks go with it.
+        reg.forget_reviewed(&root);
+        assert_eq!(reg.worktree_infos(project)[0].reviewed, 0);
     }
 }

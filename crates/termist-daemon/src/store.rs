@@ -691,6 +691,24 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Every folder's marks, for counting them when the worktrees are scanned.
+    pub fn all_reviewed(&self) -> anyhow::Result<HashMap<PathBuf, HashMap<String, String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT worktree, file, hash FROM reviewed")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?))
+        })?;
+        let mut all: HashMap<PathBuf, HashMap<String, String>> = HashMap::new();
+        for row in rows {
+            let (worktree, file, hash) = row?;
+            all.entry(PathBuf::from(worktree))
+                .or_default()
+                .insert(file, hash);
+        }
+        Ok(all)
+    }
+
     /// Marks `file` reviewed as its content `hash` is, or (`None`) not reviewed.
     pub fn set_reviewed(
         &self,
@@ -1437,6 +1455,9 @@ mod tests {
             store.reviewed(site).unwrap().keys().collect::<Vec<_>>(),
             ["src/c.rs"]
         );
+        let all = store.all_reviewed().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&docs.to_path_buf()]["README.md"], "rrr");
         // Removing the worktree takes its marks; another folder keeps its own.
         store.delete_worktree(site).unwrap();
         assert!(store.reviewed(site).unwrap().is_empty());

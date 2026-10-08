@@ -308,6 +308,15 @@ pub fn mark(
     }
 }
 
+/// How many of the marked files are still as they were when marked (a deleted one
+/// marked deleted counts too).
+pub fn count_reviewed(root: &Path, marks: &HashMap<String, String>) -> u32 {
+    marks
+        .iter()
+        .filter(|(file, hash)| content_hash(root, file) == **hash)
+        .count() as u32
+}
+
 /// Changes when anything `read` would see changes: the commit, what git calls changed,
 /// and the size and time of each changed file (a changed file changing again leaves
 /// git's status as it was). `None` when git cannot say.
@@ -696,5 +705,24 @@ index 9999999..aaaaaaa 100644
         std::fs::write(tmp.path().join("a"), "two").unwrap();
         assert_ne!(content_hash(tmp.path(), "a"), first);
         assert_eq!(content_hash(tmp.path(), "missing"), "deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_marks_whose_files_are_as_they_were_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a"), "one").unwrap();
+        std::fs::write(tmp.path().join("b"), "two").unwrap();
+        let marks: HashMap<String, String> = [
+            ("a".to_string(), content_hash(tmp.path(), "a")),
+            ("b".to_string(), "an older b".to_string()),
+            ("c".to_string(), content_hash(tmp.path(), "c")),
+        ]
+        .into();
+        assert_eq!(
+            count_reviewed(tmp.path(), &marks),
+            2,
+            "a, and c deleted as marked"
+        );
     }
 }
