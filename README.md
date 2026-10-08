@@ -159,6 +159,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `P` | new task like the selected card: its agent, model and worktree |
 | `n` / `t` | new agent session / new shell, in the selected card's worktree |
 | `W` / `X` | the worktrees: show, hide, remove / remove the selected one (asks; the branch stays) |
+| `g` | what the selected card's branch changed, file by file (`Ctrl+a g` while typing into it) |
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | `.` / `,` | next / previous session that needs you, across all projects |
@@ -199,6 +200,13 @@ made outside termist too, to show one as a band or hide it.
 [agents]
 new_worktree_by_default = false   # the new-task prompt starts with Ctrl+N on
 ```
+
+`g` shows what the selected card's branch changed: the files as a tree beside one file's changes, as
+the diff of a pull request is shown, from where the branch left its base to what is on disk now, the
+uncommitted too. `u` shows only what is not committed. It follows the agent: what changes on disk is
+shown a moment later, where you were. `Ctrl+r` marks a file reviewed and moves to the next; a file
+that changes after that is marked `↺` and wants another look. The band says how much of its branch
+was reviewed (`2/3 reviewed`, `reviewed ✓`), and the marks stay when termist restarts.
 
 ### Pull requests
 
