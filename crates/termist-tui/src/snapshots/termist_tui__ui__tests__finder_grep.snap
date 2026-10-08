@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 100, 16).backend()"
+---
+" termist   orbit-api ◆1✓1                                                                     12:00 "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮                                                    "
+"┃◆ claude-1            ┃│✓ shell-2             │                                                    "
+"┃claude · waiting      ┃│shell · done          │                                                    "
+"┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯                                                    "
+"┌ claude┌ F · p · 3 matches ───────────────────────────────────────────────────────────────┐───────┐"
+"│hello  │> redirect                                                                        │       │"
+"│       │ src/auth.rs:42      let redirect = query;                                        │       │"
+"│       │ src/auth.rs:57      Redirect(redirect)                                           │       │"
+"│       │ tests/login.rs:9  // a redirect keeps the query                                  │       │"
+"│       └──────────────────────────────────────────────────────────────────────────────────┘       │"
+"│                                                                                                  │"
+"│                                                                                                  │"
+"│                                                                                                  │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"type to find · Tab files/text · ↑/↓ choose · Enter open · Esc close                                 "

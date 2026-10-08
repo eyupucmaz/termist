@@ -3,6 +3,7 @@ use crate::browse::Listing;
 use crate::diff::DiffAction;
 use crate::diff::local as mirror;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
+use crate::finder::{FindKind, Finder};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
 use crate::overlay::{
@@ -468,7 +469,11 @@ impl App {
     /// When the screen must be drawn again with no input: a scene's next frame, the end
     /// of the splash, the idle scene, a toast going away.
     pub fn next_wake(&self, now: Instant) -> Option<Instant> {
-        [self.scene_wake(now), self.toasts.next_expiry()]
+        let finder = self.overlays.iter().find_map(|o| match o {
+            Overlay::Finder(f) => f.due,
+            _ => None,
+        });
+        [self.scene_wake(now), self.toasts.next_expiry(), finder]
             .into_iter()
             .flatten()
             .min()
@@ -863,12 +868,46 @@ impl App {
                     until: Instant::now() + toast::AGENT_FOR,
                 });
             }
-            // The finders and copy mode come in later changes.
-            ServerEvent::Files { .. }
-            | ServerEvent::GrepResults { .. }
-            | ServerEvent::FindFailed { .. }
-            | ServerEvent::CopiedText { .. }
-            | ServerEvent::Found { .. } => {}
+            ServerEvent::Files {
+                ticket,
+                root,
+                files,
+                more,
+            } => {
+                if let Some(f) = self.finder_for(ticket) {
+                    f.set_files(root, files, more);
+                }
+            }
+            ServerEvent::GrepResults {
+                ticket,
+                root,
+                matches,
+                more,
+            } => {
+                if let Some(f) = self.finder_for(ticket) {
+                    f.set_grep(root, matches, more);
+                }
+            }
+            ServerEvent::FindFailed { ticket, message } => {
+                // Not a repo: nothing to find there; the box goes, a toast says why.
+                let gone = self.finder_for(ticket).map(|f| {
+                    f.waiting = false;
+                    let nothing = f.root.is_none() && message == crate::diff::local::NO_REPO;
+                    f.failed = Some(message.clone());
+                    nothing
+                });
+                if gone == Some(true) {
+                    self.overlays
+                        .retain(|o| !matches!(o, Overlay::Finder(f) if f.ticket == ticket));
+                    self.toasts.push(Toast {
+                        text: format!("✗ {message}"),
+                        kind: ToastKind::Failed,
+                        until: Instant::now() + toast::AGENT_FOR,
+                    });
+                }
+            }
+            // Copy mode comes in a later change.
+            ServerEvent::CopiedText { .. } | ServerEvent::Found { .. } => {}
             ServerEvent::RemoveFailed { path, message } => {
                 if self.removing.as_ref() == Some(&path) {
                     self.removing = None;
@@ -1670,6 +1709,7 @@ impl App {
             Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
+            Some(Overlay::Finder(_)) => self.finder_key(key, Instant::now()),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
             Some(Overlay::Help { .. }) => {
                 self.help_key(key);
@@ -3292,6 +3332,112 @@ impl App {
         self.empty_worktree().map(|(p, _)| p).or(card).or(project)
     }
 
+    /// `f` and `F`: the finder on the selection's folder; `f` asks for the files now.
+    fn open_finder(&mut self, kind: FindKind) -> Vec<Action> {
+        let Some(folder) = self.selection_folder() else {
+            return vec![];
+        };
+        let mut finder = Finder::new(kind, folder);
+        let mut actions = vec![];
+        if kind == FindKind::Files {
+            actions.push(self.ask_files(&mut finder));
+        }
+        self.overlays.push(Overlay::Finder(finder));
+        actions
+    }
+
+    fn ask_files(&mut self, finder: &mut Finder) -> Action {
+        self.next_ticket += 1;
+        finder.ticket = self.next_ticket;
+        finder.waiting = true;
+        Action::Send(ClientRequest::ListFiles {
+            folder: finder.folder.clone(),
+            ticket: finder.ticket,
+        })
+    }
+
+    /// A key in the finder: the query, the choice, `Tab` to the other kind, `Enter` to
+    /// the editor.
+    fn finder_key(&mut self, key: KeyEvent, now: Instant) -> Vec<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(Overlay::Finder(mut f)) = self.overlays.pop() else {
+            return vec![];
+        };
+        let mut actions = vec![];
+        let last = f.hits.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => return actions,
+            KeyCode::Enter => {
+                let Some((path, line)) = f.chosen() else {
+                    self.overlays.push(Overlay::Finder(f));
+                    return actions;
+                };
+                let root = f.root.clone().unwrap_or_else(|| f.folder.clone());
+                let file = root.join(path).display().to_string();
+                return self.open_editor(f.folder, Some(file), line);
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                f.kind = match f.kind {
+                    FindKind::Files => FindKind::Grep,
+                    FindKind::Grep => FindKind::Files,
+                };
+                f.hits.clear();
+                f.highlight = 0;
+                f.failed = None;
+                match (f.kind, f.files.is_some()) {
+                    (FindKind::Files, false) => actions.push(self.ask_files(&mut f)),
+                    _ => f.typed(now),
+                }
+            }
+            KeyCode::Up => f.highlight = f.highlight.saturating_sub(1),
+            KeyCode::Char('p') if ctrl => f.highlight = f.highlight.saturating_sub(1),
+            KeyCode::Down => f.highlight = (f.highlight + 1).min(last),
+            KeyCode::Char('n') if ctrl => f.highlight = (f.highlight + 1).min(last),
+            KeyCode::Backspace => {
+                f.query.pop();
+                f.typed(now);
+            }
+            KeyCode::Char('u') if ctrl => {
+                f.query.clear();
+                f.typed(now);
+            }
+            KeyCode::Char(c) if !ctrl => {
+                f.query.push(c);
+                f.typed(now);
+            }
+            _ => {}
+        }
+        self.overlays.push(Overlay::Finder(f));
+        actions
+    }
+
+    /// What is due now with no key: `F`'s ask, a moment after the last key.
+    pub fn due(&mut self, now: Instant) -> Vec<Action> {
+        let ticket = self.next_ticket + 1;
+        let Some(Overlay::Finder(f)) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        let Some(query) = f.due_query(now) else {
+            return vec![];
+        };
+        f.ticket = ticket;
+        let folder = f.folder.clone();
+        self.next_ticket = ticket;
+        vec![Action::Send(ClientRequest::Grep {
+            folder,
+            query,
+            ticket,
+        })]
+    }
+
+    /// The finder that asked under `ticket`, if it is still up.
+    fn finder_for(&mut self, ticket: u64) -> Option<&mut Finder> {
+        self.overlays.iter_mut().find_map(|o| match o {
+            Overlay::Finder(f) if f.ticket == ticket => Some(f),
+            _ => None,
+        })
+    }
+
     /// `L`: lazygit in the selection's folder, as a card typed into at once.
     fn open_lazygit(&mut self) -> Vec<Action> {
         let (Some(project), Some(folder)) = (self.project, self.selection_folder()) else {
@@ -3509,6 +3655,8 @@ impl App {
             KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::LocalDiff => return self.open_local_diff(),
             KeyAction::Lazygit => return self.open_lazygit(),
+            KeyAction::FindFile => return self.open_finder(FindKind::Files),
+            KeyAction::Grep => return self.open_finder(FindKind::Grep),
             KeyAction::Editor => {
                 if let Some(folder) = self.selection_folder() {
                     return self.open_editor(folder, None, None);
@@ -6893,6 +7041,124 @@ mod tests {
         });
         assert!(!app.focus_next_created);
         assert!(app.toasts.items().any(|t| t.text == "✗ nvim not found"));
+    }
+
+    fn finder(app: &App) -> &crate::finder::Finder {
+        match app.overlays.last() {
+            Some(Overlay::Finder(f)) => f,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn f_lists_the_repo_s_files_and_enter_opens_one_in_the_editor() {
+        let (mut app, s, _) = linked();
+        let project = app.state.projects[0].id;
+        app.select(s[1].id);
+        app.config.editor = Some("code".into());
+        let fix = std::path::PathBuf::from("/w/site-worktrees/fix");
+        let actions = app.on_key(k(K::Char('f')));
+        let ticket = match sent(&actions)[..] {
+            [ClientRequest::ListFiles { folder, ticket }] if *folder == fix => *ticket,
+            ref other => panic!("{other:?}"),
+        };
+        let files = |ticket| ServerEvent::Files {
+            ticket,
+            root: fix.clone(),
+            files: vec!["src/auth.rs".into(), "src/login.rs".into()],
+            more: 0,
+        };
+        app.on_event(files(ticket + 100));
+        assert!(finder(&app).files.is_none(), "an answer to another ask");
+        app.on_event(files(ticket));
+        assert_eq!(finder(&app).hits.len(), 2);
+        typed(&mut app, "log");
+        assert_eq!(finder(&app).hits.len(), 1);
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::OpenInEditor {
+                project,
+                folder: fix.clone(),
+                file: Some(fix.join("src/login.rs").display().to_string()),
+                line: None,
+                editor: Some("code".into()),
+            }]
+        );
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn shift_f_asks_git_grep_a_moment_after_typing_and_tab_switches_to_files() {
+        let (mut app, s, _) = linked();
+        app.select(s[1].id);
+        app.config.editor = Some("code".into());
+        let fix = std::path::PathBuf::from("/w/site-worktrees/fix");
+        assert!(
+            sent(&app.on_key(k(K::Char('F')))).is_empty(),
+            "nothing to look for yet"
+        );
+        typed(&mut app, "re");
+        let now = Instant::now();
+        assert!(app.due(now).is_empty(), "a moment after the last key");
+        let actions = app.due(now + crate::finder::WAIT * 2);
+        let ticket = match sent(&actions)[..] {
+            [
+                ClientRequest::Grep {
+                    folder,
+                    query,
+                    ticket,
+                },
+            ] if *folder == fix && query == "re" => *ticket,
+            ref other => panic!("{other:?}"),
+        };
+        app.on_event(ServerEvent::GrepResults {
+            ticket,
+            root: fix.clone(),
+            matches: vec![termist_core::GrepMatch {
+                path: "src/auth.rs".into(),
+                line: 42,
+                text: "let redirect = q;".into(),
+            }],
+            more: false,
+        });
+        assert_eq!(finder(&app).hits.len(), 1);
+        let actions = app.on_key(k(K::Tab));
+        assert!(matches!(
+            sent(&actions)[..],
+            [ClientRequest::ListFiles { .. }]
+        ));
+        assert_eq!(finder(&app).kind, crate::finder::FindKind::Files);
+        assert_eq!(finder(&app).query, "re", "the words stay");
+        app.on_key(k(K::Tab));
+        let actions = app.due(Instant::now() + crate::finder::WAIT * 2);
+        assert!(
+            matches!(sent(&actions)[..], [ClientRequest::Grep { .. }]),
+            "asked again"
+        );
+        app.on_key(k(K::Esc));
+        assert!(app.overlays.is_empty());
+    }
+
+    #[test]
+    fn a_finder_on_a_folder_that_is_no_repo_closes_and_says_so() {
+        let (mut app, s, _) = linked();
+        app.select(s[0].id);
+        let actions = app.on_key(k(K::Char('f')));
+        let ticket = match sent(&actions)[..] {
+            [ClientRequest::ListFiles { ticket, .. }] => *ticket,
+            ref other => panic!("{other:?}"),
+        };
+        app.on_event(ServerEvent::FindFailed {
+            ticket,
+            message: "not a git repository".into(),
+        });
+        assert!(app.overlays.is_empty());
+        assert!(
+            app.toasts
+                .items()
+                .any(|t| t.text == "✗ not a git repository")
+        );
     }
 
     #[test]

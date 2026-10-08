@@ -33,6 +33,8 @@ pub enum Overlay {
     Target(ListPicker<TargetChoice>),
     /// `W`: the project's worktrees, by folder.
     Worktrees(ListPicker<std::path::PathBuf>),
+    /// `f` and `F`: a file of the repo, or the lines some text is on.
+    Finder(crate::finder::Finder),
     /// `Space`: the next instruction for a card's agent, sent without entering the card.
     FollowUp {
         session: SessionId,

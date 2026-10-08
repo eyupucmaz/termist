@@ -461,6 +461,7 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                 },
             );
         }
+        Overlay::Finder(finder) => draw_finder(f, t, body, finder),
         Overlay::OpenProject(open) => {
             let rows = open
                 .list
@@ -969,9 +970,112 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
     }
 }
 
+/// `text` with the characters at `marks` in `mark` and the rest in `base`.
+fn marked(text: &str, marks: &[u32], base: Style, mark: Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut on = false;
+    for (i, c) in text.chars().enumerate() {
+        let here = marks.binary_search(&(i as u32)).is_ok();
+        if here != on && !run.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if on { mark } else { base },
+            ));
+        }
+        on = here;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if on { mark } else { base }));
+    }
+    spans
+}
+
+/// `f` and `F`: the query, the results with what matched, and what is going on.
+fn draw_finder(f: &mut Frame, t: &Theme, body: Rect, finder: &crate::finder::Finder) {
+    use crate::finder::{FindKind, MIN_QUERY};
+    let folder = finder
+        .folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let title = match finder.kind {
+        FindKind::Files => {
+            let n = finder.files.as_ref().map_or(0, |f| f.len()) as u32 + finder.more_files;
+            let what = if n == 1 { "file" } else { "files" };
+            format!("f · {folder} · {n} {what}")
+        }
+        FindKind::Grep => {
+            let (n, more) = (finder.hits.len(), if finder.more { "+" } else { "" });
+            let what = if n == 1 && more.is_empty() {
+                "match"
+            } else {
+                "matches"
+            };
+            format!("F · {folder} · {n}{more} {what}")
+        }
+    };
+    let mark = t.accent.add_modifier(Modifier::BOLD);
+    let rows = finder
+        .hits
+        .iter()
+        .enumerate()
+        .map(|(i, hit)| {
+            let on = i == finder.highlight;
+            let base = highlighted(t, Style::default(), on);
+            let mut spans = vec![Span::styled(" ", base)];
+            match (&hit.line, &hit.text) {
+                (Some(line), Some(text)) => {
+                    spans.push(Span::styled(
+                        format!("{}:{line}  ", hit.path),
+                        highlighted(t, t.dim, on),
+                    ));
+                    spans.extend(marked(text.trim_end(), &hit.marks, base, mark.patch(base)));
+                }
+                _ => spans.extend(marked(&hit.path, &hit.marks, base, mark.patch(base))),
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let say = match (&finder.failed, finder.kind) {
+        (Some(why), _) => Some(why.clone()),
+        _ if finder.waiting && finder.hits.is_empty() => Some(match finder.kind {
+            FindKind::Files => "reading the files…".to_string(),
+            FindKind::Grep => "looking…".to_string(),
+        }),
+        (None, FindKind::Grep) if finder.query.chars().count() < MIN_QUERY => {
+            Some(format!("type {MIN_QUERY} letters or more"))
+        }
+        (None, FindKind::Grep) if finder.hits.is_empty() && finder.due.is_none() => {
+            Some("no matches".to_string())
+        }
+        (None, FindKind::Files) if finder.hits.is_empty() && finder.files.is_some() => {
+            Some("no files match".to_string())
+        }
+        _ => None,
+    };
+    draw_list(
+        f,
+        t,
+        body,
+        ListBox {
+            title,
+            width: 84,
+            query: Some(finder.query.clone()),
+            rows,
+            highlight: finder.highlight,
+            extra: say
+                .map(|s| vec![Line::from(Span::styled(format!(" {s}"), t.dim))])
+                .unwrap_or_default(),
+        },
+    );
+}
+
 /// The footer line while `overlay` is on top.
 pub fn hint(overlay: &Overlay) -> &'static str {
     match overlay {
+        Overlay::Finder(_) => "type to find · Tab files/text · ↑/↓ choose · Enter open · Esc close",
         Overlay::Harness(_) => "j/k choose · Enter start · 1-3 pick · Esc cancel",
         Overlay::QuickPrompt(_) => {
             "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"

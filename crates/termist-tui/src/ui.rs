@@ -2150,7 +2150,7 @@ mod tests {
         let mut app = fixture();
         app.keymap = Keymap::from_config(&keys, "C-Space").0;
         app.on_key(key(K::Char('?')));
-        let text = screen_text(&render(&mut app, 80, 66));
+        let text = screen_text(&render(&mut app, 80, 72));
         assert!(
             text.contains("g            new task: prompt, CLI, model"),
             "{text}"
@@ -3205,6 +3205,41 @@ mod tests {
             diff: Some(Box::new(diff)),
         });
         app
+    }
+
+    #[test]
+    fn the_finder_shows_what_matched() {
+        let mut app = fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT));
+        for c in "redirect".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let actions = app.due(std::time::Instant::now() + crate::finder::WAIT * 2);
+        let ticket = actions
+            .iter()
+            .find_map(|a| match a {
+                crate::app::Action::Send(termist_core::ClientRequest::Grep { ticket, .. }) => {
+                    Some(*ticket)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let m = |path: &str, line, text: &str| termist_core::GrepMatch {
+            path: path.into(),
+            line,
+            text: text.into(),
+        };
+        app.on_event(ServerEvent::GrepResults {
+            ticket,
+            root: "/p".into(),
+            matches: vec![
+                m("src/auth.rs", 42, "    let redirect = query;"),
+                m("src/auth.rs", 57, "    Redirect(redirect)"),
+                m("tests/login.rs", 9, "// a redirect keeps the query"),
+            ],
+            more: false,
+        });
+        insta::assert_snapshot!("finder_grep", render(&mut app, 100, 16).backend());
     }
 
     #[cfg(unix)]
