@@ -1,5 +1,6 @@
 use crate::bands::Slot;
 use crate::browse::Listing;
+use crate::copy::{Copy, CopyOut};
 use crate::diff::DiffAction;
 use crate::diff::local as mirror;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
@@ -133,6 +134,10 @@ pub struct App {
     /// The pane shows the attached session's history: the scroll keys have the
     /// keyboard, on top of the grid or focus mode.
     pub scrolling: bool,
+    /// Copy mode, over the scrolled pane: its cursor and selection.
+    pub copy: Option<Copy>,
+    /// The session whose text `y` asked for.
+    copying: Option<SessionId>,
     /// Pane text being dragged over with the mouse, highlighted until the next press.
     pub selection: Option<Selection>,
     /// Notes in the top right corner.
@@ -291,6 +296,8 @@ impl App {
             toasts: Toasts::default(),
             toast_down: false,
             scrolling: false,
+            copy: None,
+            copying: None,
             cards_per_row: 1,
             card_lines: crate::ui::CARD_H,
             card_rows: 1,
@@ -906,8 +913,32 @@ impl App {
                     });
                 }
             }
-            // Copy mode comes in a later change.
-            ServerEvent::CopiedText { .. } | ServerEvent::Found { .. } => {}
+            ServerEvent::CopiedText { session, text } => {
+                if self.copying == Some(session) {
+                    self.copying = None;
+                    let n = text.lines().count().max(1);
+                    let what = if n == 1 { "line" } else { "lines" };
+                    self.toasts.push(Toast {
+                        text: format!("✓ copied {n} {what}"),
+                        kind: ToastKind::Copied,
+                        until: Instant::now() + toast::COPIED_FOR,
+                    });
+                    actions.push(Action::Copy(text));
+                }
+            }
+            ServerEvent::Found {
+                session,
+                at,
+                index,
+                total,
+            } => {
+                if let Some(copy) = self.copy.as_mut().filter(|c| c.session == session)
+                    && let Some(screen) = self.screens.get(&session)
+                {
+                    let outs = copy.found_at(at, index, total, screen);
+                    actions.extend(self.copy_outs(outs));
+                }
+            }
             ServerEvent::RemoveFailed { path, message } => {
                 if self.removing.as_ref() == Some(&path) {
                     self.removing = None;
@@ -1037,7 +1068,10 @@ impl App {
             return actions;
         }
         if self.scrolling && matches!(self.mode, Mode::Grid | Mode::Focus) {
-            actions.extend(self.scroll_key(key));
+            match self.copy.is_some() {
+                true => actions.extend(self.copy_key(key)),
+                false => actions.extend(self.scroll_key(key)),
+            }
             return actions;
         }
         match self.mode {
@@ -1160,6 +1194,7 @@ impl App {
             (Mode::Focus, Some(id)) => {
                 // The daemon shows the live screen again for any input.
                 self.scrolling = false;
+                self.copy = None;
                 let modes = self.screens.get(&id).map(|s| s.modes).unwrap_or_default();
                 vec![Action::Send(ClientRequest::Input {
                     session: id,
@@ -1432,8 +1467,80 @@ impl App {
         self.scroll_by(Scroll::Lines(-(lines as i32)))
     }
 
+    /// Copy mode (`C-a [`, `PgUp`): a cursor on the session's screen, `lines` up from
+    /// its last line; the history can be copied from even before there is any.
+    fn start_copy(&mut self, lines: u32) -> Vec<Action> {
+        let Some((id, screen)) = self
+            .attached
+            .and_then(|id| self.screens.get(&id).map(|s| (id, s)))
+        else {
+            return vec![];
+        };
+        if screen.modes.alt_screen {
+            let data = encode_key(&KeyEvent::from(KeyCode::PageUp), &screen.modes);
+            return vec![Action::Send(ClientRequest::Input { session: id, data })];
+        }
+        let mut copy = Copy::new(id, screen);
+        let outs = copy.page(-(lines as i64), screen);
+        self.scrolling = true;
+        self.copy = Some(copy);
+        self.copy_outs(outs)
+    }
+
+    /// A key in copy mode.
+    fn copy_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(copy) = self.copy.as_mut() else {
+            return vec![];
+        };
+        let Some(screen) = self.screens.get(&copy.session) else {
+            return vec![];
+        };
+        let outs = copy.key(key, screen);
+        self.copy_outs(outs)
+    }
+
+    /// What copy mode asked: the view moved, a search or the text from the daemon,
+    /// or out.
+    fn copy_outs(&mut self, outs: Vec<CopyOut>) -> Vec<Action> {
+        let Some(session) = self.copy.as_ref().map(|c| c.session) else {
+            return vec![];
+        };
+        let mut actions = vec![];
+        for out in outs {
+            match out {
+                CopyOut::Scroll(scrolls) => actions.extend(
+                    scrolls
+                        .into_iter()
+                        .map(|scroll| Action::Send(ClientRequest::Scroll { session, scroll })),
+                ),
+                CopyOut::Search {
+                    query,
+                    from,
+                    backward,
+                } => actions.push(Action::Send(ClientRequest::Search {
+                    session,
+                    query,
+                    from,
+                    backward,
+                })),
+                CopyOut::Yank { from, to, lines } => {
+                    self.copying = Some(session);
+                    actions.push(Action::Send(ClientRequest::CopyText {
+                        session,
+                        from,
+                        to,
+                        lines,
+                    }));
+                }
+                CopyOut::Exit => actions.extend(self.stop_scrolling()),
+            }
+        }
+        actions
+    }
+
     /// Back to the live screen, and the keys back to the grid or the session.
     fn stop_scrolling(&mut self) -> Vec<Action> {
+        self.copy = None;
         if !std::mem::take(&mut self.scrolling) {
             return vec![];
         }
@@ -2567,6 +2674,7 @@ impl App {
             .unwrap_or_default();
         if self.attached == Some(session) {
             self.scrolling = false;
+            self.copy = None;
         }
         vec![
             Action::Send(ClientRequest::Input {
@@ -3683,7 +3791,14 @@ impl App {
             KeyAction::Palette => self.open_palette(),
             KeyAction::HalfPageDown => self.half_page(1),
             KeyAction::HalfPageUp => self.half_page(-1),
-            KeyAction::ScrollBack => return self.start_scrolling(self.pane.1.max(1) as u32),
+            KeyAction::ScrollBack => {
+                // `C-a [` while typing starts where you are; `PgUp` a page back.
+                let lines = match self.mode {
+                    Mode::Focus => 0,
+                    _ => self.pane.1.max(1) as u32,
+                };
+                return self.start_copy(lines);
+            }
             KeyAction::Kill => {
                 if let Some(id) = self.selected {
                     self.mode = Mode::ConfirmKill(id);
@@ -5600,57 +5715,121 @@ mod tests {
     }
 
     #[test]
-    fn scroll_back_takes_the_keys_until_q_and_none_reach_the_session() {
+    fn c_a_bracket_opens_copy_mode_whose_keys_never_reach_the_session() {
         let (mut app, _) = app();
         history(&mut app, 0, 500);
         app.on_key(k(K::Enter));
         assert_eq!(app.mode, Mode::Focus);
         app.on_key(ctrl('a'));
         let actions = app.on_key(k(K::Char('[')));
-        assert!(app.scrolling);
-        assert_eq!(scrolls(&actions), vec![Scroll::Lines(20)], "a page back");
-        history(&mut app, 20, 500);
-        for (key, expected) in [
-            (k(K::Char('k')), Scroll::Lines(1)),
-            (k(K::Up), Scroll::Lines(1)),
-            (k(K::PageUp), Scroll::Lines(20)),
-            (ctrl('u'), Scroll::Lines(10)),
-            (k(K::Char('j')), Scroll::Lines(-1)),
-            (ctrl('d'), Scroll::Lines(-10)),
-            (k(K::Char('g')), Scroll::Top),
-        ] {
-            let actions = app.on_key(key);
-            assert_eq!(scrolls(&actions), vec![expected], "{key:?}");
-            assert_eq!(sent(&actions).len(), 1, "nothing else is sent for {key:?}");
+        assert!(app.scrolling && app.copy.is_some());
+        assert!(sent(&actions).is_empty(), "the cursor starts on the screen");
+        assert_eq!(
+            app.copy.as_ref().unwrap().cursor.line,
+            519,
+            "500 back, 20 on screen"
+        );
+        for _ in 0..19 {
+            assert!(sent(&app.on_key(k(K::Char('k')))).is_empty());
         }
+        assert_eq!(
+            scrolls(&app.on_key(k(K::Char('k')))),
+            vec![Scroll::Top, Scroll::Lines(-499)],
+            "off the screen: the view goes along"
+        );
         assert!(sent(&app.on_key(k(K::Char('x')))).is_empty(), "not typed");
         assert_eq!(scrolls(&app.on_key(k(K::Char('q')))), vec![Scroll::Bottom]);
-        assert!(!app.scrolling);
+        assert!(!app.scrolling && app.copy.is_none());
         assert_eq!(app.mode, Mode::Focus, "back to typing into the session");
     }
 
     #[test]
-    fn scrolling_down_to_the_live_screen_ends_it() {
+    fn page_up_opens_copy_mode_a_page_back_even_without_history() {
         let (mut app, _) = app();
         history(&mut app, 0, 500);
-        app.on_key(k(K::PageUp));
-        assert!(app.scrolling);
-        history(&mut app, 12, 500);
-        assert_eq!(scrolls(&app.on_key(k(K::PageDown))), vec![Scroll::Bottom]);
-        assert!(!app.scrolling);
-        assert_eq!(app.mode, Mode::Grid);
+        let actions = app.on_key(k(K::PageUp));
+        assert!(app.copy.is_some());
+        assert_eq!(scrolls(&actions), vec![Scroll::Top, Scroll::Lines(-480)]);
+        app.on_key(k(K::Char('q')));
+        history(&mut app, 0, 0);
+        assert!(sent(&app.on_key(k(K::PageUp))).is_empty());
+        assert!(app.copy.is_some(), "the screen alone can be copied from");
+        assert_eq!(
+            app.copy.as_ref().unwrap().cursor.line,
+            0,
+            "a page back: the top"
+        );
     }
 
     #[test]
-    fn there_is_nothing_to_scroll_without_history() {
+    fn y_copies_what_the_daemon_cuts_and_ends_copy_mode() {
         let (mut app, _) = app();
-        history(&mut app, 0, 0);
-        assert!(sent(&app.on_key(k(K::PageUp))).is_empty());
-        assert!(!app.scrolling);
+        let id = history(&mut app, 0, 500);
+        app.on_key(k(K::PageUp));
+        history(&mut app, 20, 500);
+        app.on_key(k(K::Char('V')));
+        app.on_key(k(K::Char('k')));
+        let actions = app.on_key(k(K::Char('y')));
+        let at = |line| termist_core::Pos { line, col: 0 };
+        assert!(sent(&actions).contains(&&ClientRequest::CopyText {
+            session: id,
+            from: at(499),
+            to: at(498),
+            lines: true,
+        }));
         assert_eq!(
-            app.message.as_deref(),
-            Some("nothing to scroll back to yet")
+            scrolls(&actions),
+            vec![Scroll::Bottom],
+            "back to the live screen"
         );
+        assert!(app.copy.is_none());
+        let actions = app.on_event(ServerEvent::CopiedText {
+            session: id,
+            text: "a\nb".into(),
+        });
+        assert_eq!(actions, vec![Action::Copy("a\nb".into())]);
+        assert!(app.toasts.items().any(|t| t.text == "✓ copied 2 lines"));
+        assert!(
+            app.on_event(ServerEvent::CopiedText {
+                session: id,
+                text: "again".into(),
+            })
+            .is_empty(),
+            "only what was asked for"
+        );
+    }
+
+    #[test]
+    fn a_search_in_copy_mode_goes_through_the_daemon_and_moves_the_view() {
+        let (mut app, _) = app();
+        let id = history(&mut app, 0, 500);
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        app.on_key(k(K::Char('[')));
+        app.on_key(k(K::Char('?')));
+        for c in "error".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::Search {
+                session: id,
+                query: "error".into(),
+                from: termist_core::Pos { line: 519, col: 0 },
+                backward: true,
+            }]
+        );
+        let at = termist_core::Pos { line: 100, col: 4 };
+        let actions = app.on_event(ServerEvent::Found {
+            session: id,
+            at: Some((at, at)),
+            index: 3,
+            total: 9,
+        });
+        assert_eq!(scrolls(&actions), vec![Scroll::Top, Scroll::Lines(-100)]);
+        assert_eq!(app.copy.as_ref().unwrap().cursor, at);
     }
 
     #[test]

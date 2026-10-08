@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: t.backend()
+---
+" termist   orbit-api ◆1✓1                                                                     12:00 "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮                                                    "
+"┃◆ claude-1            ┃│✓ shell-2             │                                                    "
+"┃claude · waiting      ┃│shell · done          │                                                    "
+"┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯                                                    "
+"┌ claude-1 — claude · copy ────────────────────────────────────────────────────────────────────────┐"
+"│$ cargo test                                                                                      │"
+"│running 12 tests                                                                                  │"
+"│test a ... ok                                                                                     │"
+"│error: assertion failed                                                                           │"
+"│  left: 3                                                                                         │"
+"│  right: 4                                                                                        │"
+"│$                                                                                                 │"
+"│                                                                                                  │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"copy · hjkl w/b/e 0/$ move · v select · V line · y copy · / ? search · n/N · q back                 "
