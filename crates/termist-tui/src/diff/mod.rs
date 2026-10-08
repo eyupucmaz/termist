@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use termist_core::github::{DiffFile, PrRef, Side, Viewed};
+use termist_core::github::{DiffFile, Side, Viewed};
 use tree::{Node, TreeRow};
 
 /// How far `←` and `→` move a long line.
@@ -49,6 +49,8 @@ pub struct DiffView {
     pub opened: HashSet<String>,
     /// Viewed states asked of GitHub and not yet seen in a diff from it, by path.
     pub pending: HashMap<String, Viewed>,
+    /// A folder's diff (Ayna): no threads, no comments, nothing on GitHub.
+    pub local: bool,
 }
 
 /// Where the last frame put the diff's parts, for the keys and the mouse.
@@ -193,11 +195,20 @@ pub fn follow(line: usize, scroll: usize, page: usize) -> usize {
     }
 }
 
-/// What a key in the diff asks of the PR view.
+/// What a key in the diff asks of the view that opened it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffAction {
-    /// Back to the pull request, on this file.
+    /// Back to what opened it, on this file.
     Back(Option<String>),
+    /// Mark the file viewed (on GitHub) or reviewed (here), or not.
+    Viewed {
+        path: String,
+        viewed: bool,
+    },
+    /// The diff the other way: unified or split.
+    FlipLayout,
+    /// Said in the footer.
+    Note(&'static str),
     Pr(PrAction),
 }
 
@@ -311,7 +322,6 @@ impl DiffView {
     pub fn key(
         &mut self,
         key: KeyEvent,
-        pr: PrRef,
         diff: Option<&[DiffFile]>,
         area: &DiffArea,
     ) -> Option<DiffAction> {
@@ -354,6 +364,15 @@ impl DiffView {
         let page = area.page.max(1);
         let rows = self.rows(diff);
         let tree = self.panel == Panel::Tree;
+        // A folder's diff has no threads to go to, comment on or hand over.
+        let pr_only = match key.code {
+            KeyCode::Char('A' | 'w' | 'b' | 'n' | 'N') => !ctrl,
+            KeyCode::Char('c' | 'v' | ' ' | 'a' | 'r' | 'x' | 'e' | 'D') => !ctrl && !tree,
+            _ => false,
+        };
+        if self.local && pr_only {
+            return Some(DiffAction::Note("not in a local diff"));
+        }
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => {
                 self.panel = if tree { Panel::Diff } else { Panel::Tree };
@@ -377,12 +396,12 @@ impl DiffView {
                 if viewed {
                     self.next_unviewed(diff);
                 }
-                return Some(DiffAction::Pr(PrAction::Viewed { pr, path, viewed }));
+                return Some(DiffAction::Viewed { path, viewed });
             }
             KeyCode::Char('s') => {
                 // The other layout draws other rows where the range was.
                 self.anchor = None;
-                return Some(DiffAction::Pr(PrAction::FlipLayout));
+                return Some(DiffAction::FlipLayout);
             }
             KeyCode::Char('A') => return Some(DiffAction::Pr(PrAction::Ask(Ask::Submit))),
             KeyCode::Char('c') if !ctrl && !tree => {
@@ -639,17 +658,9 @@ mod tests {
     use super::tree::tests::file;
     use super::*;
     use ratatui::crossterm::event::{KeyCode as K, KeyModifiers as M};
-    use termist_core::github::RepoId;
 
     fn k(code: K) -> KeyEvent {
         KeyEvent::new(code, M::NONE)
-    }
-
-    fn pr() -> PrRef {
-        PrRef {
-            repo: RepoId(1),
-            number: 212,
-        }
     }
 
     /// In the tree's order: `src/api/client.ts`, `src/search/DealerFilter.tsx`,
@@ -717,7 +728,7 @@ mod tests {
     }
 
     fn key(v: &mut DiffView, code: K) -> Option<DiffAction> {
-        v.key(k(code), pr(), Some(&diff()[..]), &area())
+        v.key(k(code), Some(&diff()[..]), &area())
     }
 
     #[test]
@@ -879,17 +890,15 @@ mod tests {
         let mut v = DiffView::new(Some("src/api/client.ts".into()));
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
-            pr(),
             Some(&diff()[..]),
             &area(),
         );
         assert_eq!(
             a,
-            Some(DiffAction::Pr(PrAction::Viewed {
-                pr: pr(),
+            Some(DiffAction::Viewed {
                 path: "src/api/client.ts".into(),
                 viewed: true
-            }))
+            })
         );
         assert_eq!(
             v.file.as_deref(),
@@ -898,19 +907,14 @@ mod tests {
         );
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
-            pr(),
             Some(&diff()[..]),
             &area(),
         );
-        assert!(matches!(
-            a,
-            Some(DiffAction::Pr(PrAction::Viewed { viewed: true, .. }))
-        ));
+        assert!(matches!(a, Some(DiffAction::Viewed { viewed: true, .. })));
         assert_eq!(v.file.as_deref(), Some("README.md"));
         // README is the last not viewed: marking it wraps round to nothing left.
         v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
-            pr(),
             Some(&diff()[..]),
             &area(),
         );
@@ -918,14 +922,48 @@ mod tests {
         // Again on a viewed file: not viewed, and it stays.
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
-            pr(),
             Some(&diff()[..]),
             &area(),
         );
-        assert!(matches!(
+        assert!(matches!(a, Some(DiffAction::Viewed { viewed: false, .. })));
+        assert_eq!(v.file.as_deref(), Some("README.md"));
+    }
+
+    #[test]
+    fn a_local_diff_says_what_it_cannot_do_and_marks_reviewed_by_path() {
+        let mut v = DiffView::new(Some("src/api/client.ts".into()));
+        v.local = true;
+        for c in [
+            'c', 'v', 'n', 'N', 'A', 'w', 'a', 'b', ' ', 'r', 'x', 'e', 'D',
+        ] {
+            assert_eq!(
+                key(&mut v, K::Char(c)),
+                Some(DiffAction::Note("not in a local diff")),
+                "{c}"
+            );
+        }
+        assert_eq!(v.anchor, None, "v chose no range");
+        assert_eq!(key(&mut v, K::Char('s')), Some(DiffAction::FlipLayout));
+        let a = v.key(
+            KeyEvent::new(K::Char('r'), M::CONTROL),
+            Some(&diff()[..]),
+            &area(),
+        );
+        assert_eq!(
             a,
-            Some(DiffAction::Pr(PrAction::Viewed { viewed: false, .. }))
-        ));
+            Some(DiffAction::Viewed {
+                path: "src/api/client.ts".into(),
+                viewed: true
+            })
+        );
+        assert_eq!(
+            v.pending["src/api/client.ts"],
+            Viewed::Viewed,
+            "shown at once"
+        );
+        assert_eq!(v.file.as_deref(), Some("src/App.tsx"), "on to the next");
+        // The moves are the same.
+        key(&mut v, K::Char('J'));
         assert_eq!(v.file.as_deref(), Some("README.md"));
     }
 
@@ -1008,10 +1046,7 @@ mod tests {
         assert_eq!(v.hscroll, 8);
         key(&mut v, K::Tab);
         assert_eq!(v.panel, Panel::Tree);
-        assert_eq!(
-            key(&mut v, K::Char('s')),
-            Some(DiffAction::Pr(PrAction::FlipLayout))
-        );
+        assert_eq!(key(&mut v, K::Char('s')), Some(DiffAction::FlipLayout));
         assert_eq!(
             key(&mut v, K::Char('b')),
             Some(DiffAction::Pr(PrAction::Browser(
@@ -1023,9 +1058,9 @@ mod tests {
     #[test]
     fn without_a_diff_only_esc_works() {
         let mut v = DiffView::new(None);
-        assert_eq!(v.key(k(K::Char('J')), pr(), None, &area()), None);
+        assert_eq!(v.key(k(K::Char('J')), None, &area()), None);
         assert_eq!(
-            v.key(k(K::Esc), pr(), None, &area()),
+            v.key(k(K::Esc), None, &area()),
             Some(DiffAction::Back(None))
         );
     }

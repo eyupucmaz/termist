@@ -511,7 +511,7 @@ impl PrView {
         let page = layout.page.max(1);
         let d = self.detail.as_mut()?;
         if let Some(view) = &mut d.diff {
-            return match view.key(key, d.pr, diff.map(|d| d.files.as_slice()), &layout.diff)? {
+            return match view.key(key, diff.map(|d| d.files.as_slice()), &layout.diff)? {
                 DiffAction::Back(path) => {
                     d.diff = None;
                     d.tab = Tab::Files;
@@ -520,6 +520,13 @@ impl PrView {
                     }
                     None
                 }
+                DiffAction::Viewed { path, viewed } => Some(PrAction::Viewed {
+                    pr: d.pr,
+                    path,
+                    viewed,
+                }),
+                DiffAction::FlipLayout => Some(PrAction::FlipLayout),
+                DiffAction::Note(why) => Some(PrAction::Note(why)),
                 DiffAction::Pr(action) => Some(action),
             };
         }

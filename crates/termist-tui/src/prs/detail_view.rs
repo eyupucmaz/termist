@@ -241,11 +241,11 @@ fn check_lines(
     (lines, checks.iter().map(|c| c.url.clone()).collect())
 }
 
-/// `✓` viewed, `◦` changed since it was viewed, nothing otherwise.
+/// `✓` viewed, `↺` changed since it was viewed, nothing otherwise.
 pub fn viewed_mark(t: &Theme, viewed: Viewed) -> Span<'static> {
     match viewed {
         Viewed::Viewed => Span::styled("✓", Style::default().fg(t.status(AgentStatus::Finished))),
-        Viewed::Dismissed => Span::styled("◦", t.warn),
+        Viewed::Dismissed => Span::styled("↺", t.warn),
         Viewed::Unviewed => Span::raw(" "),
     }
 }
