@@ -766,6 +766,51 @@ impl Registry {
     }
 
     /// Write-through: mirrors a session's current info into the store.
+    /// The folder, or a file in it at a line, in the user's editor: a GUI one started
+    /// and watched for a moment (a failure goes to `client`), a terminal one as a card.
+    fn open_in_editor(
+        &mut self,
+        client: ClientId,
+        project: ProjectId,
+        folder: PathBuf,
+        file: Option<String>,
+        line: Option<u32>,
+        editor: Option<String>,
+    ) -> Result<(), String> {
+        let root = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.path.clone())
+            .ok_or("unknown project")?;
+        let folder = self
+            .folder_of(project, &root, folder)
+            .map_err(|e| format!("{e:#}"))?;
+        let find = self.find_program;
+        let launch =
+            crate::editor::launch(editor.as_deref(), &folder, file.as_deref(), line, &|name| {
+                find(name)
+            })?;
+        if !launch.gui {
+            let kind = SessionKind::Tool {
+                program: launch.program.display().to_string(),
+                args: launch.args,
+            };
+            return self
+                .create_session(project, kind, Some(folder), None, None, None, (80, 24))
+                .map_err(|e| format!("{e:#}"));
+        }
+        let out = self.clients.get(&client).cloned();
+        tokio::task::spawn_blocking(move || {
+            if let Err(why) = start_window(&launch, &folder)
+                && let Some(out) = out
+            {
+                let _ = out.send(ServerEvent::EditorFailed { message: why });
+            }
+        });
+        Ok(())
+    }
+
     /// Asks a running session something whose answer goes straight to `client`.
     fn ask_session(
         &self,
@@ -787,7 +832,9 @@ impl Registry {
     }
 
     fn persist(&self, id: SessionId) {
+        // A tool is for a while: never kept.
         if let Some(s) = self.session(id)
+            && !matches!(s.info.kind, SessionKind::Tool { .. })
             && let Err(e) = self.store.upsert_session(&s.info, s.resumable)
         {
             tracing::warn!(session = %id, error = %e, "could not store session");
@@ -995,6 +1042,15 @@ impl Registry {
                 if let Some(info) = due {
                     self.broadcast(ServerEvent::SessionUpdated(info));
                 }
+            }
+            SessionNote::Exited(id, _)
+                if self
+                    .session(id)
+                    .is_some_and(|s| matches!(s.info.kind, SessionKind::Tool { .. })) =>
+            {
+                // A tool's card goes with its program.
+                self.sessions.retain(|s| s.info.id != id);
+                self.broadcast(ServerEvent::SessionRemoved(id));
             }
             SessionNote::Exited(id, code) => {
                 // The idle title was the exited process's; it says nothing about the next.
@@ -1262,10 +1318,19 @@ impl Registry {
                 backward,
                 out,
             }),
-            // The tools come in later changes.
-            ClientRequest::OpenInEditor { .. }
-            | ClientRequest::ListFiles { .. }
-            | ClientRequest::Grep { .. } => {}
+            ClientRequest::OpenInEditor {
+                project,
+                folder,
+                file,
+                line,
+                editor,
+            } => {
+                if let Err(why) = self.open_in_editor(client, project, folder, file, line, editor) {
+                    self.send(client, ServerEvent::EditorFailed { message: why });
+                }
+            }
+            // The finders come in a later change.
+            ClientRequest::ListFiles { .. } | ClientRequest::Grep { .. } => {}
             ClientRequest::SetReviewed {
                 worktree,
                 file,
@@ -1947,6 +2012,60 @@ impl Registry {
     }
 }
 
+/// Starts a GUI editor and leaves it to run; one that ends badly within two seconds
+/// says why (its first line on stderr), else it is taken to have opened.
+fn start_window(launch: &crate::editor::Launch, folder: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let name = launch
+        .program
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut child = std::process::Command::new(&launch.program)
+        .args(&launch.args)
+        .current_dir(folder)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{name} failed: {e}"))?;
+    // Read what it says for as long as it says anything: an editor left running must
+    // not find its stderr closed.
+    let said = Arc::new(std::sync::Mutex::new(String::new()));
+    if let Some(mut err) = child.stderr.take() {
+        let said = said.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = err.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut s) = said.lock() {
+                    s.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            }
+        });
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                std::thread::sleep(Duration::from_millis(100));
+                let said = said.lock().map(|s| s.clone()).unwrap_or_default();
+                return Err(said
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map_or_else(|| format!("{name} failed"), str::to_string));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(
     mut reg: Registry,
     mut rx: UnboundedReceiver<Msg>,
@@ -2065,6 +2184,91 @@ mod tests {
     }
 
     // A client learns at once that nothing it does will be kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tool_card_is_never_kept_and_goes_when_its_program_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = ProjectInfo {
+            path: dir.path().to_path_buf(),
+            ..project()
+        };
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        let tool = SessionKind::Tool {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 5".into()],
+        };
+        reg.create_session(p.id, tool, None, None, None, None, (80, 24))
+            .unwrap();
+        let s = reg.sessions[0].info.clone();
+        assert_eq!(s.name, "sh-1");
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::SessionUpdated(_))));
+        assert!(reg.store.load().unwrap().1.is_empty(), "never written down");
+        reg.note(SessionNote::Exited(s.id, Some(0)));
+        assert!(reg.sessions.is_empty(), "gone when it ends");
+        assert_eq!(rx.try_recv().unwrap(), ServerEvent::SessionRemoved(s.id));
+        assert!(reg.store.load().unwrap().1.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_editor_opens_in_a_window_or_as_a_card_or_says_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = ProjectInfo {
+            path: dir.path().to_path_buf(),
+            ..project()
+        };
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        let open = |reg: &mut Registry, editor: Option<&str>, folder: &Path| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::OpenInEditor {
+                    project: p.id,
+                    folder: folder.to_path_buf(),
+                    file: Some("a.rs".into()),
+                    line: Some(3),
+                    editor: editor.map(str::to_string),
+                },
+            })
+        };
+        let failed = |ev: Option<ServerEvent>| match ev {
+            Some(ServerEvent::EditorFailed { message }) => message,
+            other => panic!("{other:?}"),
+        };
+        // No editor anywhere.
+        reg.find_program = |_| None;
+        open(&mut reg, None, dir.path());
+        assert_eq!(
+            failed(rx.try_recv().ok()),
+            "no editor found · set editor in config.toml"
+        );
+        // A folder that is not the project's.
+        open(&mut reg, None, Path::new("/"));
+        assert!(failed(rx.try_recv().ok()).contains("is not a folder of this project"));
+        // A terminal editor: a card, in the folder, at the line.
+        reg.find_program = |n| (n == "nvim").then(|| PathBuf::from("/bin/sh"));
+        open(&mut reg, Some("nvim"), dir.path());
+        let card = reg.sessions.last().unwrap().info.clone();
+        let file = dir.path().join("a.rs").display().to_string();
+        assert_eq!(
+            card.kind,
+            SessionKind::Tool {
+                program: "/bin/sh".into(),
+                args: vec!["+3".into(), file]
+            }
+        );
+        assert_eq!(card.cwd, dir.path());
+        // A window of its own that fails at once says so.
+        reg.find_program = |n| (n == "code").then(|| PathBuf::from("/usr/bin/false"));
+        while rx.try_recv().is_ok() {}
+        open(&mut reg, None, dir.path());
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(failed(ev), "false failed");
+    }
+
     #[test]
     fn a_copy_or_a_search_goes_to_the_session_with_who_asked() {
         let p = project();
