@@ -766,6 +766,26 @@ impl Registry {
     }
 
     /// Write-through: mirrors a session's current info into the store.
+    /// Asks a running session something whose answer goes straight to `client`.
+    fn ask_session(
+        &self,
+        client: ClientId,
+        session: SessionId,
+        ask: impl FnOnce(UnboundedSender<ServerEvent>) -> SessionCmd,
+    ) {
+        let cmd = self.session(session).and_then(|s| s.cmd.clone());
+        let (Some(cmd), Some(out)) = (cmd, self.clients.get(&client).cloned()) else {
+            self.send(
+                client,
+                ServerEvent::Error {
+                    message: "the session is not running".into(),
+                },
+            );
+            return;
+        };
+        let _ = cmd.send(ask(out));
+    }
+
     fn persist(&self, id: SessionId) {
         if let Some(s) = self.session(id)
             && let Err(e) = self.store.upsert_session(&s.info, s.resumable)
@@ -1220,12 +1240,32 @@ impl Registry {
                 }
             }
             ClientRequest::SetLocalDiff { path, mode } => self.set_local_diff(client, path, mode),
+            ClientRequest::CopyText {
+                session,
+                from,
+                to,
+                lines,
+            } => self.ask_session(client, session, |out| SessionCmd::CopyText {
+                from,
+                to,
+                lines,
+                out,
+            }),
+            ClientRequest::Search {
+                session,
+                query,
+                from,
+                backward,
+            } => self.ask_session(client, session, |out| SessionCmd::Search {
+                query,
+                from,
+                backward,
+                out,
+            }),
             // The tools come in later changes.
             ClientRequest::OpenInEditor { .. }
             | ClientRequest::ListFiles { .. }
-            | ClientRequest::Grep { .. }
-            | ClientRequest::CopyText { .. }
-            | ClientRequest::Search { .. } => {}
+            | ClientRequest::Grep { .. } => {}
             ClientRequest::SetReviewed {
                 worktree,
                 file,
@@ -2025,6 +2065,72 @@ mod tests {
     }
 
     // A client learns at once that nothing it does will be kept.
+    #[test]
+    fn a_copy_or_a_search_goes_to_the_session_with_who_asked() {
+        let p = project();
+        let s = stored(&p, "shell-1");
+        let mut reg = registry_with(&p, &[]);
+        let (cmd, mut cmds) = unbounded_channel();
+        reg.sessions.push(Session::new(s.clone(), Some(cmd), false));
+        let mut rx = connect(&mut reg);
+        let at = |line, col| termist_core::Pos { line, col };
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CopyText {
+                session: s.id,
+                from: at(1, 0),
+                to: at(2, 3),
+                lines: false,
+            },
+        });
+        let Ok(SessionCmd::CopyText {
+            from,
+            to,
+            lines,
+            out,
+        }) = cmds.try_recv()
+        else {
+            panic!("the session is asked");
+        };
+        assert_eq!((from, to, lines), (at(1, 0), at(2, 3), false));
+        out.send(ServerEvent::Ack).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerEvent::Ack,
+            "its answer goes to who asked"
+        );
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::Search {
+                session: s.id,
+                query: "error".into(),
+                from: at(9, 0),
+                backward: true,
+            },
+        });
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(SessionCmd::Search { backward: true, .. })
+        ));
+        // A session not running cannot be asked.
+        reg.session_mut(s.id).unwrap().cmd = None;
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CopyText {
+                session: s.id,
+                from: at(1, 0),
+                to: at(1, 0),
+                lines: true,
+            },
+        });
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ServerEvent::Error {
+                message: "the session is not running".into()
+            }
+        );
+    }
+
     #[test]
     fn every_client_is_told_when_sessions_are_not_saved() {
         let tmp = tempfile::tempdir().unwrap();
