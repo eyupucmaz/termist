@@ -12,12 +12,12 @@ pub mod status;
 
 pub use ids::{ProjectId, SessionId};
 pub use model::{
-    DiffMode, EFFORT_LEVELS, Harness, HarnessInfo, LaunchOptions, LocalDiffData, ModelInfo, Place,
-    PrEnd, ProjectInfo, ReadState, SessionInfo, SessionKind, Stat, StateSnapshot, TermColors,
-    WorktreeInfo,
+    DiffMode, EFFORT_LEVELS, GUI_EDITORS, GrepMatch, Harness, HarnessInfo, LaunchOptions,
+    LocalDiffData, ModelInfo, Place, PrEnd, ProjectInfo, ReadState, SessionInfo, SessionKind, Stat,
+    StateSnapshot, TermColors, WorktreeInfo, gui_editor,
 };
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 pub use screen::{
-    Cell, Color, Cursor, Modes, ScreenUpdate, Scroll, ScrollPos, Snapshot, cell_flags,
+    Cell, Color, Cursor, Modes, Pos, ScreenUpdate, Scroll, ScrollPos, Snapshot, cell_flags,
 };
 pub use status::{AgentStatus, Signal, attention_order, next_in_attention, now_ms};

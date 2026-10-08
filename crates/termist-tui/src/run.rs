@@ -269,6 +269,10 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
                 sampler_started = true;
             }
             app.tick(now);
+            let due = app.due(now);
+            if perform(due, &mut writer, &listing_tx).await? {
+                return Ok(());
+            }
             let size = terminal.size()?;
             let areas = ui::layout(
                 Rect::new(0, 0, size.width, size.height),

@@ -712,8 +712,13 @@ fn draw_card(
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::raw(name.to_string()),
         ]),
+        // A tool says what it opened; the rest how they are.
         Line::from(Span::styled(
-            format!("{} · {word}", s.kind.label()),
+            format!(
+                "{} · {}",
+                s.kind.label(),
+                s.kind.opens(&s.cwd).unwrap_or_else(|| word.to_string())
+            ),
             theme.dim,
         )),
     ];
@@ -761,8 +766,19 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
     let screen = app.screens.get(&info.id);
     let back = screen.map_or(0, |s| s.scroll.offset);
     let selection = app.selection.filter(|s| s.session == info.id);
-    let state = match screen {
-        Some(s) if app.scrolling || back > 0 => {
+    let copy = app.copy.as_ref().filter(|c| c.session == info.id);
+    let state = match (screen, copy) {
+        (_, Some(c)) => {
+            let search = match (&c.last, c.found, c.note) {
+                (_, _, Some(note)) => format!(" · {note}"),
+                (Some((q, up)), Some((i, n)), _) => {
+                    format!(" · {}{q} {i}/{n}", if *up { '?' } else { '/' })
+                }
+                _ => String::new(),
+            };
+            format!(" · copy{search}")
+        }
+        (Some(s), None) if app.scrolling || back > 0 => {
             format!(" · ↑ {}/{}", s.scroll.offset, s.scroll.history)
         }
         _ if focused => " · typing".to_string(),
@@ -786,6 +802,9 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
         if let Some(selection) = selection {
             draw_selection(f.buffer_mut(), areas.pane_inner, &selection);
         }
+        if let Some(copy) = copy {
+            draw_copy(f.buffer_mut(), areas.pane_inner, screen, copy, &app.theme);
+        }
         let c = screen.cursor;
         // An overlay on top has the keys; a text box places its own cursor.
         if focused
@@ -802,6 +821,29 @@ fn draw_pane(f: &mut Frame, app: &App, areas: &Areas) {
             Paragraph::new("Not running. Enter resumes this session.").style(app.theme.dim),
             areas.pane_inner,
         );
+    }
+}
+
+/// Copy mode over the pane: the selection swaps colours, the cursor is a block.
+fn draw_copy(
+    buf: &mut Buffer,
+    area: Rect,
+    screen: &Snapshot,
+    copy: &crate::copy::Copy,
+    theme: &Theme,
+) {
+    let top = crate::copy::top(screen);
+    for row in 0..area.height {
+        let line = top + row as u32;
+        for col in 0..area.width {
+            let cell = &mut buf[(area.x + col, area.y + row)];
+            if copy.selected(line, col) {
+                cell.modifier.toggle(Modifier::REVERSED);
+            }
+            if copy.cursor.line == line && copy.cursor.col == col {
+                cell.set_style(theme.focus.add_modifier(Modifier::REVERSED));
+            }
+        }
     }
 }
 
@@ -924,6 +966,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             };
             (text, t.warn)
         }
+        (_, Mode::Grid | Mode::Focus) if app.copy.is_some() => {
+            let copy = app.copy.as_ref().expect("checked");
+            match &copy.typing {
+                Some((query, up)) => (format!("{}{query}", if *up { '?' } else { '/' }), t.focus),
+                None => (COPY_HINT.to_string(), t.focus),
+            }
+        }
         (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
         (_, Mode::Grid) if prs_view.is_some() => (crate::prs::hint(app, prs_view.unwrap()), t.dim),
         (_, Mode::Grid) if matches!(app.view, View::Diff(_)) => match &app.view {
@@ -1022,6 +1071,10 @@ fn move_keys(keymap: &Keymap, context: Context) -> Option<String> {
         keys.join("/")
     })
 }
+
+/// The footer in copy mode; these keys are fixed.
+const COPY_HINT: &str =
+    "copy · hjkl w/b/e 0/$ move · v select · V line · y copy · / ? search · n/N · q back";
 
 /// The footer while the pane shows history; these keys are fixed.
 const SCROLL_HINT: &str =
@@ -2145,7 +2198,7 @@ mod tests {
         let mut app = fixture();
         app.keymap = Keymap::from_config(&keys, "C-Space").0;
         app.on_key(key(K::Char('?')));
-        let text = screen_text(&render(&mut app, 80, 60));
+        let text = screen_text(&render(&mut app, 80, 72));
         assert!(
             text.contains("g            new task: prompt, CLI, model"),
             "{text}"
@@ -3200,6 +3253,117 @@ mod tests {
             diff: Some(Box::new(diff)),
         });
         app
+    }
+
+    #[test]
+    fn copy_mode_shows_its_cursor_selection_and_search() {
+        let mut app = fixture();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        render(&mut app, 100, 16);
+        let id = app.attached.unwrap();
+        let mut screen = Snapshot::blank(98, 7);
+        for (r, text) in [
+            "$ cargo test",
+            "running 12 tests",
+            "test a ... ok",
+            "error: assertion failed",
+            "  left: 3",
+            "  right: 4",
+            "$",
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, ch) in text.chars().enumerate() {
+                screen.lines[r][c].ch = ch;
+            }
+        }
+        screen.scroll = termist_core::ScrollPos {
+            offset: 0,
+            history: 40,
+        };
+        app.screens.insert(id, screen);
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+        for c in ['k', 'k', 'k', 'v', 'j', 'j', '$'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let t = render(&mut app, 100, 16);
+        insta::assert_snapshot!("copy_mode", t.backend());
+        // The pane's text starts at (1, 6); lines 43 to 45 are its rows 3 to 5.
+        let buf = t.backend().buffer();
+        let reversed = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(
+            reversed(1, 9) && reversed(20, 10) && reversed(5, 11),
+            "selected"
+        );
+        assert!(!reversed(1, 8) && !reversed(15, 11), "not selected");
+        assert_eq!(
+            buf[(10, 11)].fg,
+            app.theme.focus.fg.unwrap(),
+            "the cursor, on right: 4's end"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        for c in "error".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let text = screen_text(&render(&mut app, 100, 16));
+        assert!(
+            text.contains("?error"),
+            "the search is typed in the footer: {text}"
+        );
+    }
+
+    #[test]
+    fn the_finder_shows_what_matched() {
+        let mut app = fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT));
+        for c in "redirect".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let actions = app.due(std::time::Instant::now() + crate::finder::WAIT * 2);
+        let ticket = actions
+            .iter()
+            .find_map(|a| match a {
+                crate::app::Action::Send(termist_core::ClientRequest::Grep { ticket, .. }) => {
+                    Some(*ticket)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let m = |path: &str, line, text: &str| termist_core::GrepMatch {
+            path: path.into(),
+            line,
+            text: text.into(),
+        };
+        app.on_event(ServerEvent::GrepResults {
+            ticket,
+            root: "/p".into(),
+            matches: vec![
+                m("src/auth.rs", 42, "    let redirect = query;"),
+                m("src/auth.rs", 57, "    Redirect(redirect)"),
+                m("tests/login.rs", 9, "// a redirect keeps the query"),
+            ],
+            more: false,
+        });
+        insta::assert_snapshot!("finder_grep", render(&mut app, 100, 16).backend());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_card_says_what_it_opened() {
+        let mut app = fixture();
+        let mut tool = app.state.sessions[0].clone();
+        tool.id = SessionId::new();
+        tool.name = "nvim-9".into();
+        tool.cwd = "/p".into();
+        tool.kind = SessionKind::Tool {
+            program: "/opt/bin/nvim".into(),
+            args: vec!["+42".into(), "/p/src/a.rs".into()],
+        };
+        app.on_event(ServerEvent::SessionUpdated(tool));
+        let text = screen(&render(&mut app, 120, 30));
+        assert!(text.contains("nvim · src/a.rs:42"), "{text}");
     }
 
     #[test]

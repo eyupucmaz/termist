@@ -2,8 +2,10 @@
 pub mod app;
 pub mod bands;
 pub mod browse;
+pub mod copy;
 pub mod diff;
 pub mod encode;
+pub mod finder;
 pub mod hit;
 pub mod keys;
 pub mod list_picker;

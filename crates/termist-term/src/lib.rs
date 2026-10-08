@@ -4,12 +4,13 @@ mod scan;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll as GridScroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Direction, Line, Point};
+use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, Rgb, StdSyncHandler};
 use std::sync::mpsc;
 use std::time::Instant;
-use termist_core::{Cursor, Modes, Scroll, ScrollPos, Snapshot, TermColors};
+use termist_core::{Cursor, Modes, Pos, Scroll, ScrollPos, Snapshot, TermColors};
 
 #[derive(Clone, Debug)]
 pub struct TermConfig {
@@ -198,6 +199,66 @@ impl TermCore {
         }
     }
 
+    /// A place in the history as alacritty counts it: the live screen's top is line 0.
+    fn point(&self, at: Pos) -> Point {
+        let grid = self.term.grid();
+        let top = -(grid.history_size() as i32);
+        let last = grid.screen_lines() as i32 - 1;
+        let line = (top + at.line as i32).clamp(top, last);
+        let col = (at.col as usize).min(grid.columns().saturating_sub(1));
+        Point::new(Line(line), Column(col))
+    }
+
+    fn pos(&self, p: Point) -> Pos {
+        let history = self.term.grid().history_size() as i32;
+        Pos {
+            line: (p.line.0 + history).max(0) as u32,
+            col: p.column.0 as u16,
+        }
+    }
+
+    /// The text from `a` to `b` (either way round), whole lines when `lines`.
+    pub fn text(&self, a: Pos, b: Pos, lines: bool) -> String {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let (mut start, mut end) = (self.point(a), self.point(b));
+        if lines {
+            start.column = Column(0);
+            end.column = self.term.grid().last_column();
+        }
+        self.term.bounds_to_string(start, end)
+    }
+
+    /// The next place `query` (text, not a pattern; any case unless it has a capital)
+    /// is from `from`, up or down, skipping one that starts there; with which of how
+    /// many in the whole history it is (1-based; 0 when none).
+    pub fn search(&self, query: &str, from: Pos, backward: bool) -> (Option<(Pos, Pos)>, u32, u32) {
+        let Ok(mut regex) = RegexSearch::new(&escape(query)) else {
+            return (None, 0, 0);
+        };
+        let grid = self.term.grid();
+        let first = Point::new(Line(-(grid.history_size() as i32)), Column(0));
+        let last = Point::new(Line(grid.screen_lines() as i32 - 1), grid.last_column());
+        let all: Vec<Match> =
+            RegexIter::new(first, last, Direction::Right, &self.term, &mut regex).collect();
+        let origin = self.point(from);
+        let found = if backward {
+            all.iter().rev().find(|m| *m.start() < origin)
+        } else {
+            all.iter().find(|m| *m.start() > origin)
+        };
+        match found {
+            Some(m) => {
+                let index = all.iter().position(|x| x == m).map_or(0, |i| i as u32 + 1);
+                (
+                    Some((self.pos(*m.start()), self.pos(*m.end()))),
+                    index,
+                    all.len() as u32,
+                )
+            }
+            None => (None, 0, all.len() as u32),
+        }
+    }
+
     fn drain(&mut self, out: &mut Vec<TermEvent>) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -237,6 +298,18 @@ impl TermCore {
     }
 }
 
+/// `text` as a pattern that finds only itself.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +346,57 @@ mod tests {
     fn numbered(t: &mut TermCore, n: usize) {
         let text: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
         t.feed(text.join("\r\n").as_bytes());
+    }
+
+    #[test]
+    fn text_is_cut_from_the_history_and_the_screen_alike() {
+        let mut t = core();
+        numbered(&mut t, 12);
+        let at = |line, col| Pos { line, col };
+        // Lines 0 to 6 are history ("1" to "7"), 7 to 11 the screen.
+        assert_eq!(
+            t.text(at(5, 3), at(8, 0), true),
+            "6\n7\n8\n9",
+            "whole lines"
+        );
+        assert_eq!(
+            t.text(at(1, 0), at(0, 0), false),
+            "1\n2",
+            "either way round"
+        );
+        t.feed(b"\r\nhello world");
+        assert_eq!(t.text(at(12, 6), at(12, 10), false), "world");
+    }
+
+    #[test]
+    fn a_search_goes_up_or_down_and_says_which_of_how_many() {
+        let mut t = core();
+        let lines = [
+            "error one",
+            "ok",
+            "Error two",
+            "ok",
+            "ok",
+            "x error three",
+            "ok",
+            "ok",
+        ];
+        t.feed(lines.join("\r\n").as_bytes());
+        let at = |line, col| Pos { line, col };
+        // From the last line up: the nearest first.
+        let (found, index, total) = t.search("error", at(7, 0), true);
+        assert_eq!((found, index, total), (Some((at(5, 2), at(5, 6))), 3, 3));
+        let (found, index, _) = t.search("error", at(5, 2), true);
+        assert_eq!(
+            (found, index),
+            (Some((at(2, 0), at(2, 4))), 2),
+            "past the one it is on"
+        );
+        let (found, index, _) = t.search("error", at(0, 0), false);
+        assert_eq!((found, index), (Some((at(2, 0), at(2, 4))), 2), "down");
+        // A capital asks for that case; a pattern is only text.
+        assert_eq!(t.search("Error", at(7, 0), true).2, 1);
+        assert_eq!(t.search("e.ror", at(7, 0), true), (None, 0, 0));
     }
 
     #[test]

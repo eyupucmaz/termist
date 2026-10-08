@@ -24,6 +24,7 @@ etcetera = "0.10"
 insta = "1"
 interprocess = { version = "2.4", features = ["tokio"] }
 libc = "0.2"
+nucleo-matcher = "0.3"
 portable-pty = "0.9"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"

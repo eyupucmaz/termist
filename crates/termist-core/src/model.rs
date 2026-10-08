@@ -92,18 +92,90 @@ pub struct HarnessInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionKind {
-    Agent { harness: Harness },
+    Agent {
+        harness: Harness,
+    },
     Shell,
+    /// A program for a while (lazygit, a terminal editor): gone when it ends, never
+    /// kept.
+    Tool {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl SessionKind {
-    /// Short label shown on cards: the harness id, or "shell".
-    pub fn label(&self) -> &'static str {
+    /// What a tool opened, for its card: a file relative to `cwd`, at its line
+    /// (`src/a.rs:42`); `None` for anything else.
+    pub fn opens(&self, cwd: &std::path::Path) -> Option<String> {
+        let SessionKind::Tool { args, .. } = self else {
+            return None;
+        };
+        let line = args.iter().find_map(|a| a.strip_prefix('+'));
+        let file = args
+            .iter()
+            .rev()
+            .find(|a| !a.starts_with('+') && !a.starts_with('-') && *a != ".")?;
+        let shown = std::path::Path::new(file)
+            .strip_prefix(cwd)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| file.clone());
+        Some(match line {
+            Some(n) => format!("{shown}:{n}"),
+            None => shown,
+        })
+    }
+
+    /// Short label shown on cards: the harness id, "shell", or the tool's name.
+    pub fn label(&self) -> &str {
         match self {
             SessionKind::Agent { harness } => harness.id(),
             SessionKind::Shell => "shell",
+            SessionKind::Tool { program, .. } => {
+                program.rsplit(['/', '\\']).next().unwrap_or(program)
+            }
         }
     }
+}
+
+/// Editors with windows of their own; any other runs in a terminal (a card).
+pub const GUI_EDITORS: &[&str] = &[
+    "code",
+    "code-insiders",
+    "codium",
+    "cursor",
+    "windsurf",
+    "zed",
+    "subl",
+    "idea",
+    "goland",
+    "webstorm",
+    "pycharm",
+    "rustrover",
+    "fleet",
+];
+
+/// Whether the editor `choice` names (its program, then arguments) has a window of
+/// its own; with no choice the daemon looks for GUI ones only.
+pub fn gui_editor(choice: Option<&str>) -> bool {
+    let Some(first) = choice.and_then(|c| c.split_whitespace().next()) else {
+        return true;
+    };
+    let name = std::path::Path::new(first)
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    GUI_EDITORS.contains(&name.as_str())
+}
+
+/// A line `git grep` found.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrepMatch {
+    /// Relative to the repo's root.
+    pub path: String,
+    pub line: u32,
+    /// The line, cut to a length a list can show.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +321,32 @@ pub struct StateSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_editor_is_gui_by_its_program_s_name() {
+        assert!(gui_editor(Some("code --wait")));
+        assert!(gui_editor(Some("/Applications/Cursor.app/bin/cursor")));
+        assert!(!gui_editor(Some("nvim")));
+        assert!(!gui_editor(Some("emacs -nw")));
+        assert!(gui_editor(None), "none: the daemon looks for GUI ones");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_says_the_file_it_opened_where_it_is() {
+        let cwd = std::path::Path::new("/w/site");
+        let tool = |args: &[&str]| SessionKind::Tool {
+            program: "nvim".into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        };
+        assert_eq!(
+            tool(&["+42", "/w/site/src/a.rs"]).opens(cwd).as_deref(),
+            Some("src/a.rs:42")
+        );
+        assert_eq!(tool(&["."]).opens(cwd), None);
+        assert_eq!(tool(&[]).opens(cwd), None);
+        assert_eq!(SessionKind::Shell.opens(cwd), None);
+    }
 
     #[test]
     fn harness_ids_round_trip_and_all_is_ordered() {

@@ -1,15 +1,15 @@
 use crate::github::{GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
-    DiffMode, Harness, HarnessInfo, LaunchOptions, LocalDiffData, ModelInfo, ReadState,
+    DiffMode, GrepMatch, Harness, HarnessInfo, LaunchOptions, LocalDiffData, ModelInfo, ReadState,
     SessionInfo, SessionKind, StateSnapshot, TermColors, WorktreeInfo,
 };
-use crate::screen::{ScreenUpdate, Scroll};
+use crate::screen::{Pos, ScreenUpdate, Scroll};
 use crate::{ProjectId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -197,6 +197,47 @@ pub enum ClientRequest {
         file: String,
         reviewed: bool,
     },
+    /// The folder, or a file in it at a line, in the user's editor: a window of its own
+    /// for a GUI one, a card for one that runs in a terminal. `file` is relative to
+    /// `folder`; `editor` is the user's choice (config, `$VISUAL`, `$EDITOR`), else the
+    /// daemon looks for `code`, `cursor`, `zed`. Answered with `EditorFailed` when no
+    /// editor can.
+    OpenInEditor {
+        project: ProjectId,
+        folder: PathBuf,
+        file: Option<String>,
+        line: Option<u32>,
+        editor: Option<String>,
+    },
+    /// The files of the repo the folder is in, for `f`; answered with `Files` or
+    /// `FindFailed` carrying `ticket`.
+    ListFiles {
+        folder: PathBuf,
+        ticket: u64,
+    },
+    /// `git grep` for `query` in the repo the folder is in; answered with `GrepResults`
+    /// or `FindFailed`. Only a client's newest ticket is answered.
+    Grep {
+        folder: PathBuf,
+        query: String,
+        ticket: u64,
+    },
+    /// The text of a session's history from `from` to `to` (whole lines when `lines`);
+    /// answered with `CopiedText`.
+    CopyText {
+        session: SessionId,
+        from: Pos,
+        to: Pos,
+        lines: bool,
+    },
+    /// The next place `query` is in a session's history from `from`, up or down;
+    /// answered with `Found`.
+    Search {
+        session: SessionId,
+        query: String,
+        from: Pos,
+        backward: bool,
+    },
     Shutdown,
 }
 
@@ -304,6 +345,40 @@ pub enum ServerEvent {
         state: ReadState,
         diff: Option<Box<LocalDiffData>>,
     },
+    /// An `OpenInEditor` of this client did not happen.
+    EditorFailed {
+        message: String,
+    },
+    /// The repo's files, relative to its `root`; `more` past those sent.
+    Files {
+        ticket: u64,
+        root: PathBuf,
+        files: Vec<String>,
+        more: u32,
+    },
+    /// What `git grep` found; `more` when it found more than are sent.
+    GrepResults {
+        ticket: u64,
+        root: PathBuf,
+        matches: Vec<GrepMatch>,
+        more: bool,
+    },
+    /// A `ListFiles` or `Grep` could not be done.
+    FindFailed {
+        ticket: u64,
+        message: String,
+    },
+    CopiedText {
+        session: SessionId,
+        text: String,
+    },
+    /// Where `query` is next, its first and last cell, and which of how many it is.
+    Found {
+        session: SessionId,
+        at: Option<(Pos, Pos)>,
+        index: u32,
+        total: u32,
+    },
     /// A `WritePr` of this client went through.
     PrWritten {
         pr: PrRef,
@@ -331,7 +406,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_12_since_the_local_diff() {
-        assert_eq!(PROTOCOL_VERSION, 12);
+    fn the_protocol_is_13_since_the_tools() {
+        assert_eq!(PROTOCOL_VERSION, 13);
     }
 }

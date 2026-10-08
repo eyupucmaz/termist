@@ -58,6 +58,16 @@ pub struct Cursor {
     pub col: u16,
 }
 
+/// A place in a session's history: `line` counted from the top of the history (the
+/// oldest line kept is 0), `col` a column.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u16,
+}
+
 /// How far back the screen shows: `offset` lines above the live screen, out of the
 /// `history` lines the session keeps. `offset` 0 is the live screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

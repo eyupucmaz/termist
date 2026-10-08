@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use termist_core::env::should_scrub;
 use termist_core::screen::diff;
-use termist_core::{Scroll, ServerEvent, SessionId, Snapshot, TermColors};
+use termist_core::{Pos, Scroll, ServerEvent, SessionId, Snapshot, TermColors};
 use termist_term::{TermConfig, TermCore, TermEvent};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -41,6 +41,20 @@ pub enum SessionCmd {
     },
     /// What the child's colour queries are answered with from now on.
     SetColors(TermColors),
+    /// The text of the history from `from` to `to`, sent to `out` as `CopiedText`.
+    CopyText {
+        from: Pos,
+        to: Pos,
+        lines: bool,
+        out: UnboundedSender<ServerEvent>,
+    },
+    /// Where `query` is next in the history, sent to `out` as `Found`.
+    Search {
+        query: String,
+        from: Pos,
+        backward: bool,
+        out: UnboundedSender<ServerEvent>,
+    },
     Kill,
 }
 
@@ -178,6 +192,14 @@ pub fn spawn(
                             term.scroll(Scroll::Bottom);
                             dirty = true;
                         }
+                    }
+                    Some(SessionCmd::CopyText { from, to, lines, out }) => {
+                        let text = term.text(from, to, lines);
+                        let _ = out.send(ServerEvent::CopiedText { session: id, text });
+                    }
+                    Some(SessionCmd::Search { query, from, backward, out }) => {
+                        let (at, index, total) = term.search(&query, from, backward);
+                        let _ = out.send(ServerEvent::Found { session: id, at, index, total });
                     }
                     Some(SessionCmd::Scroll(scroll)) => {
                         term.scroll(scroll);
@@ -322,6 +344,44 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("never got there; last screen: {:?}", screen.scroll));
+    }
+
+    #[tokio::test]
+    async fn text_and_a_search_come_from_the_history_to_who_asked() {
+        let (notes, _n) = unbounded_channel();
+        let cmd = spawn(spec("seq 1 20; sleep 5"), TermColors::default(), notes).unwrap();
+        wait_for_text(&cmd, "20").await;
+        let (out, mut rx) = unbounded_channel();
+        let at = |line, col| termist_core::Pos { line, col };
+        // Lines 0 to 19 hold "1" to "20".
+        cmd.send(SessionCmd::CopyText {
+            from: at(2, 0),
+            to: at(4, 0),
+            lines: true,
+            out: out.clone(),
+        })
+        .unwrap();
+        let got = timeout(Duration::from_secs(5), rx.recv()).await.unwrap();
+        assert!(
+            matches!(&got, Some(ServerEvent::CopiedText { text, .. }) if text == "3\n4\n5"),
+            "{got:?}"
+        );
+        cmd.send(SessionCmd::Search {
+            query: "1".into(),
+            from: at(19, 0),
+            backward: true,
+            out,
+        })
+        .unwrap();
+        let got = timeout(Duration::from_secs(5), rx.recv()).await.unwrap();
+        // "1", "10" to "19" ("11" twice): the nearest up from "20" is "19".
+        assert!(
+            matches!(
+                &got,
+                Some(ServerEvent::Found { at: Some((a, _)), index: 12, total: 12, .. }) if a.line == 18
+            ),
+            "{got:?}"
+        );
     }
 
     #[tokio::test]

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Tools next to your agents.
+
+### Added
+
+- **`O` opens the card's folder in your editor**: `editor` in config.toml, else `$VISUAL` or `$EDITOR`,
+  else `code`, `cursor` or `zed`. An editor that runs in a terminal (`nvim`, `vim`, `hx`…) opens as a
+  card you type into, gone when you quit it.
+- **`L` opens lazygit** in the card's folder, the same way.
+- **`f` finds a file** of the repo as you type, **`F` the lines with some text** (`git grep`, new files
+  too); `Enter` opens it in your editor, at its line. `Tab` goes from one to the other.
+- **Copy mode**: `PgUp` (`Ctrl+a [` while typing into a card) puts a cursor on the session's history;
+  `hjkl`, `w`/`b`/`e`, `0`/`$`, `g`/`G` move it, `v` and `V` select, `y` copies, `/` and `?` search
+  all of the history and `n`/`N` go on.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions can
+stop, `termist kill` and start `termist` again.
+
 ## 0.2.2 - 2026-10-08
 
 What an agent changed, in termist.

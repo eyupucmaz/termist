@@ -168,6 +168,7 @@ impl Launcher {
                 vec![],
                 None,
             ),
+            SessionKind::Tool { program, args } => (program.clone(), args.clone(), None),
             SessionKind::Agent {
                 harness: Harness::Claude,
             } => {
