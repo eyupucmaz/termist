@@ -2,6 +2,7 @@
 pub mod app;
 pub mod bands;
 pub mod browse;
+pub mod diff;
 pub mod encode;
 pub mod hit;
 pub mod keys;

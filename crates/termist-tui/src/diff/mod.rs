@@ -1,16 +1,16 @@
-//! Mercek: a pull request's diff, its file tree beside one file's changes. This module
-//! keeps the state and the keys; `view` draws it.
+//! A diff, its file tree beside one file's changes: a pull request's (Mercek) or a
+//! folder's (Ayna). This module keeps the state and the keys; `view` draws it.
 pub mod render;
 pub mod tree;
 pub mod view;
 pub mod words;
 
-use super::{Ask, PrAction, Subject};
+use crate::prs::{Ask, PrAction, Subject};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use termist_core::github::{DiffFile, PrDiff, PrRef, Side, Viewed};
+use termist_core::github::{DiffFile, PrRef, Side, Viewed};
 use tree::{Node, TreeRow};
 
 /// How far `←` and `→` move a long line.
@@ -215,32 +215,31 @@ impl DiffView {
         self.pending.get(&f.path).copied().unwrap_or(f.viewed)
     }
 
-    pub fn rows(&self, diff: &PrDiff) -> Vec<TreeRow> {
-        tree::rows(&diff.files, &self.folded, &self.query)
+    pub fn rows(&self, diff: &[DiffFile]) -> Vec<TreeRow> {
+        tree::rows(diff, &self.folded, &self.query)
     }
 
-    /// The file shown, as an index into `diff.files`.
-    pub fn index(&self, diff: &PrDiff) -> Option<usize> {
+    /// The file shown, as an index into `diff`.
+    pub fn index(&self, diff: &[DiffFile]) -> Option<usize> {
         let path = self.file.as_deref()?;
-        diff.files.iter().position(|f| f.path == path)
+        diff.iter().position(|f| f.path == path)
     }
 
     /// A new diff came: what GitHub now says replaces what was asked, and a file that
     /// is gone (or none yet) becomes the first one not viewed.
-    pub fn settle(&mut self, diff: &PrDiff) {
+    pub fn settle(&mut self, diff: &[DiffFile]) {
         self.pending.retain(|path, want| {
-            diff.files
-                .iter()
+            diff.iter()
                 .find(|f| f.path == *path)
                 .is_some_and(|f| f.viewed != *want)
         });
         match self.index(diff) {
             Some(i) => self.follow(i, diff),
             None => {
-                let order = tree::order(&diff.files);
+                let order = tree::order(diff);
                 let first = order
                     .iter()
-                    .find(|i| self.viewed(&diff.files[**i]) != Viewed::Viewed)
+                    .find(|i| self.viewed(&diff[**i]) != Viewed::Viewed)
                     .or(order.first());
                 if let Some(&i) = first {
                     self.show(i, diff);
@@ -250,15 +249,15 @@ impl DiffView {
     }
 
     /// The tree's cursor on file `index`, when its row is shown.
-    fn follow(&mut self, index: usize, diff: &PrDiff) {
+    fn follow(&mut self, index: usize, diff: &[DiffFile]) {
         if let Some(row) = self.rows(diff).iter().position(|r| r.file() == Some(index)) {
             self.cursor = row;
         }
     }
 
     /// Shows file `index` from its first line, the tree's cursor on it.
-    fn show(&mut self, index: usize, diff: &PrDiff) {
-        self.file = Some(diff.files[index].path.clone());
+    fn show(&mut self, index: usize, diff: &[DiffFile]) {
+        self.file = Some(diff[index].path.clone());
         self.scroll = 0;
         self.hscroll = 0;
         self.line = 0;
@@ -267,8 +266,8 @@ impl DiffView {
     }
 
     /// The next (or previous) file in the tree's order from the one shown.
-    fn step_file(&mut self, diff: &PrDiff, delta: isize) {
-        let order = tree::order(&diff.files);
+    fn step_file(&mut self, diff: &[DiffFile], delta: isize) {
+        let order = tree::order(diff);
         if order.is_empty() {
             return;
         }
@@ -281,21 +280,21 @@ impl DiffView {
     }
 
     /// The first file after the one shown, round the end, that is not viewed.
-    fn next_unviewed(&mut self, diff: &PrDiff) {
-        let order = tree::order(&diff.files);
+    fn next_unviewed(&mut self, diff: &[DiffFile]) {
+        let order = tree::order(diff);
         let at = self
             .index(diff)
             .and_then(|i| order.iter().position(|x| *x == i))
             .unwrap_or(0);
         let next = (1..order.len())
             .map(|k| order[(at + k) % order.len()])
-            .find(|i| self.viewed(&diff.files[*i]) != Viewed::Viewed);
+            .find(|i| self.viewed(&diff[*i]) != Viewed::Viewed);
         if let Some(i) = next {
             self.show(i, diff);
         }
     }
 
-    fn enter_row(&mut self, row: &TreeRow, diff: &PrDiff) {
+    fn enter_row(&mut self, row: &TreeRow, diff: &[DiffFile]) {
         match &row.node {
             Node::File { index, .. } => {
                 self.show(*index, diff);
@@ -313,7 +312,7 @@ impl DiffView {
         &mut self,
         key: KeyEvent,
         pr: PrRef,
-        diff: Option<&PrDiff>,
+        diff: Option<&[DiffFile]>,
         area: &DiffArea,
     ) -> Option<DiffAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -367,7 +366,7 @@ impl DiffView {
             KeyCode::Char('K') => self.step_file(diff, -1),
             KeyCode::Char('r') if ctrl => {
                 let path = self.file.clone()?;
-                let f = diff.files.iter().find(|f| f.path == path)?;
+                let f = diff.iter().find(|f| f.path == path)?;
                 let viewed = self.viewed(f) != Viewed::Viewed;
                 let now = if viewed {
                     Viewed::Viewed
@@ -420,7 +419,7 @@ impl DiffView {
             }
             KeyCode::Char('b') => {
                 let i = self.index(diff)?;
-                return Some(DiffAction::Pr(PrAction::Browser(diff.files[i].url.clone())));
+                return Some(DiffAction::Pr(PrAction::Browser(diff[i].url.clone())));
             }
             KeyCode::Left => self.hscroll = self.hscroll.saturating_sub(SIDEWAYS),
             KeyCode::Right => self.hscroll += SIDEWAYS,
@@ -546,7 +545,7 @@ impl DiffView {
 
     /// A click: on the tree, that row (a file opens, a folder folds); on the diff, the
     /// thread there folds or unfolds. The panel clicked is the one in use.
-    pub fn click(&mut self, x: u16, y: u16, diff: Option<&PrDiff>, area: &DiffArea) {
+    pub fn click(&mut self, x: u16, y: u16, diff: Option<&[DiffFile]>, area: &DiffArea) {
         let at = ratatui::layout::Position::new(x, y);
         if area.tree.contains(at) {
             self.panel = Panel::Tree;
@@ -582,7 +581,14 @@ impl DiffView {
     }
 
     /// The wheel moves the panel under it: the tree's cursor, or the diff three lines.
-    pub fn wheel(&mut self, x: u16, y: u16, down: bool, diff: Option<&PrDiff>, area: &DiffArea) {
+    pub fn wheel(
+        &mut self,
+        x: u16,
+        y: u16,
+        down: bool,
+        diff: Option<&[DiffFile]>,
+        area: &DiffArea,
+    ) {
         let at = ratatui::layout::Position::new(x, y);
         if area.tree.contains(at) {
             self.cursor = if down {
@@ -616,13 +622,13 @@ impl DiffView {
 
     /// The first file row of the tree as it is now: where a search lands, so Enter
     /// opens what was searched for rather than folding its folder.
-    fn first_file(&self, diff: Option<&PrDiff>) -> usize {
+    fn first_file(&self, diff: Option<&[DiffFile]>) -> usize {
         diff.and_then(|d| self.rows(d).iter().position(|r| r.file().is_some()))
             .unwrap_or(0)
     }
 
     /// Keeps the tree's cursor on a row.
-    fn clamp(&mut self, diff: Option<&PrDiff>) {
+    fn clamp(&mut self, diff: Option<&[DiffFile]>) {
         let n = diff.map_or(0, |d| self.rows(d).len());
         self.cursor = self.cursor.min(n.saturating_sub(1));
     }
@@ -648,7 +654,7 @@ mod tests {
 
     /// In the tree's order: `src/api/client.ts`, `src/search/DealerFilter.tsx`,
     /// `src/App.tsx`, `README.md`; DealerFilter already viewed.
-    fn diff() -> PrDiff {
+    fn diff() -> Vec<DiffFile> {
         let mut files: Vec<DiffFile> = [
             "README.md",
             "src/search/DealerFilter.tsx",
@@ -659,11 +665,7 @@ mod tests {
         .map(file)
         .collect();
         files[1].viewed = Viewed::Viewed;
-        PrDiff {
-            head_oid: "h1".into(),
-            files,
-            more: 0,
-        }
+        files
     }
 
     /// A new line `n` of hunk `hunk`.
@@ -715,7 +717,7 @@ mod tests {
     }
 
     fn key(v: &mut DiffView, code: K) -> Option<DiffAction> {
-        v.key(k(code), pr(), Some(&diff()), &area())
+        v.key(k(code), pr(), Some(&diff()[..]), &area())
     }
 
     #[test]
@@ -878,7 +880,7 @@ mod tests {
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
             pr(),
-            Some(&diff()),
+            Some(&diff()[..]),
             &area(),
         );
         assert_eq!(
@@ -897,7 +899,7 @@ mod tests {
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
             pr(),
-            Some(&diff()),
+            Some(&diff()[..]),
             &area(),
         );
         assert!(matches!(
@@ -909,7 +911,7 @@ mod tests {
         v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
             pr(),
-            Some(&diff()),
+            Some(&diff()[..]),
             &area(),
         );
         assert_eq!(v.file.as_deref(), Some("README.md"));
@@ -917,7 +919,7 @@ mod tests {
         let a = v.key(
             KeyEvent::new(K::Char('r'), M::CONTROL),
             pr(),
-            Some(&diff()),
+            Some(&diff()[..]),
             &area(),
         );
         assert!(matches!(
@@ -933,7 +935,7 @@ mod tests {
         v.pending.insert("README.md".into(), Viewed::Viewed);
         v.pending.insert("src/App.tsx".into(), Viewed::Viewed);
         let mut d = diff();
-        d.files[0].viewed = Viewed::Viewed;
+        d[0].viewed = Viewed::Viewed;
         v.settle(&d);
         assert_eq!(
             v.pending.keys().collect::<Vec<_>>(),

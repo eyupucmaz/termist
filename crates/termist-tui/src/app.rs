@@ -747,7 +747,7 @@ impl App {
                     && let Some(d) = view.detail.as_mut().filter(|d| d.pr == pr)
                     && let Some(open) = &mut d.diff
                 {
-                    open.settle(diff);
+                    open.settle(&diff.files);
                 }
                 // Only the open diff is kept (each may be megabytes); the daemon sends a
                 // diff again to whoever comes back to it.
@@ -2742,7 +2742,13 @@ impl App {
             && let Some(open) = view.detail.as_mut().and_then(|d| d.diff.as_mut())
         {
             let down = ev.kind == MouseEventKind::ScrollDown;
-            open.wheel(ev.column, ev.row, down, diff, &layout.diff);
+            open.wheel(
+                ev.column,
+                ev.row,
+                down,
+                diff.map(|d| d.files.as_slice()),
+                &layout.diff,
+            );
             return vec![];
         }
         if ev.kind == MouseEventKind::Down(MouseButton::Left) && view.detail.is_some() {
@@ -7871,7 +7877,7 @@ mod tests {
 
     /// Two files of 212: `src/a.rs` already viewed, `src/b.rs` not.
     fn diff_of_212() -> PrDiff {
-        use crate::prs::diff::tree::tests::file;
+        use crate::diff::tree::tests::file;
         let mut files = vec![file("src/a.rs"), file("src/b.rs")];
         files[0].viewed = termist_core::github::Viewed::Viewed;
         PrDiff {
@@ -7882,7 +7888,7 @@ mod tests {
     }
 
     /// The open diff of the PR view.
-    fn open_diff(app: &App) -> Option<&crate::prs::diff::DiffView> {
+    fn open_diff(app: &App) -> Option<&crate::diff::DiffView> {
         match &app.view {
             View::Prs(v) => v.detail.as_ref()?.diff.as_ref(),
             _ => None,

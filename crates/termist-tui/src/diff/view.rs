@@ -6,7 +6,6 @@ use super::tree::{Node, TreeRow};
 use super::{DiffArea, DiffView, Panel, Spot, follow};
 use crate::app::App;
 use crate::prs::detail_view::viewed_mark;
-use crate::prs::inbox_view::trouble;
 use crate::prs::markdown::{cut, render, width_of};
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -15,17 +14,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 use termist_core::AgentStatus;
 use termist_core::config::DiffLayout;
 use termist_core::diff::{LineKind, parse_patch};
-use termist_core::github::{
-    GhState, Patch, PrDetail, PrDiff, PrRef, Side, Thread, Viewed, age, unix_secs,
-};
+use termist_core::github::{DiffFile, Patch, Side, Thread, Viewed, age, unix_secs};
 use unicode_width::UnicodeWidthChar;
 
 /// Below this many columns only the panel in use shows.
@@ -58,19 +55,33 @@ pub fn layout(want: DiffLayout, width: u16) -> (DiffLayout, &'static str) {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App, pr: PrRef, view: &DiffView, area: Rect) {
+/// What the diff view draws, from a pull request or a folder.
+pub struct Shown<'a> {
+    /// Tells this diff's files apart from another's (or an older read's) in the cache
+    /// of drawn lines.
+    pub id: u64,
+    /// `None` until read.
+    pub files: Option<&'a [DiffFile]>,
+    /// Changed files past those read.
+    pub more: u32,
+    pub threads: &'a [Thread],
+    /// Threads marked for an agent (`Space`).
+    pub marked: &'a BTreeSet<String>,
+    /// The head line's left side, and what goes on its right before the layout.
+    pub title: String,
+    pub badges: Vec<Span<'static>>,
+    /// What a file `Ctrl+r` marked is: `viewed`, or `reviewed`.
+    pub seen: &'static str,
+    /// The newest read failed while an older one is shown.
+    pub failed: bool,
+    /// Said where the file would be before anything was read: reading, or why not.
+    pub waiting: String,
+    /// Said after `+N more` and a file too large: where the rest can be seen.
+    pub elsewhere: &'static str,
+}
+
+pub fn draw(f: &mut Frame, app: &App, shown: &Shown, view: &DiffView, area: Rect) {
     let t = &app.theme;
-    let detail = app.pr_details.get(&pr).and_then(|(_, d)| d.as_ref());
-    // Before the first diff, the pull request's own trouble: no detail, no diff.
-    let (state, diff) = match app.pr_diffs.get(&pr) {
-        Some((state, diff)) => (state.clone(), diff.as_ref()),
-        None => (
-            app.pr_details
-                .get(&pr)
-                .map_or(GhState::Ok, |(state, _)| state.clone()),
-            None,
-        ),
-    };
     if area.height < 3 {
         return;
     }
@@ -97,57 +108,39 @@ pub fn draw(f: &mut Frame, app: &App, pr: PrRef, view: &DiffView, area: Rect) {
         ..body
     };
     let (drawn, label) = layout(app.config.diff.layout, diff_rect.width.saturating_sub(2));
-    head(f, app, view, detail, diff, &state, label, area);
+    head(f, app, view, shown, label, area);
     let mut out = DiffArea::default();
     if tree_rect.width > 0 {
-        draw_tree(f, t, view, detail, diff, tree_rect, &mut out);
+        draw_tree(f, t, view, shown, tree_rect, &mut out);
     }
     if diff_rect.width > 0 {
-        draw_diff(
-            f, app, pr, view, detail, diff, &state, drawn, diff_rect, &mut out,
-        );
+        draw_diff(f, app, view, shown, drawn, diff_rect, &mut out);
     }
     app.pr_layout.borrow_mut().diff = out;
 }
 
-#[allow(clippy::too_many_arguments)]
-fn head(
-    f: &mut Frame,
-    app: &App,
-    view: &DiffView,
-    detail: Option<&PrDetail>,
-    diff: Option<&PrDiff>,
-    state: &GhState,
-    label: &str,
-    area: Rect,
-) {
+fn head(f: &mut Frame, app: &App, view: &DiffView, shown: &Shown, label: &str, area: Rect) {
     let t = &app.theme;
-    let title = detail.map(|d| format!(" #{} {}", d.summary.number, d.summary.title));
-    let mut right = vec![];
-    if let Some(mark) = detail.and_then(|d| crate::prs::pending_mark(t, d)) {
-        right.push(mark);
-        right.push(Span::raw(" · "));
-    }
+    let mut right = shown.badges.clone();
     right.push(Span::styled(label.to_string(), t.dim));
-    if let Some(d) = diff {
-        let seen = d
-            .files
+    if let Some(files) = shown.files {
+        let seen = files
             .iter()
             .filter(|f| view.viewed(f) == Viewed::Viewed)
             .count();
         right.push(Span::styled(
-            format!(" · {seen}/{} viewed", d.files.len()),
+            format!(" · {seen}/{} {}", files.len(), shown.seen),
             t.dim,
         ));
     }
-    if *state != GhState::Ok && diff.is_some() {
+    if shown.failed && shown.files.is_some() {
         right.push(Span::styled("  ⟳ failed", t.warn));
     }
     right.push(Span::raw(" "));
     let right_w: usize = right.iter().map(Span::width).sum();
     let room = (area.width as usize).saturating_sub(right_w + 1);
     let mut spans = vec![Span::styled(
-        cut(&title.unwrap_or_default(), room),
+        cut(&shown.title, room),
         Style::default().add_modifier(Modifier::BOLD),
     )];
     let used: usize = spans.iter().map(Span::width).sum();
@@ -172,8 +165,7 @@ fn draw_tree(
     f: &mut Frame,
     t: &Theme,
     view: &DiffView,
-    detail: Option<&PrDetail>,
-    diff: Option<&PrDiff>,
+    shown: &Shown,
     rect: Rect,
     out: &mut DiffArea,
 ) {
@@ -185,16 +177,16 @@ fn draw_tree(
     let block = frame(t, title, view.panel == Panel::Tree);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let Some(diff) = diff else {
+    let Some(diff) = shown.files else {
         return;
     };
     let rows = view.rows(diff);
     let h = inner.height as usize;
     let first = view.cursor.saturating_sub(h.saturating_sub(1));
-    let shown = view.index(diff);
+    let open = view.index(diff);
     let w = inner.width as usize;
     let mut threads: HashMap<&str, usize> = HashMap::new();
-    for th in detail.map_or(&[][..], |d| &d.threads) {
+    for th in shown.threads {
         *threads.entry(th.path.as_str()).or_default() += 1;
     }
     let mut lines: Vec<Line> = rows
@@ -204,16 +196,16 @@ fn draw_tree(
         .take(h)
         .map(|(i, r)| {
             let count = match r.node {
-                Node::File { index, .. } => threads.get(diff.files[index].path.as_str()),
+                Node::File { index, .. } => threads.get(diff[index].path.as_str()),
                 Node::Dir { .. } => None,
             };
             let count = count.map(|n| n.to_string()).unwrap_or_default();
-            tree_line(t, view, diff, r, shown, i == view.cursor, &count, w)
+            tree_line(t, view, diff, r, open, i == view.cursor, &count, w)
         })
         .collect();
-    if diff.more > 0 && lines.len() < h {
+    if shown.more > 0 && lines.len() < h {
         lines.push(Line::from(Span::styled(
-            cut(&format!(" +{} more · b browser", diff.more), w),
+            cut(&format!(" +{} more{}", shown.more, shown.elsewhere), w),
             t.dim,
         )));
     }
@@ -226,7 +218,7 @@ fn draw_tree(
 fn tree_line(
     t: &Theme,
     view: &DiffView,
-    diff: &PrDiff,
+    diff: &[DiffFile],
     row: &TreeRow,
     shown: Option<usize>,
     cursor: bool,
@@ -243,7 +235,7 @@ fn tree_line(
             ),
         ],
         Node::File { index, label } => {
-            let file = &diff.files[*index];
+            let file = &diff[*index];
             let change = match file.change {
                 'A' => Style::default().fg(t.status(AgentStatus::Finished)),
                 'D' => t.error,
@@ -285,21 +277,18 @@ fn tree_line(
     Line::from(spans)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_diff(
     f: &mut Frame,
     app: &App,
-    pr: PrRef,
     view: &DiffView,
-    detail: Option<&PrDetail>,
-    diff: Option<&PrDiff>,
-    state: &GhState,
+    shown: &Shown,
     layout: DiffLayout,
     rect: Rect,
     out: &mut DiffArea,
 ) {
     let t = &app.theme;
-    let file = diff.and_then(|d| Some(&d.files[view.index(d)?]));
+    let diff = shown.files;
+    let file = diff.and_then(|d| Some(&d[view.index(d)?]));
     let title = match file {
         Some(file) => {
             let name = match (&file.previous, file.change) {
@@ -327,10 +316,9 @@ fn draw_diff(
         );
     };
     let Some(file) = file else {
-        let text = match (diff, trouble(state)) {
-            (None, Some(why)) => why.join(" "),
-            (None, None) => "Reading the diff…".to_string(),
-            (Some(_), _) => "No file to show.".to_string(),
+        let text = match diff {
+            None => shown.waiting.clone(),
+            Some(_) => "No file to show.".to_string(),
         };
         say(f, text);
         return;
@@ -338,21 +326,21 @@ fn draw_diff(
     let text = match &file.patch {
         Patch::Text(text) => text,
         Patch::Binary => return say(f, "binary file".into()),
-        Patch::TooLarge => return say(f, "diff too large to show · b browser".into()),
+        Patch::TooLarge => return say(f, format!("diff too large to show{}", shown.elsewhere)),
         Patch::Renamed => return say(f, "renamed, no changes".into()),
     };
-    let threads: Vec<&Thread> = detail
-        .map(|d| d.threads.iter().filter(|th| th.path == file.path).collect())
-        .unwrap_or_default();
+    let threads: Vec<&Thread> = shown
+        .threads
+        .iter()
+        .filter(|th| th.path == file.path)
+        .collect();
     let width = inner.width as usize;
     let mut opened: Vec<&String> = view.opened.iter().collect();
     opened.sort();
-    let none = std::collections::BTreeSet::new();
-    let marked = app.marks.get(&pr).unwrap_or(&none);
+    let marked = shown.marked;
     let mut hasher = DefaultHasher::new();
     (
-        pr,
-        diff.map(|d| d.head_oid.as_str()),
+        shown.id,
         &file.path,
         layout == DiffLayout::Split,
         width,
@@ -377,7 +365,7 @@ fn draw_diff(
     let key = hasher.finish();
     let page = inner.height as usize;
     // The file's lines stay in the cache; a frame copies only the page it shows.
-    let (mut shown, top, end, hunks, threads, spots) = KEPT.with(|k| {
+    let (mut visible, top, end, hunks, threads, spots) = KEPT.with(|k| {
         let mut kept = k.borrow_mut();
         let stale = !matches!(&*kept, Some((at, _)) if *at == key);
         if stale {
@@ -398,9 +386,9 @@ fn draw_diff(
         let end = drawn.lines.len().saturating_sub(page);
         // The screen follows the cursor.
         let top = follow(view.line, view.scroll, page).min(end);
-        let shown: Vec<Line> = drawn.lines[top..].iter().take(page).cloned().collect();
+        let visible: Vec<Line> = drawn.lines[top..].iter().take(page).cloned().collect();
         (
-            shown,
+            visible,
             top,
             end,
             drawn.hunks.clone(),
@@ -418,14 +406,14 @@ fn draw_diff(
     } else {
         t.dim.add_modifier(Modifier::REVERSED)
     };
-    for (i, l) in shown.iter_mut().enumerate() {
+    for (i, l) in visible.iter_mut().enumerate() {
         if (lo..=hi).contains(&(top + i)) {
             for s in &mut l.spans {
                 s.style = s.style.patch(mark);
             }
         }
     }
-    f.render_widget(Paragraph::new(shown), inner);
+    f.render_widget(Paragraph::new(visible), inner);
     out.end = end;
     out.page = page;
     out.hunks = hunks;

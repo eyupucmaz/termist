@@ -2634,7 +2634,7 @@ mod tests {
 
     #[test]
     fn mercek_takes_clicks_and_the_wheel_where_they_are() {
-        use crate::prs::diff::Panel;
+        use crate::diff::Panel;
         use ratatui::crossterm::event::MouseEventKind as Kind;
         let mut app = mercek_fixture();
         let open = |app: &App| detail(app).diff.clone().unwrap();
