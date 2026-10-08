@@ -190,14 +190,25 @@ pub fn read(path: &Path, mode: DiffMode, base: Option<&str>, git: Git) -> Result
             &since,
         ],
     )?;
-    let mut files = split(&out);
+    // Known files from the diff, new ones by name: only those kept are read.
     let others = git(&root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for name in others.split('\0').filter(|n| !n.is_empty()) {
-        files.push(new_file(&root, name));
-    }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    let more = files.len().saturating_sub(MAX_FILES) as u32;
-    files.truncate(MAX_FILES);
+    let mut all: Vec<(String, Option<DiffFile>)> = split(&out)
+        .into_iter()
+        .map(|f| (f.path.clone(), Some(f)))
+        .chain(
+            others
+                .split('\0')
+                .filter(|n| !n.is_empty())
+                .map(|n| (n.to_string(), None)),
+        )
+        .collect();
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    let more = all.len().saturating_sub(MAX_FILES) as u32;
+    all.truncate(MAX_FILES);
+    let mut files: Vec<DiffFile> = all
+        .into_iter()
+        .map(|(name, known)| known.unwrap_or_else(|| new_file(&root, &name)))
+        .collect();
     let mut bytes = 0;
     for f in &mut files {
         if let Patch::Text(t) = &f.patch {
@@ -226,8 +237,16 @@ pub fn read(path: &Path, mode: DiffMode, base: Option<&str>, git: Git) -> Result
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many new files `new_file` read, for the tests.
+    static NEW_FILES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A file git does not know yet, as a diff that adds every line of it.
 fn new_file(root: &Path, name: &str) -> DiffFile {
+    #[cfg(test)]
+    NEW_FILES_READ.with(|n| n.set(n.get() + 1));
     let path = root.join(name);
     let mut file = DiffFile {
         path: name.to_string(),
@@ -642,6 +661,30 @@ index 9999999..aaaaaaa 100644
         }
         let r = read(&site, DiffMode::Uncommitted, None, &git).unwrap();
         assert_eq!((r.data.files.len(), r.data.more), (MAX_FILES, 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_new_files_kept_are_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = repo(tmp.path());
+        for n in 0..MAX_FILES + 100 {
+            std::fs::write(site.join(format!("f{n:03}.txt")), "x\n").unwrap();
+        }
+        NEW_FILES_READ.with(|n| n.set(0));
+        let r = read(
+            &site,
+            DiffMode::Uncommitted,
+            None,
+            &crate::github::worktree::git_raw,
+        )
+        .unwrap();
+        assert_eq!((r.data.files.len(), r.data.more), (MAX_FILES, 100));
+        assert_eq!(
+            NEW_FILES_READ.with(|n| n.get()),
+            MAX_FILES,
+            "the rest are counted, not read"
+        );
     }
 
     #[cfg(unix)]

@@ -162,17 +162,8 @@ impl Registry {
             Ok(mut read) => {
                 let marks = self.store.reviewed(&read.root).unwrap_or_default();
                 mirror::mark(&mut read.data, &read.hashes, &marks);
-                // The whole branch, all of it read: a mark on a file not in it is gone.
-                let whole = key.1 == DiffMode::Branch
-                    && read.data.more == 0
-                    && !read.data.base.starts_with("HEAD");
-                if whole {
-                    let files: Vec<String> =
-                        read.data.files.iter().map(|f| f.path.clone()).collect();
-                    if let Err(e) = self.store.keep_reviewed(&read.root, &files) {
-                        tracing::warn!(error = %e, "could not forget reviewed marks");
-                    }
-                }
+                // Marks stay when files leave the diff (a stash, a branch switched for a
+                // while): one back as it was marked is reviewed again. Only `X` takes them.
                 marked = Some(read.root.clone());
                 let looked = self.looked.get_mut(&key).expect("looked at above");
                 looked.root = Some(read.root);
@@ -585,27 +576,35 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_file_gone_from_the_branch_s_diff_loses_its_mark_but_not_from_the_uncommitted() {
+    async fn a_stash_by_the_agent_does_not_take_the_marks_and_a_pop_brings_them_back() {
         let tmp = tempfile::tempdir().unwrap();
         let site = site(tmp.path());
         let (store, _) = kept(&site);
         let mut reg = registry_on(store);
         let mut done = reg.mirror_rx.take().unwrap();
-        let _rx = connect(&mut reg);
+        let mut rx = connect(&mut reg);
         let root = place::resolved(&site);
         look(&mut reg, Some(&site), DiffMode::Branch);
         reg.mirrored(done.recv().await.unwrap(), Instant::now());
         mark(&mut reg, &site, "a.txt", true);
-        // Committed: not in the uncommitted diff, but still reviewed.
-        run_git(&site, &["commit", "-q", "-am", "two"]);
-        look(&mut reg, Some(&site), DiffMode::Uncommitted);
-        reg.mirrored(done.recv().await.unwrap(), Instant::now());
-        assert_eq!(reg.store.reviewed(&root).unwrap().len(), 1);
-        // Undone on the branch: out of its whole diff, so the mark goes.
-        run_git(&site, &["revert", "--no-edit", "HEAD"]);
+        // The agent stashes: a.txt is out of the whole branch's diff for a while.
+        run_git(&site, &["stash", "-q"]);
         look(&mut reg, Some(&site), DiffMode::Branch);
         reg.mirrored(done.recv().await.unwrap(), Instant::now());
-        assert!(reg.store.reviewed(&root).unwrap().is_empty());
+        assert_eq!(
+            reg.store.reviewed(&root).unwrap().len(),
+            1,
+            "the mark stays"
+        );
+        // And pops: as it was when marked, so reviewed again.
+        run_git(&site, &["stash", "pop", "-q"]);
+        events(&mut rx);
+        look(&mut reg, Some(&site), DiffMode::Branch);
+        reg.mirrored(done.recv().await.unwrap(), Instant::now());
+        assert_eq!(
+            viewed(&events(&mut rx)),
+            Some(vec![("a.txt".to_string(), Viewed::Viewed)])
+        );
     }
 
     #[cfg(unix)]

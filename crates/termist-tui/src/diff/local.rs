@@ -19,8 +19,19 @@ pub struct LocalView {
     /// What the daemon last said; `diff` stays the last one read when a read fails.
     pub state: ReadState,
     pub diff: Option<LocalDiffData>,
-    /// How many diffs came, so the drawn lines of an older one are not kept.
+    /// Which diff this is, of every one any view got: the drawn lines of an older one
+    /// (of this view, or of one opened before on the same folder) are not kept.
     pub reads: u64,
+}
+
+/// What the daemon says of a folder that is not in a git repository.
+pub const NO_REPO: &str = "not a git repository";
+
+/// Counts every diff that came, across views.
+static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_read() -> u64 {
+    READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 impl LocalView {
@@ -48,7 +59,7 @@ impl LocalView {
         if let Some(diff) = diff {
             self.view.settle(&diff.files);
             self.diff = Some(diff);
-            self.reads += 1;
+            self.reads = next_read();
         }
     }
 
@@ -60,7 +71,7 @@ impl LocalView {
         };
         self.state = ReadState::Reading;
         self.diff = None;
-        self.reads += 1;
+        self.reads = next_read();
     }
 }
 

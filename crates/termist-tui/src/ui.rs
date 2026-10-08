@@ -3203,6 +3203,47 @@ mod tests {
     }
 
     #[test]
+    fn ayna_opened_again_on_the_same_folder_draws_what_it_says_now() {
+        use termist_core::github::{DiffFile, Patch, Viewed};
+        use termist_core::{DiffMode, LocalDiffData, ReadState};
+        let mut app = fixture();
+        let read = |app: &mut App, line: &str| {
+            app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+            let path = match &app.view {
+                View::Diff(l) => l.path.clone(),
+                other => panic!("{other:?}"),
+            };
+            app.on_event(ServerEvent::LocalDiff {
+                path,
+                mode: DiffMode::Branch,
+                state: ReadState::Ready,
+                diff: Some(Box::new(LocalDiffData {
+                    head: "fix".into(),
+                    base: "main".into(),
+                    dirty: true,
+                    files: vec![DiffFile {
+                        path: "src/a.rs".into(),
+                        previous: None,
+                        change: 'M',
+                        additions: 1,
+                        deletions: 0,
+                        viewed: Viewed::Unviewed,
+                        patch: Patch::Text(format!("@@ -1 +1,2 @@\n a\n+{line}")),
+                        url: String::new(),
+                    }],
+                    more: 0,
+                })),
+            });
+            screen(&render(app, 110, 16))
+        };
+        assert!(read(&mut app, "FIRST").contains("FIRST"));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // The agent changed the file meanwhile: the second look shows the change.
+        let text = read(&mut app, "SECOND");
+        assert!(text.contains("SECOND") && !text.contains("FIRST"), "{text}");
+    }
+
+    #[test]
     fn ayna_shows_a_folder_s_diff_with_its_reviewed_files() {
         let mut app = ayna_fixture();
         insta::assert_snapshot!("ayna_branch", render(&mut app, 110, 16).backend());

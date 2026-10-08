@@ -1,6 +1,7 @@
 use crate::bands::Slot;
 use crate::browse::Listing;
 use crate::diff::DiffAction;
+use crate::diff::local as mirror;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
@@ -31,7 +32,7 @@ use termist_core::{
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
     attention_order, next_in_attention,
 };
-use termist_core::{DiffMode, Scroll, TermColors};
+use termist_core::{DiffMode, ReadState, Scroll, TermColors};
 use termist_scenes::{Scene, TimeOfDay};
 
 /// What ←/→ steps through for the idle screen, in minutes; 0 is off.
@@ -811,7 +812,19 @@ impl App {
                     && l.path == path
                     && l.mode == mode
                 {
-                    l.arrived(state, diff.map(|d| *d));
+                    // Not a repo: nothing to show; the grid stays, a toast says why.
+                    let no_repo =
+                        matches!(&state, ReadState::Failed(why) if why == mirror::NO_REPO);
+                    if no_repo && diff.is_none() && l.diff.is_none() {
+                        actions.extend(self.close_local_diff());
+                        self.toasts.push(Toast {
+                            text: format!("✗ {}", mirror::NO_REPO),
+                            kind: ToastKind::Failed,
+                            until: Instant::now() + toast::AGENT_FOR,
+                        });
+                    } else {
+                        l.arrived(state, diff.map(|d| *d));
+                    }
                 }
             }
             ServerEvent::RemoveFailed { path, message } => {
@@ -6702,6 +6715,36 @@ mod tests {
         );
         assert_eq!(app.view, View::Grid);
         assert_eq!(app.selected, Some(s[1].id), "on the card it came from");
+    }
+
+    #[test]
+    fn g_on_a_folder_that_is_no_repo_says_so_and_stays_on_the_grid() {
+        use termist_core::{DiffMode, ReadState};
+        let (mut app, s, _) = linked();
+        app.select(s[0].id);
+        app.on_key(k(K::Char('g')));
+        let actions = app.on_event(ServerEvent::LocalDiff {
+            path: "/w/site".into(),
+            mode: DiffMode::Branch,
+            state: ReadState::Failed("not a git repository".into()),
+            diff: None,
+        });
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetLocalDiff {
+                path: None,
+                mode: DiffMode::Branch
+            }],
+            "nothing to watch"
+        );
+        assert!(
+            app.toasts
+                .items()
+                .any(|t| t.text == "✗ not a git repository"),
+            "a toast says why"
+        );
+        assert_eq!(app.selected, Some(s[0].id));
     }
 
     #[test]

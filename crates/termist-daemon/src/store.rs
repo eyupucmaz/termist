@@ -731,19 +731,6 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets the marks of files no longer in the diff of `worktree`.
-    pub fn keep_reviewed(&self, worktree: &Path, files: &[String]) -> anyhow::Result<()> {
-        let gone: Vec<String> = self
-            .reviewed(worktree)?
-            .into_keys()
-            .filter(|f| !files.contains(f))
-            .collect();
-        for file in gone {
-            self.set_reviewed(worktree, &file, None)?;
-        }
-        Ok(())
-    }
-
     pub fn set_repo_visible(&self, id: RepoId, visible: bool) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE gh_repo SET visible = ?2 WHERE id = ?1",
@@ -1446,15 +1433,6 @@ mod tests {
         assert_eq!(marks["src/a.rs"], "a2", "marked again: the newer content");
         store.set_reviewed(site, "src/b.rs", None).unwrap();
         assert_eq!(store.reviewed(site).unwrap().len(), 1, "unmarked");
-        // A file gone from the diff loses its mark; others stay.
-        store.set_reviewed(site, "src/c.rs", Some("ccc")).unwrap();
-        store
-            .keep_reviewed(site, &["src/c.rs".to_string()])
-            .unwrap();
-        assert_eq!(
-            store.reviewed(site).unwrap().keys().collect::<Vec<_>>(),
-            ["src/c.rs"]
-        );
         let all = store.all_reviewed().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[&docs.to_path_buf()]["README.md"], "rrr");
