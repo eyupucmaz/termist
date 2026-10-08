@@ -160,11 +160,14 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `n` / `t` | new agent session / new shell, in the selected card's worktree |
 | `W` / `X` | the worktrees: show, hide, remove / remove the selected one (asks; the branch stays) |
 | `g` | what the selected card's branch changed, file by file (`Ctrl+a g` while typing into it) |
+| `O` / `L` | the card's folder in your editor / lazygit there, as a card |
+| `f` / `F` | find a file / the lines with some text (`git grep`); `Enter` opens it in your editor |
 | `Enter` | type into the selected card (`Ctrl+a Esc` back to the grid) |
 | `Space` | send a follow-up to a card without entering it |
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
-| wheel, `PgUp` | scroll back through a session's output (`Ctrl+a [` while typing into it); `q` back to live |
+| wheel | scroll back through a session's output |
+| `PgUp` | copy mode (`Ctrl+a [` while typing into it): `hjkl` `w` `b` move, `v` / `V` select, `y` copy, `/` `?` search, `q` back to live |
 | drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
 | `v` / `R` | the project's pull requests (on the selected card's, if it has one) / read GitHub again |
 | `V` | the selected card's pull request in the browser |
@@ -199,6 +202,19 @@ made outside termist too, to show one as a band or hide it.
 ```toml
 [agents]
 new_worktree_by_default = false   # the new-task prompt starts with Ctrl+N on
+```
+
+### Tools
+
+`O` opens the card's folder in your editor, and a file found with `f` (a file of the repo) or `F` (the
+lines with some text, through `git grep`) at its line. The editor is `editor` in config.toml, else
+`$VISUAL` or `$EDITOR`, else the first of `code`, `cursor`, `zed` found. One that runs in a terminal
+(`nvim`, `vim`, `hx`, `emacs`…) opens as a card you type into, gone when you quit it; `L` opens lazygit
+the same way. `PgUp` (`Ctrl+a [` while typing into a card) is copy mode: a cursor over the session's
+history moved as in vi, `v` or `V` to select, `y` to copy, `/` and `?` to search all of it.
+
+```toml
+editor = "nvim"   # or "code", "zed --wait", …
 ```
 
 `g` shows what the selected card's branch changed: the files as a tree beside one file's changes, as
