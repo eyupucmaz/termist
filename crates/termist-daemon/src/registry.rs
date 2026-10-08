@@ -1886,10 +1886,23 @@ impl Registry {
             None => root,
             Some(dir) => self.folder_of(project, &root, dir)?,
         };
+        // A tool named, not given as a path, is looked up as a CLI is (the login
+        // shell's PATH too); its card keeps the name.
+        let started = match &kind {
+            SessionKind::Tool { program, args } if !program.contains(['/', '\\']) => {
+                let found = (self.find_program)(program)
+                    .ok_or_else(|| anyhow::anyhow!("{program} not found"))?;
+                SessionKind::Tool {
+                    program: found.display().to_string(),
+                    args: args.clone(),
+                }
+            }
+            _ => kind.clone(),
+        };
         let id = SessionId::new();
         let launch = self.launcher.launch(LaunchRequest {
             id,
-            kind: &kind,
+            kind: &started,
             prompt: prompt.as_deref(),
             model: model.as_deref(),
             effort: effort.as_deref(),
@@ -2243,6 +2256,34 @@ mod tests {
         assert!(reg.sessions.is_empty(), "gone when it ends");
         assert_eq!(rx.try_recv().unwrap(), ServerEvent::SessionRemoved(s.id));
         assert!(reg.store.load().unwrap().1.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tool_is_looked_up_like_a_cli_and_its_card_keeps_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = ProjectInfo {
+            path: dir.path().to_path_buf(),
+            ..project()
+        };
+        let mut reg = registry_with(&p, &[]);
+        let lazygit = || SessionKind::Tool {
+            program: "lazygit".into(),
+            args: vec![],
+        };
+        reg.find_program = |_| None;
+        let err = reg
+            .create_session(p.id, lazygit(), None, None, None, None, (80, 24))
+            .unwrap_err();
+        assert_eq!(format!("{err:#}"), "lazygit not found");
+        reg.find_program = |n| (n == "lazygit").then(|| PathBuf::from("/bin/sh"));
+        reg.create_session(p.id, lazygit(), None, None, None, None, (80, 24))
+            .unwrap();
+        let card = &reg.sessions[0].info;
+        assert_eq!(
+            (card.kind.clone(), card.name.as_str()),
+            (lazygit(), "lazygit-1")
+        );
     }
 
     #[cfg(unix)]

@@ -162,6 +162,10 @@ pub struct App {
     /// Each CLI's own model list per harness, as the daemon last sent it.
     pub model_catalogs: HashMap<Harness, Vec<ModelInfo>>,
     focus_next_created: bool,
+    /// The card selected when a tool was asked for, and the tool's card with it once it
+    /// came: when the tool ends, the selection goes back there.
+    tool_from: Option<SessionId>,
+    tool_back: Option<(SessionId, SessionId)>,
     resume_pending: Option<SessionId>,
     /// A project asked to be opened (or a folder added); switched to when it arrives.
     project_pending: Option<ProjectPending>,
@@ -306,6 +310,8 @@ impl App {
             recent_models: HashMap::new(),
             model_catalogs: HashMap::new(),
             focus_next_created: false,
+            tool_from: None,
+            tool_back: None,
             resume_pending: None,
             project_pending: None,
             config,
@@ -615,6 +621,17 @@ impl App {
                 }
                 if !known && self.focus_next_created {
                     self.focus_next_created = false;
+                    // A tool goes back to where it was opened from when it ends.
+                    if matches!(
+                        self.state
+                            .sessions
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| &s.kind),
+                        Some(SessionKind::Tool { .. })
+                    ) {
+                        self.tool_back = self.tool_from.take().map(|from| (id, from));
+                    }
                     self.arrived(id);
                 }
                 self.repair_selection();
@@ -649,6 +666,10 @@ impl App {
                 }
             }
             ServerEvent::SessionRemoved(id) => {
+                let back = self
+                    .tool_back
+                    .filter(|(tool, _)| *tool == id)
+                    .map(|(_, from)| from);
                 self.state.sessions.retain(|s| s.id != id);
                 self.screens.remove(&id);
                 if self.attached == Some(id) {
@@ -662,6 +683,12 @@ impl App {
                 }
                 if matches!(self.mode, Mode::ConfirmKill(x) | Mode::ConfirmArchive(x) if x == id) {
                     self.mode = Mode::Grid;
+                }
+                if let Some(from) =
+                    back.filter(|from| self.state.sessions.iter().any(|s| s.id == *from))
+                {
+                    self.tool_back = None;
+                    self.select(from);
                 }
                 self.repair_selection();
             }
@@ -827,9 +854,17 @@ impl App {
                     }
                 }
             }
-            // The tools come in later changes.
-            ServerEvent::EditorFailed { .. }
-            | ServerEvent::Files { .. }
+            ServerEvent::EditorFailed { message } => {
+                self.focus_next_created = false;
+                self.tool_from = None;
+                self.toasts.push(Toast {
+                    text: format!("✗ {message}"),
+                    kind: ToastKind::Failed,
+                    until: Instant::now() + toast::AGENT_FOR,
+                });
+            }
+            // The finders and copy mode come in later changes.
+            ServerEvent::Files { .. }
             | ServerEvent::GrepResults { .. }
             | ServerEvent::FindFailed { .. }
             | ServerEvent::CopiedText { .. }
@@ -3227,6 +3262,22 @@ impl App {
     /// `g`: the diff of the selection's folder: a band's stand-in's worktree, else the
     /// card's worktree or folder, else the project's.
     fn open_local_diff(&mut self) -> Vec<Action> {
+        let Some(path) = self.selection_folder() else {
+            return vec![];
+        };
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.view = View::Diff(crate::diff::local::LocalView::new(path.clone()));
+        actions.push(Action::Send(ClientRequest::SetLocalDiff {
+            path: Some(path),
+            mode: DiffMode::Branch,
+        }));
+        actions
+    }
+
+    /// The selection's folder, for `g`, `L`, `O`, `f` and `F`: a band's stand-in's
+    /// worktree, else the card's worktree or folder, else the project's.
+    fn selection_folder(&self) -> Option<PathBuf> {
         let card = self
             .selected
             .and_then(|id| self.state.sessions.iter().find(|s| s.id == id))
@@ -3238,17 +3289,65 @@ impl App {
             .project
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
             .map(|p| p.path.clone());
-        let Some(path) = self.empty_worktree().map(|(p, _)| p).or(card).or(project) else {
+        self.empty_worktree().map(|(p, _)| p).or(card).or(project)
+    }
+
+    /// `L`: lazygit in the selection's folder, as a card typed into at once.
+    fn open_lazygit(&mut self) -> Vec<Action> {
+        let (Some(project), Some(folder)) = (self.project, self.selection_folder()) else {
             return vec![];
         };
-        let mut actions = self.stop_scrolling();
-        self.mode = Mode::Grid;
-        self.view = View::Diff(crate::diff::local::LocalView::new(path.clone()));
-        actions.push(Action::Send(ClientRequest::SetLocalDiff {
-            path: Some(path),
-            mode: DiffMode::Branch,
-        }));
-        actions
+        self.focus_next_created = true;
+        self.tool_from = self.selected;
+        let (cols, rows) = self.pane;
+        vec![Action::Send(ClientRequest::CreateSession {
+            project,
+            kind: SessionKind::Tool {
+                program: "lazygit".into(),
+                args: vec![],
+            },
+            cwd: Some(folder),
+            prompt: None,
+            model: None,
+            effort: None,
+            cols: cols.max(20),
+            rows: rows.max(5),
+        })]
+    }
+
+    /// The editor the user asked for: config.toml's, else `$VISUAL`, else `$EDITOR`.
+    fn preferred_editor(&self) -> Option<String> {
+        self.config
+            .editor
+            .clone()
+            .or_else(|| std::env::var("VISUAL").ok())
+            .or_else(|| std::env::var("EDITOR").ok())
+            .filter(|e| !e.trim().is_empty())
+    }
+
+    /// `O`, and a finder's result: the selection's folder, or a file in it at a line,
+    /// in the editor. A terminal one comes back as a card to type into.
+    fn open_editor(
+        &mut self,
+        folder: PathBuf,
+        file: Option<String>,
+        line: Option<u32>,
+    ) -> Vec<Action> {
+        let Some(project) = self.project else {
+            return vec![];
+        };
+        let editor = self.preferred_editor();
+        if !termist_core::gui_editor(editor.as_deref()) {
+            self.focus_next_created = true;
+            self.tool_from = self.selected;
+        }
+        vec![Action::Send(ClientRequest::OpenInEditor {
+            project,
+            folder,
+            file,
+            line,
+            editor,
+        })]
     }
 
     /// Back to the grid from a folder's diff; the daemon stops watching the folder.
@@ -3409,6 +3508,12 @@ impl App {
             }
             KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::LocalDiff => return self.open_local_diff(),
+            KeyAction::Lazygit => return self.open_lazygit(),
+            KeyAction::Editor => {
+                if let Some(folder) = self.selection_folder() {
+                    return self.open_editor(folder, None, None);
+                }
+            }
             KeyAction::NewShell => return self.create(SessionKind::Shell),
             KeyAction::FollowUp => self.open_follow_up(),
             KeyAction::Rename => self.open_rename(),
@@ -6722,6 +6827,72 @@ mod tests {
         );
         assert_eq!(app.view, View::Grid);
         assert_eq!(app.selected, Some(s[1].id), "on the card it came from");
+    }
+
+    fn tool_card(project: ProjectId, name: &str, program: &str) -> SessionInfo {
+        let mut s = session(project, name, AgentStatus::Fresh);
+        s.kind = SessionKind::Tool {
+            program: program.into(),
+            args: vec![],
+        };
+        s
+    }
+
+    #[test]
+    fn l_opens_lazygit_in_the_card_s_folder_and_its_end_comes_back_to_the_card() {
+        let (mut app, s, _) = linked();
+        let project = app.state.projects[0].id;
+        app.select(s[1].id);
+        let actions = app.on_key(k(K::Char('L')));
+        assert!(matches!(
+            sent(&actions)[..],
+            [ClientRequest::CreateSession { kind: SessionKind::Tool { program, .. }, cwd: Some(cwd), .. }]
+                if program == "lazygit" && cwd.as_path() == std::path::Path::new("/w/site-worktrees/fix")
+        ));
+        let tool = tool_card(project, "lazygit-3", "lazygit");
+        app.on_event(ServerEvent::SessionUpdated(tool.clone()));
+        assert_eq!(
+            (app.selected, app.mode),
+            (Some(tool.id), Mode::Focus),
+            "typed into at once"
+        );
+        app.on_event(ServerEvent::SessionRemoved(tool.id));
+        assert_eq!(
+            (app.selected, app.mode),
+            (Some(s[1].id), Mode::Grid),
+            "back on the card it was opened from"
+        );
+    }
+
+    #[test]
+    fn o_opens_the_folder_in_the_editor_and_a_terminal_one_comes_as_a_card() {
+        let (mut app, s, _) = linked();
+        let project = app.state.projects[0].id;
+        app.select(s[1].id);
+        app.config.editor = Some("code".into());
+        let actions = app.on_key(k(K::Char('O')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::OpenInEditor {
+                project,
+                folder: "/w/site-worktrees/fix".into(),
+                file: None,
+                line: None,
+                editor: Some("code".into()),
+            }]
+        );
+        assert!(
+            !app.focus_next_created,
+            "a window of its own: no card to wait for"
+        );
+        app.config.editor = Some("nvim".into());
+        app.on_key(k(K::Char('O')));
+        assert!(app.focus_next_created, "a terminal editor comes as a card");
+        app.on_event(ServerEvent::EditorFailed {
+            message: "nvim not found".into(),
+        });
+        assert!(!app.focus_next_created);
+        assert!(app.toasts.items().any(|t| t.text == "✗ nvim not found"));
     }
 
     #[test]

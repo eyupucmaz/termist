@@ -3,21 +3,7 @@
 use std::path::{Path, PathBuf};
 
 /// Editors with windows of their own; any other runs in a terminal.
-pub const GUI: &[&str] = &[
-    "code",
-    "code-insiders",
-    "codium",
-    "cursor",
-    "windsurf",
-    "zed",
-    "subl",
-    "idea",
-    "goland",
-    "webstorm",
-    "pycharm",
-    "rustrover",
-    "fleet",
-];
+pub use termist_core::GUI_EDITORS as GUI;
 
 /// Looked for, in order, when the user named no editor.
 pub const FALLBACK: &[&str] = &["code", "cursor", "zed"];

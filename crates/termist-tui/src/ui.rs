@@ -712,8 +712,13 @@ fn draw_card(
             Span::styled(format!("{glyph} "), Style::default().fg(color)),
             Span::raw(name.to_string()),
         ]),
+        // A tool says what it opened; the rest how they are.
         Line::from(Span::styled(
-            format!("{} · {word}", s.kind.label()),
+            format!(
+                "{} · {}",
+                s.kind.label(),
+                s.kind.opens(&s.cwd).unwrap_or_else(|| word.to_string())
+            ),
             theme.dim,
         )),
     ];
@@ -2145,7 +2150,7 @@ mod tests {
         let mut app = fixture();
         app.keymap = Keymap::from_config(&keys, "C-Space").0;
         app.on_key(key(K::Char('?')));
-        let text = screen_text(&render(&mut app, 80, 60));
+        let text = screen_text(&render(&mut app, 80, 66));
         assert!(
             text.contains("g            new task: prompt, CLI, model"),
             "{text}"
@@ -3200,6 +3205,23 @@ mod tests {
             diff: Some(Box::new(diff)),
         });
         app
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_card_says_what_it_opened() {
+        let mut app = fixture();
+        let mut tool = app.state.sessions[0].clone();
+        tool.id = SessionId::new();
+        tool.name = "nvim-9".into();
+        tool.cwd = "/p".into();
+        tool.kind = SessionKind::Tool {
+            program: "/opt/bin/nvim".into(),
+            args: vec!["+42".into(), "/p/src/a.rs".into()],
+        };
+        app.on_event(ServerEvent::SessionUpdated(tool));
+        let text = screen(&render(&mut app, 120, 30));
+        assert!(text.contains("nvim · src/a.rs:42"), "{text}");
     }
 
     #[test]
