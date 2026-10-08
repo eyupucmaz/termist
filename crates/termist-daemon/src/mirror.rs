@@ -487,6 +487,7 @@ index 9999999..aaaaaaa 100644
         assert_eq!(one[0].path, "x");
     }
 
+    #[cfg(unix)]
     fn run(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])

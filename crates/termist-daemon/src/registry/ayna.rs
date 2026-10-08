@@ -294,7 +294,8 @@ impl Registry {
     }
 }
 
-#[cfg(test)]
+// Each of these runs git.
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::tests::{connect, registry_on, run_git};
     use super::*;
