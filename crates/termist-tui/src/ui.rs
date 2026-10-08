@@ -557,6 +557,23 @@ fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: R
         )
     });
     let stat_short = stat.map(|s| format!("+{}−{}{}", s.added, s.removed, dirty(&s).trim()));
+    // How much of it was reviewed (`g`, `Ctrl+r`): in words, then short.
+    let reviewed = stat
+        .zip(band.worktree.map(|w| w.reviewed))
+        .filter(|(_, n)| *n > 0)
+        .map(|(s, n)| (n.min(s.files), s.files));
+    let with_review = |words: bool| {
+        let (stat, (n, of)) = (stat_full.as_ref()?, reviewed?);
+        Some(match (words, n == of) {
+            (true, true) => format!("{stat} · reviewed ✓"),
+            (true, false) => format!("{stat} · {n}/{of} reviewed"),
+            (false, true) => format!("{stat} ✓"),
+            (false, false) => format!("{stat} {n}/{of} ✓"),
+        })
+    };
+    let (review_full, review_short) = (with_review(true), with_review(false));
+    let stat_plain = stat_full.clone();
+    let stat_full = review_full.clone().or(stat_full);
     // The open pull request on the branch, or how the last one ended.
     let open = band.place.and_then(|place| {
         let pr = place.pr?;
@@ -618,9 +635,14 @@ fn draw_band_header(f: &mut Frame, app: &App, band: &crate::bands::Band, area: R
     let mut tries = vec![
         variant(stat_full.as_ref(), true, true),
         variant(stat_full.as_ref(), false, true),
-        variant(stat_short.as_ref(), false, false),
-        variant(None, false, false),
     ];
+    // The review in short, then none, before the summary is cut.
+    if let Some(short) = &review_short {
+        tries.push(variant(Some(short), false, true));
+        tries.push(variant(stat_plain.as_ref(), false, true));
+    }
+    tries.push(variant(stat_short.as_ref(), false, false));
+    tries.push(variant(None, false, false));
     // The full one with its title cut to fit, before dropping the title.
     if let Some((_, summary)) = open {
         let (spans, at) = variant(stat_full.as_ref(), false, true);
@@ -1518,6 +1540,40 @@ mod tests {
         // Narrower than the full line: the title goes first.
         let text = screen_text(&render(&mut app, 60, 40));
         assert!(text.contains(" ⎇ fix/login · 3 files +60 −28 ● · #212 Login redirect l… ✓ "));
+    }
+
+    #[test]
+    fn a_band_says_how_much_of_its_branch_was_reviewed() {
+        let mut app = banded(0);
+        with_worktrees(&mut app);
+        let reviewed = |app: &mut App, n| {
+            let project = app.state.projects[0].id;
+            let mut list = app.project_worktrees().to_vec();
+            list[0].reviewed = n;
+            app.on_event(ServerEvent::Worktrees { project, list });
+        };
+        reviewed(&mut app, 2);
+        let text = screen_text(&render(&mut app, 160, 40));
+        assert!(
+            text.contains(" ⎇ fix/login · 3 files +60 −28 ● · 2/3 reviewed · #212 Login"),
+            "{text}"
+        );
+        reviewed(&mut app, 3);
+        let text = screen_text(&render(&mut app, 160, 40));
+        assert!(
+            text.contains("3 files +60 −28 ● · reviewed ✓ · #212"),
+            "{text}"
+        );
+        // Narrower: the word goes before the summary does.
+        reviewed(&mut app, 2);
+        let text = screen_text(&render(&mut app, 52, 40));
+        assert!(
+            text.contains(" ⎇ fix/login · 3 files +60 −28 ● 2/3 ✓ · #212"),
+            "{text}"
+        );
+        // Nothing reviewed: nothing said.
+        reviewed(&mut app, 0);
+        assert!(!screen_text(&render(&mut app, 160, 40)).contains("reviewed"));
     }
 
     #[test]
