@@ -89,6 +89,17 @@ pub fn default_branch(repo: &Path, git: Git) -> String {
         .unwrap_or_else(|| "main".into())
 }
 
+/// What a branch of the repo is measured from when nothing else is known: the default
+/// branch's `origin/` one, else the local one.
+pub fn base_ref(repo: &Path, git: Git) -> String {
+    let default = default_branch(repo, git);
+    let origin = format!("origin/{default}");
+    match git(repo, &["rev-parse", "--verify", "--quiet", &origin]) {
+        Ok(_) => origin,
+        Err(_) => default,
+    }
+}
+
 /// What the worktree at `path` changed since it left `base` (a ref), the uncommitted
 /// too; `None` when there is no merge base.
 pub fn stat(path: &Path, base: &str, git: Git) -> Option<Stat> {
@@ -125,12 +136,7 @@ pub fn scan(
     git: Git,
 ) -> Option<Vec<(Listed, Option<Stat>)>> {
     let list = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
-    let default = default_branch(repo, git);
-    let origin = format!("origin/{default}");
-    let fallback = match git(repo, &["rev-parse", "--verify", "--quiet", &origin]) {
-        Ok(_) => origin,
-        Err(_) => default,
-    };
+    let fallback = base_ref(repo, git);
     let own = crate::place::resolved(own);
     Some(
         parse_list(&list)

@@ -145,6 +145,11 @@ pub fn free(dir: &Path) -> PathBuf {
 
 /// Git as a program; what it said on failure, first line.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_raw(dir, args).map(|out| out.trim().to_string())
+}
+
+/// `git`, its output as it is: a diff's last line may end in a space.
+pub fn git_raw(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut all = vec!["-C".to_string(), dir.to_string_lossy().into_owned()];
     all.extend(args.iter().map(|a| a.to_string()));
     let all: Vec<&str> = all.iter().map(String::as_str).collect();
@@ -152,7 +157,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         termist_platform::process::run(Path::new("git"), &all, &[], None, Duration::from_secs(60))
             .map_err(|e| format!("could not run git: {e:?}"))?;
     if out.success {
-        return Ok(out.stdout.trim().to_string());
+        return Ok(out.stdout);
     }
     Err(out
         .stderr

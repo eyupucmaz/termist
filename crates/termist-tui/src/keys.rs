@@ -28,6 +28,8 @@ pub enum Action {
     RemoveWorktree,
     /// The project's worktrees: show, hide, remove.
     Worktrees,
+    /// The selected card's folder's diff (Ayna).
+    LocalDiff,
     NewShell,
     FollowUp,
     Rename,
@@ -78,6 +80,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     SameTask,
     Worktrees,
     RemoveWorktree,
+    LocalDiff,
     Left,
     Down,
     Up,
@@ -116,6 +119,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     QuickPrompt,
     Palette,
     PullRequests,
+    LocalDiff,
     NextAttention,
     PrevAttention,
     NewSession,
@@ -141,6 +145,7 @@ impl Action {
             SameTask => "same_task",
             Worktrees => "worktrees",
             RemoveWorktree => "remove_worktree",
+            LocalDiff => "local_diff",
             NewShell => "new_shell",
             FollowUp => "follow_up",
             Rename => "rename",
@@ -190,6 +195,7 @@ impl Action {
             SameTask => "same task",
             Worktrees => "worktrees",
             RemoveWorktree => "remove worktree",
+            LocalDiff => "local diff",
             NewShell => "shell",
             FollowUp => "follow-up",
             Rename => "rename",
@@ -228,6 +234,7 @@ impl Action {
             SameTask => "new task like the card, in its worktree",
             Worktrees => "the worktrees: show, hide, remove",
             RemoveWorktree => "remove the worktree; the branch stays",
+            LocalDiff => "what the card's branch changed, file by file",
             NewShell => "new shell",
             FollowUp => "send the next instruction without entering",
             Rename => "rename the card",
@@ -429,6 +436,7 @@ impl Keymap {
             ("P", SameTask),
             ("W", Worktrees),
             ("X", RemoveWorktree),
+            ("g", LocalDiff),
             ("Space", FollowUp),
             ("Enter", Focus),
             ("/", Palette),
@@ -470,6 +478,7 @@ impl Keymap {
             ("p", QuickPrompt),
             ("/", Palette),
             ("v", PullRequests),
+            ("g", LocalDiff),
             (".", NextAttention),
             (",", PrevAttention),
             ("n", NewSession),
@@ -807,12 +816,12 @@ mod tests {
     fn overrides_are_what_differs_from_the_defaults() {
         let mut m = Keymap::defaults();
         assert!(m.overrides(Context::Grid).is_empty());
-        let g = KeySpec::parse("g").unwrap();
-        m.set_keys(Context::Grid, QuickPrompt, &[g]);
+        let b = KeySpec::parse("b").unwrap();
+        m.set_keys(Context::Grid, QuickPrompt, &[b]);
         assert_eq!(
             m.overrides(Context::Grid),
             [
-                ("g".to_string(), "quick_prompt".to_string()),
+                ("b".to_string(), "quick_prompt".to_string()),
                 ("p".into(), "none".into())
             ]
         );
@@ -824,7 +833,7 @@ mod tests {
             "C-a",
         );
         assert!(problems.is_empty());
-        assert_eq!(read_back.keys(Context::Grid, QuickPrompt), [g]);
+        assert_eq!(read_back.keys(Context::Grid, QuickPrompt), [b]);
         m.set_keys(Context::Grid, QuickPrompt, &[KeySpec::parse("p").unwrap()]);
         assert!(m.overrides(Context::Grid).is_empty(), "back to the default");
     }

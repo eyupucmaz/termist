@@ -8,7 +8,10 @@ use crate::store::{PROMPT_HISTORY_MAX, Store, StoredSession, StoredWorktree};
 use crate::transcript::TranscriptTail;
 use crate::worktrees::Listed;
 use crate::{claude, codex, opencode};
+
+mod ayna;
 use anyhow::{Context, bail};
+pub use ayna::Mirrored;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -45,6 +48,9 @@ pub struct WorktreeScan {
     /// The worktrees' generation when the scan started (see `Registry::worktree_epoch`).
     pub epoch: u64,
     pub found: Option<Vec<(Listed, Option<termist_core::Stat>)>>,
+    /// How many files marked reviewed in each worktree (by its resolved path) are
+    /// still as they were.
+    pub reviewed: HashMap<PathBuf, u32>,
 }
 
 /// A worktree made (or not) for a client's `CreateWorktree`.
@@ -195,6 +201,14 @@ pub struct Registry {
     fetch: fn(&Path, &[&str]) -> Result<String, String>,
     removed_tx: UnboundedSender<Removed>,
     removed_rx: Option<UnboundedReceiver<Removed>>,
+    /// Folders whose diff someone looks at (`g`), and where each client looks.
+    looked: HashMap<ayna::Key, ayna::Looked>,
+    looking: HashMap<ClientId, ayna::Key>,
+    mirror_tx: UnboundedSender<Mirrored>,
+    mirror_rx: Option<UnboundedReceiver<Mirrored>>,
+    /// How many files marked reviewed in each folder (by its resolved path) are still
+    /// as they were, for the bands.
+    reviewed_counts: HashMap<PathBuf, u32>,
 }
 
 impl Registry {
@@ -233,6 +247,7 @@ impl Registry {
         let (scans_tx, scans_rx) = tokio::sync::mpsc::unbounded_channel();
         let (made_tx, made_rx) = tokio::sync::mpsc::unbounded_channel();
         let (removed_tx, removed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mirror_tx, mirror_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
         let locate: Locate = Arc::new(move || {
             let program = gh_bin
@@ -287,6 +302,11 @@ impl Registry {
             fetch: crate::worktrees::fetch,
             removed_tx,
             removed_rx: Some(removed_rx),
+            looked: HashMap::new(),
+            looking: HashMap::new(),
+            mirror_tx,
+            mirror_rx: Some(mirror_rx),
+            reviewed_counts: HashMap::new(),
         }
     }
 
@@ -350,23 +370,35 @@ impl Registry {
             .into_iter()
             .filter_map(|w| Some((w.path, w.base?)))
             .collect();
+        let marks = self.store.all_reviewed().unwrap_or_default();
         for p in self.projects.iter().filter(|p| p.open) {
             for view in self.github.repo_views(p.id) {
                 if !self.scanning.insert(view.id) {
                     continue;
                 }
                 let (tx, bases, own) = (self.scans_tx.clone(), bases.clone(), p.path.clone());
+                let marks = marks.clone();
                 let (project, repo, path) = (p.id, view.id, view.path.clone());
                 let epoch = self.worktree_epoch;
                 tokio::task::spawn_blocking(move || {
                     let base = |w: &Path| bases.get(w).cloned();
                     let found =
                         crate::worktrees::scan(&path, &own, &base, &crate::github::worktree::git);
+                    let reviewed = found
+                        .iter()
+                        .flatten()
+                        .filter_map(|(w, _)| {
+                            let root = place::resolved(&w.path);
+                            let count = crate::mirror::count_reviewed(&root, marks.get(&root)?);
+                            Some((root, count))
+                        })
+                        .collect();
                     let _ = tx.send(WorktreeScan {
                         project,
                         repo,
                         epoch,
                         found,
+                        reviewed,
                     });
                 });
             }
@@ -382,6 +414,7 @@ impl Registry {
             self.scan_worktrees();
             return;
         }
+        self.reviewed_counts.extend(scan.reviewed);
         let Some(found) = scan.found else {
             return;
         };
@@ -590,6 +623,7 @@ impl Registry {
                     tracing::warn!(error = %e, "could not forget a worktree");
                 }
                 self.worktree_stats.remove(&r.path);
+                self.forget_reviewed(&place::resolved(&r.path));
                 // Its cards that stopped: their records stay, out of the grid.
                 let inside = |cwd: &Path| cwd.starts_with(&r.path);
                 let cards: Vec<SessionId> = self
@@ -638,6 +672,11 @@ impl Registry {
                     Some((number, self.github.pr_end(pr)?))
                 }),
                 stat: self.worktree_stats.get(&w.path).copied(),
+                reviewed: self
+                    .reviewed_counts
+                    .get(&place::resolved(&w.path))
+                    .copied()
+                    .unwrap_or(0),
                 path: w.path,
                 repo: w.repo,
                 branch: w.branch,
@@ -817,6 +856,7 @@ impl Registry {
             Msg::Disconnected(client) => {
                 self.clients.remove(&client);
                 self.github.gone(client);
+                self.stop_looking(client);
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
                         let _ = cmd.send(SessionCmd::Detach { client });
@@ -1179,6 +1219,12 @@ impl Registry {
                     self.send(client, ServerEvent::RemoveFailed { path, message: why });
                 }
             }
+            ClientRequest::SetLocalDiff { path, mode } => self.set_local_diff(client, path, mode),
+            ClientRequest::SetReviewed {
+                worktree,
+                file,
+                reviewed,
+            } => self.set_reviewed(&worktree, &file, reviewed),
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
@@ -1869,6 +1915,7 @@ pub async fn run(
     let mut scans = reg.scans_rx.take().expect("a registry runs once");
     let mut made = reg.made_rx.take().expect("a registry runs once");
     let mut removed = reg.removed_rx.take().expect("a registry runs once");
+    let mut mirrored = reg.mirror_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
     github_beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -1885,9 +1932,11 @@ pub async fn run(
             Some(scan) = scans.recv() => reg.worktrees_scanned(scan),
             Some(m) = made.recv() => reg.worktree_made(m),
             Some(r) = removed.recv() => reg.worktree_removed(r),
+            Some(m) = mirrored.recv() => reg.mirrored(m, std::time::Instant::now()),
             _ = github_beat.tick() => {
                 reg.github_tick();
                 reg.places_tick(std::time::Instant::now());
+                reg.look_tick(std::time::Instant::now());
             }
             _ = transcripts.tick() => {
                 reg.poll_transcripts();
@@ -1913,7 +1962,7 @@ mod tests {
         registry_on(store)
     }
 
-    fn registry_on(store: Store) -> Registry {
+    pub(super) fn registry_on(store: Store) -> Registry {
         let launcher = Launcher {
             config: DaemonConfig::default(),
             programs: HarnessPrograms {
@@ -1960,7 +2009,7 @@ mod tests {
         }
     }
 
-    fn connect(reg: &mut Registry) -> UnboundedReceiver<ServerEvent> {
+    pub(super) fn connect(reg: &mut Registry) -> UnboundedReceiver<ServerEvent> {
         let (out, rx) = unbounded_channel();
         reg.handle(Msg::Connected {
             client: ClientId(1),
@@ -2555,6 +2604,7 @@ mod tests {
             repo: repo.id,
             epoch: 0,
             found: Some(found),
+            reviewed: HashMap::new(),
         };
         reg.worktrees_scanned(scan(vec![
             (listed(&made, "fix"), Some(stat)),
@@ -2598,6 +2648,7 @@ mod tests {
             repo: repo.id,
             epoch: 0,
             found: None,
+            reviewed: HashMap::new(),
         });
         assert_eq!(
             reg.store.worktrees().unwrap().len(),
@@ -2837,6 +2888,7 @@ mod tests {
             repo: repo.id,
             epoch: 0,
             found: Some(vec![]),
+            reviewed: HashMap::new(),
         });
         assert_eq!(
             reg.store.worktrees().unwrap().len(),
@@ -2899,7 +2951,7 @@ mod tests {
 
     /// Runs git in `dir` for a test, as a nameless author; panics when it fails.
     #[cfg(unix)]
-    fn run_git(dir: &Path, args: &[&str]) {
+    pub(super) fn run_git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
             .arg(dir)

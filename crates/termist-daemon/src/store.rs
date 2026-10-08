@@ -10,7 +10,7 @@ use termist_core::{
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -103,6 +103,18 @@ CREATE TABLE worktrees (
     created_ms INTEGER NOT NULL
 );
 PRAGMA user_version = 5;
+";
+
+/// Files marked reviewed in a folder's diff (`g`, `Ctrl+r`), by what their content was
+/// then: a file whose content changed since is no longer reviewed.
+const MIGRATE_V6: &str = "
+CREATE TABLE reviewed (
+    worktree TEXT NOT NULL,
+    file TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (worktree, file)
+);
+PRAGMA user_version = 6;
 ";
 
 /// A worktree of one of a project's repos, as termist keeps it.
@@ -264,23 +276,31 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
             }
             1 => {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
             }
             2 => {
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
             }
             3 => {
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
             }
-            4 => Self::upgrade(&mut conn, MIGRATE_V5)?,
+            4 => {
+                Self::upgrade(&mut conn, MIGRATE_V5)?;
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
+            }
+            5 => Self::upgrade(&mut conn, MIGRATE_V6)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
@@ -649,11 +669,65 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the worktree, and the files marked reviewed in it.
     pub fn delete_worktree(&self, path: &Path) -> anyhow::Result<()> {
-        self.conn.execute(
-            "DELETE FROM worktrees WHERE path = ?1",
-            params![path.to_string_lossy()],
-        )?;
+        let path = path.to_string_lossy();
+        self.conn
+            .execute("DELETE FROM worktrees WHERE path = ?1", params![path])?;
+        self.conn
+            .execute("DELETE FROM reviewed WHERE worktree = ?1", params![path])?;
+        Ok(())
+    }
+
+    /// The files marked reviewed in the diff of `worktree`, each with the hash of its
+    /// content when it was marked.
+    pub fn reviewed(&self, worktree: &Path) -> anyhow::Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file, hash FROM reviewed WHERE worktree = ?1")?;
+        let rows = stmt.query_map(params![worktree.to_string_lossy()], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every folder's marks, for counting them when the worktrees are scanned.
+    pub fn all_reviewed(&self) -> anyhow::Result<HashMap<PathBuf, HashMap<String, String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT worktree, file, hash FROM reviewed")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?))
+        })?;
+        let mut all: HashMap<PathBuf, HashMap<String, String>> = HashMap::new();
+        for row in rows {
+            let (worktree, file, hash) = row?;
+            all.entry(PathBuf::from(worktree))
+                .or_default()
+                .insert(file, hash);
+        }
+        Ok(all)
+    }
+
+    /// Marks `file` reviewed as its content `hash` is, or (`None`) not reviewed.
+    pub fn set_reviewed(
+        &self,
+        worktree: &Path,
+        file: &str,
+        hash: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let worktree = worktree.to_string_lossy();
+        match hash {
+            Some(hash) => self.conn.execute(
+                "INSERT INTO reviewed (worktree, file, hash) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (worktree, file) DO UPDATE SET hash = excluded.hash",
+                params![worktree, file, hash],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM reviewed WHERE worktree = ?1 AND file = ?2",
+                params![worktree, file],
+            )?,
+        };
         Ok(())
     }
 
@@ -1324,7 +1398,48 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_v5_database_gains_an_empty_reviewed_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5] {
+                conn.execute_batch(sql).unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.reviewed(Path::new("/w/site")).unwrap().is_empty());
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+    }
+
+    #[test]
+    fn reviewed_marks_are_kept_per_folder_and_go_with_their_worktree() {
+        let store = Store::open_in_memory();
+        let (site, docs) = (Path::new("/w/site-worktrees/fix"), Path::new("/w/docs"));
+        store.set_reviewed(site, "src/a.rs", Some("aaa")).unwrap();
+        store.set_reviewed(site, "src/b.rs", Some("bbb")).unwrap();
+        store.set_reviewed(site, "src/a.rs", Some("a2")).unwrap();
+        store.set_reviewed(docs, "README.md", Some("rrr")).unwrap();
+        let marks = store.reviewed(site).unwrap();
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks["src/a.rs"], "a2", "marked again: the newer content");
+        store.set_reviewed(site, "src/b.rs", None).unwrap();
+        assert_eq!(store.reviewed(site).unwrap().len(), 1, "unmarked");
+        let all = store.all_reviewed().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&docs.to_path_buf()]["README.md"], "rrr");
+        // Removing the worktree takes its marks; another folder keeps its own.
+        store.delete_worktree(site).unwrap();
+        assert!(store.reviewed(site).unwrap().is_empty());
+        assert_eq!(store.reviewed(docs).unwrap().len(), 1);
     }
 
     #[test]

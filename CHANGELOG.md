@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+What an agent changed, in termist.
+
+### Added
+
+- **`g` shows what the selected card's branch changed**: the files as a tree beside one file's
+  changes, unified or split, from where the branch left its base to what is on disk now. `u` shows
+  only what is not committed. What changes on disk is shown a moment later, where you were.
+- **Files marked reviewed.** `Ctrl+r` marks a file reviewed; one that changes after that is marked `↺`.
+  The band says how much of its branch was reviewed (`2/3 reviewed`, `reviewed ✓`). The marks are kept.
+- A file of a pull request's diff that changed since you viewed it is marked `↺`.
+
+### Updating
+
+This version changes how the TUI and the daemon talk, and what the daemon keeps. Run `termist update`,
+then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.2.1 - 2026-10-07
 
 Worktrees of their own, for agents that work in parallel.

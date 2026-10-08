@@ -3,16 +3,15 @@
 //! `detail_view` draw it.
 pub mod compose;
 pub mod detail_view;
-pub mod diff;
 pub mod hand;
 pub mod inbox_view;
 pub mod markdown;
 pub mod timeline;
 
 use crate::app::App;
+use crate::diff::{self, DiffAction, DiffArea, DiffView, LineTarget};
 use crate::list_picker::matches;
 use crate::theme::Theme;
-use diff::{DiffAction, DiffArea, DiffView, LineTarget};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -140,7 +139,7 @@ impl Detail {
     fn open_diff(&mut self, file: Option<String>, diff: Option<&PrDiff>) {
         let mut view = DiffView::new(file);
         if let Some(diff) = diff {
-            view.settle(diff);
+            view.settle(&diff.files);
         }
         self.diff = Some(view);
     }
@@ -458,7 +457,7 @@ impl PrView {
             return;
         };
         if let Some(open) = &mut d.diff {
-            open.click(x, y, diff, &layout.diff);
+            open.click(x, y, diff.map(|d| d.files.as_slice()), &layout.diff);
             return;
         }
         if y == layout.tab_row
@@ -512,7 +511,7 @@ impl PrView {
         let page = layout.page.max(1);
         let d = self.detail.as_mut()?;
         if let Some(view) = &mut d.diff {
-            return match view.key(key, d.pr, diff, &layout.diff)? {
+            return match view.key(key, diff.map(|d| d.files.as_slice()), &layout.diff)? {
                 DiffAction::Back(path) => {
                     d.diff = None;
                     d.tab = Tab::Files;
@@ -521,6 +520,13 @@ impl PrView {
                     }
                     None
                 }
+                DiffAction::Viewed { path, viewed } => Some(PrAction::Viewed {
+                    pr: d.pr,
+                    path,
+                    viewed,
+                }),
+                DiffAction::FlipLayout => Some(PrAction::FlipLayout),
+                DiffAction::Note(why) => Some(PrAction::Note(why)),
                 DiffAction::Pr(action) => Some(action),
             };
         }
@@ -656,10 +662,59 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
     *app.pr_layout.borrow_mut() = PrLayout::default();
     match &view.detail {
         Some(detail) => match &detail.diff {
-            Some(open) => diff::view::draw(f, app, detail.pr, open, area),
+            Some(open) => {
+                let none = std::collections::BTreeSet::new();
+                let shown = diff_shown(app, detail.pr, &none);
+                diff::view::draw(f, app, &shown, open, area);
+            }
             None => detail_view::draw(f, app, detail, area),
         },
         None => inbox_view::draw(f, app, view, area),
+    }
+}
+
+/// What Mercek draws of a pull request: its files, threads and marks, the trouble
+/// before its diff came.
+fn diff_shown<'a>(
+    app: &'a App,
+    pr: PrRef,
+    none: &'a std::collections::BTreeSet<String>,
+) -> diff::view::Shown<'a> {
+    use std::hash::{Hash, Hasher};
+    let detail = app.pr_details.get(&pr).and_then(|(_, d)| d.as_ref());
+    // Before the first diff, the pull request's own trouble: no detail, no diff.
+    let (state, diff) = match app.pr_diffs.get(&pr) {
+        Some((state, diff)) => (state.clone(), diff.as_ref()),
+        None => (
+            app.pr_details
+                .get(&pr)
+                .map_or(GhState::Ok, |(state, _)| state.clone()),
+            None,
+        ),
+    };
+    let mut id = std::collections::hash_map::DefaultHasher::new();
+    (pr, diff.map(|d| d.head_oid.as_str())).hash(&mut id);
+    let mut badges = vec![];
+    if let Some(mark) = detail.and_then(|d| pending_mark(&app.theme, d)) {
+        badges.push(mark);
+        badges.push(Span::raw(" · "));
+    }
+    diff::view::Shown {
+        id: id.finish(),
+        files: diff.map(|d| d.files.as_slice()),
+        more: diff.map_or(0, |d| d.more),
+        threads: detail.map_or(&[][..], |d| &d.threads),
+        marked: app.marks.get(&pr).unwrap_or(none),
+        title: detail
+            .map(|d| format!(" #{} {}", d.summary.number, d.summary.title))
+            .unwrap_or_default(),
+        badges,
+        seen: "viewed",
+        failed: state != GhState::Ok,
+        waiting: inbox_view::trouble(&state)
+            .map_or_else(|| "Reading the diff…".to_string(), |why| why.join(" ")),
+        nothing: "No file to show.".to_string(),
+        elsewhere: " · b browser",
     }
 }
 

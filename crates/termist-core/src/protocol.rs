@@ -1,7 +1,7 @@
 use crate::github::{GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoPrs};
 use crate::model::{
-    Harness, HarnessInfo, LaunchOptions, ModelInfo, SessionInfo, SessionKind, StateSnapshot,
-    TermColors, WorktreeInfo,
+    DiffMode, Harness, HarnessInfo, LaunchOptions, LocalDiffData, ModelInfo, ReadState,
+    SessionInfo, SessionKind, StateSnapshot, TermColors, WorktreeInfo,
 };
 use crate::screen::{ScreenUpdate, Scroll};
 use crate::{ProjectId, SessionId};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -185,6 +185,18 @@ pub enum ClientRequest {
         path: PathBuf,
         force: bool,
     },
+    /// This client looks at the diff of the folder at `path` (`None`: at none). Read at
+    /// once, then again whenever the folder changes; answered with `LocalDiff`.
+    SetLocalDiff {
+        path: Option<PathBuf>,
+        mode: DiffMode,
+    },
+    /// Marks `file` (a path in the diff of `worktree`) reviewed as it is now, or not.
+    SetReviewed {
+        worktree: PathBuf,
+        file: String,
+        reviewed: bool,
+    },
     Shutdown,
 }
 
@@ -284,6 +296,14 @@ pub enum ServerEvent {
         path: PathBuf,
         message: String,
     },
+    /// The diff of a folder, to the clients that look at it; `diff` stays the last one
+    /// read when `state` says the newest read failed.
+    LocalDiff {
+        path: PathBuf,
+        mode: DiffMode,
+        state: ReadState,
+        diff: Option<Box<LocalDiffData>>,
+    },
     /// A `WritePr` of this client went through.
     PrWritten {
         pr: PrRef,
@@ -311,7 +331,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_11_since_worktrees_of_their_own() {
-        assert_eq!(PROTOCOL_VERSION, 11);
+    fn the_protocol_is_12_since_the_local_diff() {
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 }
