@@ -1,5 +1,6 @@
 use crate::bands::Slot;
 use crate::browse::Listing;
+use crate::diff::DiffAction;
 use crate::encode::{encode_key, encode_paste, encode_wheel};
 use crate::keys::{Action as KeyAction, Context, KeySpec, Keymap};
 use crate::list_picker::{ListPicker, Pick};
@@ -30,7 +31,7 @@ use termist_core::{
     ProjectInfo, ServerEvent, SessionId, SessionInfo, SessionKind, Snapshot, StateSnapshot,
     attention_order, next_in_attention,
 };
-use termist_core::{Scroll, TermColors};
+use termist_core::{DiffMode, Scroll, TermColors};
 use termist_scenes::{Scene, TimeOfDay};
 
 /// What ←/→ steps through for the idle screen, in minutes; 0 is off.
@@ -76,6 +77,8 @@ pub enum View {
     Archive,
     /// `v`: the project's pull requests.
     Prs(PrView),
+    /// `g`: a folder's diff (Ayna).
+    Diff(crate::diff::local::LocalView),
 }
 
 #[derive(Debug, PartialEq)]
@@ -798,8 +801,19 @@ impl App {
                     self.message = Some(format!("removed {} · the branch stays", short(&path)));
                 }
             }
-            // The local diff comes in a later change.
-            ServerEvent::LocalDiff { .. } => {}
+            ServerEvent::LocalDiff {
+                path,
+                mode,
+                state,
+                diff,
+            } => {
+                if let View::Diff(l) = &mut self.view
+                    && l.path == path
+                    && l.mode == mode
+                {
+                    l.arrived(state, diff.map(|d| *d));
+                }
+            }
             ServerEvent::RemoveFailed { path, message } => {
                 if self.removing.as_ref() == Some(&path) {
                     self.removing = None;
@@ -986,6 +1000,10 @@ impl App {
                 }
                 return vec![];
             }
+            Mode::Grid if matches!(self.view, View::Diff(_)) => {
+                self.message = None;
+                actions.extend(self.local_key(key));
+            }
             Mode::Grid if matches!(self.view, View::Prs(_)) => {
                 self.message = None;
                 actions.extend(self.prs_key(key));
@@ -1072,6 +1090,13 @@ impl App {
             if let Some(project) = tab {
                 return self.click_tab(project);
             }
+        }
+        if matches!(self.view, View::Diff(_))
+            && self.overlays.is_empty()
+            && self.showing.is_none()
+            && self.toasts.hit(self.screen, ev.column, ev.row).is_none()
+        {
+            return self.local_mouse(ev);
         }
         if matches!(self.view, View::Prs(_)) && self.overlays.is_empty() && self.showing.is_none() {
             let on_toast = matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
@@ -3175,14 +3200,123 @@ impl App {
                 self.message = Some(why.into());
                 vec![]
             }
-            Some(PrAction::FlipLayout) => {
-                self.config.diff.layout = self.config.diff.layout.other();
-                vec![Action::WriteConfig(ConfigEdit::Set {
-                    key: "diff.layout",
-                    value: self.config.diff.layout.id().to_string(),
+            Some(PrAction::FlipLayout) => self.flip_layout(),
+        }
+    }
+
+    /// `g`: the diff of the selection's folder: a band's stand-in's worktree, else the
+    /// card's worktree or folder, else the project's.
+    fn open_local_diff(&mut self) -> Vec<Action> {
+        let card = self
+            .selected
+            .and_then(|id| self.state.sessions.iter().find(|s| s.id == id))
+            .map(|s| match s.place.as_deref() {
+                Some(p) if !p.gone => p.root.clone(),
+                _ => s.cwd.clone(),
+            });
+        let project = self
+            .project
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+            .map(|p| p.path.clone());
+        let Some(path) = self.empty_worktree().map(|(p, _)| p).or(card).or(project) else {
+            return vec![];
+        };
+        let mut actions = self.stop_scrolling();
+        self.mode = Mode::Grid;
+        self.view = View::Diff(crate::diff::local::LocalView::new(path.clone()));
+        actions.push(Action::Send(ClientRequest::SetLocalDiff {
+            path: Some(path),
+            mode: DiffMode::Branch,
+        }));
+        actions
+    }
+
+    /// Back to the grid from a folder's diff; the daemon stops watching the folder.
+    fn close_local_diff(&mut self) -> Vec<Action> {
+        self.view = View::Grid;
+        vec![Action::Send(ClientRequest::SetLocalDiff {
+            path: None,
+            mode: DiffMode::Branch,
+        })]
+    }
+
+    /// A key in a folder's diff: `u` the other mode, `R` read again, `q`/`Esc` back;
+    /// the rest are the diff's own.
+    fn local_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let layout = self.pr_layout.borrow().diff.clone();
+        let help = self.keymap.action(Context::Grid, &key) == Some(KeyAction::Help);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let View::Diff(l) = &mut self.view else {
+            return vec![];
+        };
+        if !l.view.typing {
+            let read = |l: &crate::diff::local::LocalView| {
+                vec![Action::Send(ClientRequest::SetLocalDiff {
+                    path: Some(l.path.clone()),
+                    mode: l.mode,
                 })]
+            };
+            match key.code {
+                KeyCode::Char('c') if ctrl => {
+                    self.mode = Mode::ConfirmQuit;
+                    return vec![];
+                }
+                KeyCode::Char('u') if !ctrl => {
+                    l.flip_mode();
+                    return read(l);
+                }
+                KeyCode::Char('R') => return read(l),
+                KeyCode::Char('q') if !ctrl => return self.close_local_diff(),
+                _ if help => return self.act(KeyAction::Help),
+                _ => {}
             }
         }
+        let files = l.diff.as_ref().map(|d| d.files.as_slice());
+        match l.view.key(key, files, &layout) {
+            None | Some(DiffAction::Pr(_)) => vec![],
+            Some(DiffAction::Back(_)) => self.close_local_diff(),
+            Some(DiffAction::Viewed { path, viewed }) => {
+                vec![Action::Send(ClientRequest::SetReviewed {
+                    worktree: l.path.clone(),
+                    file: path,
+                    reviewed: viewed,
+                })]
+            }
+            Some(DiffAction::FlipLayout) => self.flip_layout(),
+            Some(DiffAction::Note(why)) => {
+                self.message = Some(why.into());
+                vec![]
+            }
+        }
+    }
+
+    /// The wheel and a click in a folder's diff.
+    fn local_mouse(&mut self, ev: MouseEvent) -> Vec<Action> {
+        let layout = self.pr_layout.borrow().diff.clone();
+        let View::Diff(l) = &mut self.view else {
+            return vec![];
+        };
+        let files = l.diff.as_ref().map(|d| d.files.as_slice());
+        match ev.kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let down = ev.kind == MouseEventKind::ScrollDown;
+                l.view.wheel(ev.column, ev.row, down, files, &layout);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                l.view.click(ev.column, ev.row, files, &layout);
+            }
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// `s` in a diff: unified or split, kept in config.toml.
+    fn flip_layout(&mut self) -> Vec<Action> {
+        self.config.diff.layout = self.config.diff.layout.other();
+        vec![Action::WriteConfig(ConfigEdit::Set {
+            key: "diff.layout",
+            value: self.config.diff.layout.id().to_string(),
+        })]
     }
 
     /// The body shows the project's archived cards.
@@ -3254,6 +3388,7 @@ impl App {
                 }
             }
             KeyAction::Worktrees => self.open_worktrees(),
+            KeyAction::LocalDiff => return self.open_local_diff(),
             KeyAction::NewShell => return self.create(SessionKind::Shell),
             KeyAction::FollowUp => self.open_follow_up(),
             KeyAction::Rename => self.open_rename(),
@@ -6464,6 +6599,149 @@ mod tests {
         );
     }
 
+    fn local(app: &App) -> &crate::diff::local::LocalView {
+        match &app.view {
+            View::Diff(l) => l,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn folder_diff(files: &[&str]) -> termist_core::LocalDiffData {
+        termist_core::LocalDiffData {
+            head: "fix".into(),
+            base: "origin/main".into(),
+            dirty: true,
+            files: files
+                .iter()
+                .map(|p| termist_core::github::DiffFile {
+                    path: p.to_string(),
+                    previous: None,
+                    change: 'M',
+                    additions: 1,
+                    deletions: 0,
+                    viewed: termist_core::github::Viewed::Unviewed,
+                    patch: termist_core::github::Patch::Text("@@ -1 +1,2 @@\n a\n+b".into()),
+                    url: String::new(),
+                })
+                .collect(),
+            more: 0,
+        }
+    }
+
+    #[test]
+    fn g_opens_the_card_s_worktree_diff_and_esc_leaves_it_on_the_card() {
+        use termist_core::{DiffMode, ReadState};
+        let (mut app, s, _) = linked();
+        app.select(s[1].id);
+        let fix = std::path::PathBuf::from("/w/site-worktrees/fix");
+        let actions = app.on_key(k(K::Char('g')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetLocalDiff {
+                path: Some(fix.clone()),
+                mode: DiffMode::Branch
+            }]
+        );
+        assert_eq!(local(&app).state, ReadState::Reading);
+        // Another folder's or another mode's diff is not this one.
+        app.on_event(ServerEvent::LocalDiff {
+            path: "/w/site".into(),
+            mode: DiffMode::Branch,
+            state: ReadState::Ready,
+            diff: Some(Box::new(folder_diff(&["x.rs"]))),
+        });
+        assert!(local(&app).diff.is_none());
+        app.on_event(ServerEvent::LocalDiff {
+            path: fix.clone(),
+            mode: DiffMode::Branch,
+            state: ReadState::Ready,
+            diff: Some(Box::new(folder_diff(&["a.rs", "b.rs"]))),
+        });
+        assert_eq!(local(&app).view.file.as_deref(), Some("a.rs"));
+        let actions = app.on_key(ctrl('r'));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetReviewed {
+                worktree: fix.clone(),
+                file: "a.rs".into(),
+                reviewed: true
+            }]
+        );
+        assert_eq!(
+            local(&app).view.file.as_deref(),
+            Some("b.rs"),
+            "on to the next"
+        );
+        app.on_key(k(K::Char('c')));
+        assert_eq!(app.message.as_deref(), Some("not in a local diff"));
+        let actions = app.on_key(k(K::Char('u')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetLocalDiff {
+                path: Some(fix.clone()),
+                mode: DiffMode::Uncommitted
+            }]
+        );
+        assert!(local(&app).diff.is_none(), "read anew");
+        let actions = app.on_key(k(K::Char('R')));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetLocalDiff {
+                path: Some(fix.clone()),
+                mode: DiffMode::Uncommitted
+            }],
+            "read again now"
+        );
+        let actions = app.on_key(k(K::Esc));
+        assert_eq!(
+            sent(&actions),
+            [&ClientRequest::SetLocalDiff {
+                path: None,
+                mode: DiffMode::Branch
+            }]
+        );
+        assert_eq!(app.view, View::Grid);
+        assert_eq!(app.selected, Some(s[1].id), "on the card it came from");
+    }
+
+    #[test]
+    fn g_on_a_card_in_the_project_s_folder_or_a_stand_in_or_in_focus() {
+        use termist_core::DiffMode;
+        let (mut app, s, _) = linked();
+        let asked = |actions: &[Action]| {
+            sent(actions).into_iter().find_map(|r| match r {
+                ClientRequest::SetLocalDiff { path, .. } => path.clone(),
+                _ => None,
+            })
+        };
+        app.select(s[0].id);
+        assert_eq!(asked(&app.on_key(k(K::Char('g')))), Some("/w/site".into()));
+        app.on_key(k(K::Char('q')));
+        assert_eq!(app.view, View::Grid, "q leaves too");
+        // In focus mode: the prefix, then g.
+        app.select(s[1].id);
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('a'));
+        assert_eq!(
+            asked(&app.on_key(k(K::Char('g')))),
+            Some("/w/site-worktrees/fix".into())
+        );
+        assert_eq!(app.mode, Mode::Grid, "the diff takes the keys");
+        app.on_key(k(K::Esc));
+        // A band's stand-in.
+        app.selected = None;
+        app.empty = Some("/w/site-worktrees/docs".into());
+        app.on_event(ServerEvent::Worktrees {
+            project: app.state.projects[0].id,
+            list: vec![worktree("/w/site-worktrees/docs", "docs", true, true)],
+        });
+        assert_eq!(
+            asked(&app.on_key(k(K::Char('g')))),
+            Some("/w/site-worktrees/docs".into())
+        );
+        let _ = DiffMode::Branch;
+    }
+
     #[test]
     fn two_new_worktrees_on_their_way_each_start_their_own_task() {
         let (mut app, _, _) = linked();
@@ -7161,19 +7439,19 @@ mod tests {
     fn a_key_is_bound_from_the_keys_screen_and_saved() {
         let mut app = keys_screen();
         app.on_key(k(K::Enter));
-        let actions = app.on_key(k(K::Char('g')));
+        let actions = app.on_key(k(K::Char('b')));
         assert!(matches!(app.overlays.last(), Some(Overlay::Keys(_))));
         assert_eq!(
             writes(&actions),
             [&ConfigEdit::Keys {
                 table: "grid",
                 bindings: vec![
-                    ("g".into(), "quick_prompt".into()),
+                    ("b".into(), "quick_prompt".into()),
                     ("p".into(), "none".into())
                 ],
             }]
         );
-        assert_eq!(top_note(&app).unwrap(), "g: new task: prompt, CLI, model");
+        assert_eq!(top_note(&app).unwrap(), "b: new task: prompt, CLI, model");
         app.on_key(k(K::Backspace));
         assert!(
             app.keymap

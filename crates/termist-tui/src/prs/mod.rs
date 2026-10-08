@@ -713,6 +713,7 @@ fn diff_shown<'a>(
         failed: state != GhState::Ok,
         waiting: inbox_view::trouble(&state)
             .map_or_else(|| "Reading the diff…".to_string(), |why| why.join(" ")),
+        nothing: "No file to show.".to_string(),
         elsewhere: " · b browser",
     }
 }

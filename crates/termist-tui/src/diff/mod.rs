@@ -1,5 +1,6 @@
 //! A diff, its file tree beside one file's changes: a pull request's (Mercek) or a
 //! folder's (Ayna). This module keeps the state and the keys; `view` draws it.
+pub mod local;
 pub mod render;
 pub mod tree;
 pub mod view;

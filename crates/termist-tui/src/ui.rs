@@ -260,6 +260,16 @@ pub fn draw(f: &mut Frame, app: &App, areas: &Areas) {
         None => {}
     }
     draw_header(f, app, areas.header);
+    if let View::Diff(l) = &app.view {
+        *app.pr_layout.borrow_mut() = crate::prs::PrLayout::default();
+        crate::diff::local::draw(f, app, l, areas.body);
+        for (i, overlay) in app.overlays.iter().enumerate() {
+            overlay_view::draw(f, app, overlay, areas.body, i + 1 == app.overlays.len());
+        }
+        draw_footer(f, app, areas.footer);
+        draw_toasts(f, app);
+        return;
+    }
     if let View::Prs(view) = &app.view {
         crate::prs::draw(f, app, view, areas.body);
         for (i, overlay) in app.overlays.iter().enumerate() {
@@ -391,6 +401,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     if matches!(app.view, View::Prs(_)) {
         spans.push(Span::styled(
             "pull requests ",
+            app.theme.accent.add_modifier(Modifier::BOLD),
+        ));
+    }
+    if matches!(app.view, View::Diff(_)) {
+        spans.push(Span::styled(
+            "diff ",
             app.theme.accent.add_modifier(Modifier::BOLD),
         ));
     }
@@ -888,6 +904,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         }
         (_, Mode::Grid | Mode::Focus) if app.scrolling => (SCROLL_HINT.to_string(), t.focus),
         (_, Mode::Grid) if prs_view.is_some() => (crate::prs::hint(app, prs_view.unwrap()), t.dim),
+        (_, Mode::Grid) if matches!(app.view, View::Diff(_)) => match &app.view {
+            View::Diff(l) => (crate::diff::local::hint(app, l), t.dim),
+            _ => unreachable!("matched above"),
+        },
         (_, Mode::Grid) if app.archive_view() => (archive_hint(&app.keymap), t.dim),
         (_, Mode::Grid) => (grid_hint(&app.keymap), t.dim),
         (_, Mode::Focus) => (focus_hint(&app.keymap), t.dim),
@@ -2122,7 +2142,7 @@ mod tests {
         }
         app.on_key(key(K::Enter));
         app.on_key(key(K::Enter));
-        app.on_key(key(K::Char('g')));
+        app.on_key(key(K::Char('b')));
         insta::assert_snapshot!("keys", render(&mut app, 80, 16).backend());
     }
 
@@ -3068,6 +3088,108 @@ mod tests {
         insta::assert_snapshot!("mercek_split", render(&mut app, 150, 18).backend());
         let narrow = screen(&render(&mut app, 110, 18));
         assert!(narrow.contains("split · too narrow"), "{narrow}");
+    }
+
+    /// The fixture's grid with `g` pressed on a card at `/p`, its diff read: one file
+    /// reviewed, one reviewed but changed since, one new.
+    fn ayna_fixture() -> App {
+        use termist_core::github::{DiffFile, Patch, Viewed};
+        use termist_core::{DiffMode, LocalDiffData, ReadState};
+        let mut app = fixture();
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let f = |path: &str, change: char, viewed, patch: &str| DiffFile {
+            path: path.into(),
+            previous: None,
+            change,
+            additions: patch.matches("\n+").count() as u32,
+            deletions: patch.matches("\n-").count() as u32,
+            viewed,
+            patch: Patch::Text(patch.into()),
+            url: String::new(),
+        };
+        let diff = LocalDiffData {
+            head: "fix-login".into(),
+            base: "origin/main".into(),
+            dirty: true,
+            files: vec![
+                f(
+                    "src/auth.rs",
+                    'M',
+                    Viewed::Dismissed,
+                    "@@ -10,3 +10,4 @@ fn login\n let user = find(id);\n-let ok = check(user);\n+let ok = check(&user);\n+log(&user);\n ok",
+                ),
+                f(
+                    "src/login.rs",
+                    'M',
+                    Viewed::Viewed,
+                    "@@ -1 +1 @@\n-old\n+new",
+                ),
+                f(
+                    "tests/login.rs",
+                    'A',
+                    Viewed::Unviewed,
+                    "@@ -0,0 +1,2 @@\n+#[test]\n+fn logs_in() {}",
+                ),
+            ],
+            more: 0,
+        };
+        let path = match &app.view {
+            View::Diff(l) => l.path.clone(),
+            other => panic!("{other:?}"),
+        };
+        app.on_event(ServerEvent::LocalDiff {
+            path,
+            mode: DiffMode::Branch,
+            state: ReadState::Ready,
+            diff: Some(Box::new(diff)),
+        });
+        app
+    }
+
+    #[test]
+    fn ayna_shows_a_folder_s_diff_with_its_reviewed_files() {
+        let mut app = ayna_fixture();
+        insta::assert_snapshot!("ayna_branch", render(&mut app, 110, 16).backend());
+        let text = screen(&render(&mut app, 110, 16));
+        assert!(text.contains("1/3 reviewed"), "{text}");
+        assert!(
+            text.contains("u uncommitted · ^R reviewed · R reload"),
+            "{text}"
+        );
+        // `u`, and nothing uncommitted.
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 16));
+        assert!(text.contains("Reading the diff…"), "{text}");
+        let path = match &app.view {
+            View::Diff(l) => l.path.clone(),
+            other => panic!("{other:?}"),
+        };
+        app.on_event(ServerEvent::LocalDiff {
+            path: path.clone(),
+            mode: termist_core::DiffMode::Uncommitted,
+            state: termist_core::ReadState::Ready,
+            diff: Some(Box::new(termist_core::LocalDiffData {
+                head: "fix-login".into(),
+                base: "HEAD".into(),
+                ..termist_core::LocalDiffData::default()
+            })),
+        });
+        let text = screen(&render(&mut app, 110, 16));
+        assert!(
+            text.contains("No uncommitted changes · u: the whole branch"),
+            "{text}"
+        );
+        assert!(text.contains("u whole branch"), "{text}");
+        // A read that fails keeps what was shown and says why.
+        app.on_event(ServerEvent::LocalDiff {
+            path,
+            mode: termist_core::DiffMode::Uncommitted,
+            state: termist_core::ReadState::Failed("the folder is gone".into()),
+            diff: None,
+        });
+        let text = screen(&render(&mut app, 110, 16));
+        assert!(text.contains("⟳ failed"), "{text}");
+        assert!(text.contains("the folder is gone · Tab panel"), "{text}");
     }
 
     #[test]

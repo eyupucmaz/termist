@@ -76,6 +76,8 @@ pub struct Shown<'a> {
     pub failed: bool,
     /// Said where the file would be before anything was read: reading, or why not.
     pub waiting: String,
+    /// Said when the diff has no files.
+    pub nothing: String,
     /// Said after `+N more` and a file too large: where the rest can be seen.
     pub elsewhere: &'static str,
 }
@@ -318,6 +320,7 @@ fn draw_diff(
     let Some(file) = file else {
         let text = match diff {
             None => shown.waiting.clone(),
+            Some([]) => shown.nothing.clone(),
             Some(_) => "No file to show.".to_string(),
         };
         say(f, text);
