@@ -179,6 +179,8 @@ pub fn encode_kind(kind: &SessionKind) -> &'static str {
     match kind {
         SessionKind::Shell => "shell",
         SessionKind::Agent { harness } => harness.id(),
+        // Never kept (the registry does not store one); read back as nothing.
+        SessionKind::Tool { .. } => "tool",
     }
 }
 

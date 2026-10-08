@@ -483,6 +483,93 @@ mod tests {
     }
 
     #[test]
+    fn the_tools_round_trip() {
+        use crate::model::{GrepMatch, SessionKind};
+        use crate::screen::Pos;
+        let mut dec = FrameDecoder::default();
+        let session = crate::SessionId::new();
+        let at = |line, col| Pos { line, col };
+        let requests = [
+            ClientRequest::OpenInEditor {
+                project: crate::ProjectId::new(),
+                folder: "/w/site".into(),
+                file: Some("src/a.rs".into()),
+                line: Some(42),
+                editor: Some("nvim".into()),
+            },
+            ClientRequest::ListFiles {
+                folder: "/w/site".into(),
+                ticket: 1,
+            },
+            ClientRequest::Grep {
+                folder: "/w/site".into(),
+                query: "redirect".into(),
+                ticket: 2,
+            },
+            ClientRequest::CopyText {
+                session,
+                from: at(3, 0),
+                to: at(5, 7),
+                lines: true,
+            },
+            ClientRequest::Search {
+                session,
+                query: "error".into(),
+                from: at(9, 0),
+                backward: true,
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let events = [
+            ServerEvent::EditorFailed {
+                message: "no editor found".into(),
+            },
+            ServerEvent::Files {
+                ticket: 1,
+                root: "/w/site".into(),
+                files: vec!["src/a.rs".into()],
+                more: 0,
+            },
+            ServerEvent::GrepResults {
+                ticket: 2,
+                root: "/w/site".into(),
+                matches: vec![GrepMatch {
+                    path: "src/a.rs".into(),
+                    line: 42,
+                    text: "let redirect = q;".into(),
+                }],
+                more: false,
+            },
+            ServerEvent::FindFailed {
+                ticket: 2,
+                message: "not a git repository".into(),
+            },
+            ServerEvent::CopiedText {
+                session,
+                text: "a\nb".into(),
+            },
+            ServerEvent::Found {
+                session,
+                at: Some((at(4, 2), at(4, 6))),
+                index: 2,
+                total: 5,
+            },
+        ];
+        for ev in events {
+            dec.push(&encode_frame(&ev).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(ev));
+        }
+        let tool = SessionKind::Tool {
+            program: "/opt/bin/lazygit".into(),
+            args: vec![],
+        };
+        assert_eq!(tool.label(), "lazygit");
+    }
+
+    #[test]
     fn the_local_diff_round_trips() {
         use crate::github::{DiffFile, Patch, Viewed};
         use crate::model::{DiffMode, LocalDiffData, ReadState};

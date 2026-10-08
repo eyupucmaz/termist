@@ -92,18 +92,39 @@ pub struct HarnessInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionKind {
-    Agent { harness: Harness },
+    Agent {
+        harness: Harness,
+    },
     Shell,
+    /// A program for a while (lazygit, a terminal editor): gone when it ends, never
+    /// kept.
+    Tool {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl SessionKind {
-    /// Short label shown on cards: the harness id, or "shell".
-    pub fn label(&self) -> &'static str {
+    /// Short label shown on cards: the harness id, "shell", or the tool's name.
+    pub fn label(&self) -> &str {
         match self {
             SessionKind::Agent { harness } => harness.id(),
             SessionKind::Shell => "shell",
+            SessionKind::Tool { program, .. } => {
+                program.rsplit(['/', '\\']).next().unwrap_or(program)
+            }
         }
     }
+}
+
+/// A line `git grep` found.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrepMatch {
+    /// Relative to the repo's root.
+    pub path: String,
+    pub line: u32,
+    /// The line, cut to a length a list can show.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

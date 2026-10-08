@@ -827,6 +827,13 @@ impl App {
                     }
                 }
             }
+            // The tools come in later changes.
+            ServerEvent::EditorFailed { .. }
+            | ServerEvent::Files { .. }
+            | ServerEvent::GrepResults { .. }
+            | ServerEvent::FindFailed { .. }
+            | ServerEvent::CopiedText { .. }
+            | ServerEvent::Found { .. } => {}
             ServerEvent::RemoveFailed { path, message } => {
                 if self.removing.as_ref() == Some(&path) {
                     self.removing = None;

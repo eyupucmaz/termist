@@ -1220,6 +1220,12 @@ impl Registry {
                 }
             }
             ClientRequest::SetLocalDiff { path, mode } => self.set_local_diff(client, path, mode),
+            // The tools come in later changes.
+            ClientRequest::OpenInEditor { .. }
+            | ClientRequest::ListFiles { .. }
+            | ClientRequest::Grep { .. }
+            | ClientRequest::CopyText { .. }
+            | ClientRequest::Search { .. } => {}
             ClientRequest::SetReviewed {
                 worktree,
                 file,
@@ -1721,7 +1727,7 @@ impl Registry {
         // A shell has no model or effort; an agent only takes an effort its CLI knows,
         // or one the chosen model lists in the CLI's catalog.
         let (model, effort) = match &kind {
-            SessionKind::Shell => (None, None),
+            SessionKind::Shell | SessionKind::Tool { .. } => (None, None),
             SessionKind::Agent { harness } => {
                 let model = model
                     .map(|m| m.trim().to_string())
