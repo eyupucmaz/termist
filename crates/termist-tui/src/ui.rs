@@ -1446,6 +1446,7 @@ mod tests {
             shown,
             stat,
             pr_end: end,
+            reviewed: 0,
         };
         app.on_event(ServerEvent::Worktrees {
             project,
@@ -1569,6 +1570,7 @@ mod tests {
                 shown: true,
                 stat: None,
                 pr_end: None,
+                reviewed: 0,
             }],
         });
         let text = screen_text(&render(&mut app, 100, 30));

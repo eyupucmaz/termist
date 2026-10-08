@@ -483,6 +483,55 @@ mod tests {
     }
 
     #[test]
+    fn the_local_diff_round_trips() {
+        use crate::github::{DiffFile, Patch, Viewed};
+        use crate::model::{DiffMode, LocalDiffData, ReadState};
+        let mut dec = FrameDecoder::default();
+        let requests = [
+            ClientRequest::SetLocalDiff {
+                path: Some("/w/site-worktrees/fix".into()),
+                mode: DiffMode::Uncommitted,
+            },
+            ClientRequest::SetLocalDiff {
+                path: None,
+                mode: DiffMode::Branch,
+            },
+            ClientRequest::SetReviewed {
+                worktree: "/w/site-worktrees/fix".into(),
+                file: "src/a.rs".into(),
+                reviewed: true,
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let event = ServerEvent::LocalDiff {
+            path: "/w/site-worktrees/fix".into(),
+            mode: DiffMode::Branch,
+            state: ReadState::Failed("not a git repository".into()),
+            diff: Some(Box::new(LocalDiffData {
+                head: "fix".into(),
+                base: "origin/main".into(),
+                dirty: true,
+                files: vec![DiffFile {
+                    path: "src/a.rs".into(),
+                    previous: None,
+                    change: 'M',
+                    additions: 1,
+                    deletions: 0,
+                    viewed: Viewed::Dismissed,
+                    patch: Patch::Text("@@ -1 +1,2 @@\n a\n+b".into()),
+                    url: String::new(),
+                }],
+                more: 0,
+            })),
+        };
+        dec.push(&encode_frame(&event).unwrap());
+        assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(event));
+    }
+
+    #[test]
     fn the_worktrees_of_their_own_round_trip() {
         use crate::github::RepoId;
         use crate::model::{PrEnd, Stat, WorktreeInfo};
@@ -522,6 +571,7 @@ mod tests {
                 dirty: true,
             }),
             pr_end: Some((212, PrEnd::Merged)),
+            reviewed: 2,
         };
         let events = [
             ServerEvent::Worktrees {

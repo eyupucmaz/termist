@@ -798,6 +798,8 @@ impl App {
                     self.message = Some(format!("removed {} · the branch stays", short(&path)));
                 }
             }
+            // The local diff comes in a later change.
+            ServerEvent::LocalDiff { .. } => {}
             ServerEvent::RemoveFailed { path, message } => {
                 if self.removing.as_ref() == Some(&path) {
                     self.removing = None;
@@ -6512,6 +6514,7 @@ mod tests {
                 shown: true,
                 stat: None,
                 pr_end: None,
+                reviewed: 0,
             }],
         });
         app.select(s[1].id);
@@ -6599,6 +6602,7 @@ mod tests {
                 shown: true,
                 stat: None,
                 pr_end: None,
+                reviewed: 0,
             }],
         });
         assert_eq!(
@@ -6618,6 +6622,7 @@ mod tests {
             shown,
             stat: None,
             pr_end: None,
+            reviewed: 0,
         }
     }
 

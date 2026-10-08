@@ -157,6 +157,41 @@ pub struct WorktreeInfo {
     pub stat: Option<Stat>,
     /// The last pull request seen on its branch, once it is no longer open.
     pub pr_end: Option<(u32, PrEnd)>,
+    /// Files of `stat` marked reviewed that have not changed since (`g`, `Ctrl+r`).
+    pub reviewed: u32,
+}
+
+/// What `g` shows: the branch since it left its base, or only what is not committed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DiffMode {
+    #[default]
+    Branch,
+    Uncommitted,
+}
+
+/// Where reading something local stands; `Failed` says why in git's words.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadState {
+    #[default]
+    Reading,
+    Ready,
+    Failed(String),
+}
+
+/// A folder's diff as `g` shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDiffData {
+    /// The branch, or a short commit when detached.
+    pub head: String,
+    /// What the diff is measured from, as shown: `origin/main`, or `HEAD` for the
+    /// uncommitted (with why, when a whole branch could not be).
+    pub base: String,
+    /// Some of it is not committed.
+    pub dirty: bool,
+    /// `viewed`: `Viewed` reviewed, `Dismissed` reviewed but changed since.
+    pub files: Vec<crate::github::DiffFile>,
+    /// Changed files beyond those read.
+    pub more: u32,
 }
 
 /// `3 files +60 −28`, and whether some of it is not committed.

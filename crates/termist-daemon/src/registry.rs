@@ -644,6 +644,7 @@ impl Registry {
                 base: w.base,
                 made_by_termist: w.made_by_termist,
                 shown: w.shown,
+                reviewed: 0,
             })
             .collect()
     }
@@ -1179,6 +1180,8 @@ impl Registry {
                     self.send(client, ServerEvent::RemoveFailed { path, message: why });
                 }
             }
+            // The local diff comes in a later change.
+            ClientRequest::SetLocalDiff { .. } | ClientRequest::SetReviewed { .. } => {}
             ClientRequest::Shutdown => {
                 for s in &self.sessions {
                     if let Some(cmd) = &s.cmd {
