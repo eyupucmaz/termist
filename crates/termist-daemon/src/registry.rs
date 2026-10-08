@@ -811,6 +811,19 @@ impl Registry {
         Ok(())
     }
 
+    /// Runs a finder on a blocking thread; its answer goes straight to `client` (the
+    /// client keeps only its newest ticket's).
+    fn find(&self, client: ClientId, job: impl FnOnce() -> ServerEvent + Send + 'static) {
+        let Some(out) = self.clients.get(&client).cloned() else {
+            return;
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Ok(event) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                let _ = out.send(event);
+            }
+        });
+    }
+
     /// Asks a running session something whose answer goes straight to `client`.
     fn ask_session(
         &self,
@@ -1329,8 +1342,30 @@ impl Registry {
                     self.send(client, ServerEvent::EditorFailed { message: why });
                 }
             }
-            // The finders come in a later change.
-            ClientRequest::ListFiles { .. } | ClientRequest::Grep { .. } => {}
+            ClientRequest::ListFiles { folder, ticket } => {
+                self.find(client, move || match crate::finder::files(&folder) {
+                    Ok((root, files, more)) => ServerEvent::Files {
+                        ticket,
+                        root,
+                        files,
+                        more,
+                    },
+                    Err(message) => ServerEvent::FindFailed { ticket, message },
+                })
+            }
+            ClientRequest::Grep {
+                folder,
+                query,
+                ticket,
+            } => self.find(client, move || match crate::finder::grep(&folder, &query) {
+                Ok((root, matches, more)) => ServerEvent::GrepResults {
+                    ticket,
+                    root,
+                    matches,
+                    more,
+                },
+                Err(message) => ServerEvent::FindFailed { ticket, message },
+            }),
             ClientRequest::SetReviewed {
                 worktree,
                 file,
@@ -2267,6 +2302,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(failed(ev), "false failed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn files_and_grep_answer_who_asked_with_the_ticket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        std::fs::write(site.join("a.txt"), "needle\n").unwrap();
+        let mut reg = registry_on(Store::open_in_memory());
+        let mut rx = connect(&mut reg);
+        let ask = |reg: &mut Registry, req| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req,
+            })
+        };
+        async fn next(rx: &mut UnboundedReceiver<ServerEvent>) -> ServerEvent {
+            tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        ask(
+            &mut reg,
+            ClientRequest::ListFiles {
+                folder: site.clone(),
+                ticket: 4,
+            },
+        );
+        assert!(matches!(
+            next(&mut rx).await,
+            ServerEvent::Files { ticket: 4, files, .. } if files == ["a.txt"]
+        ));
+        ask(
+            &mut reg,
+            ClientRequest::Grep {
+                folder: site.clone(),
+                query: "needle".into(),
+                ticket: 5,
+            },
+        );
+        assert!(matches!(
+            next(&mut rx).await,
+            ServerEvent::GrepResults { ticket: 5, matches, more: false, .. } if matches.len() == 1
+        ));
+        ask(
+            &mut reg,
+            ClientRequest::Grep {
+                folder: tmp.path().to_path_buf(),
+                query: "needle".into(),
+                ticket: 6,
+            },
+        );
+        assert_eq!(
+            next(&mut rx).await,
+            ServerEvent::FindFailed {
+                ticket: 6,
+                message: "not a git repository".into()
+            }
+        );
     }
 
     #[test]
