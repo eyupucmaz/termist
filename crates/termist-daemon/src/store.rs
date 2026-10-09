@@ -10,7 +10,7 @@ use termist_core::{
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -115,6 +115,12 @@ CREATE TABLE reviewed (
     PRIMARY KEY (worktree, file)
 );
 PRAGMA user_version = 6;
+";
+
+/// v6 brought to v7: the agent that started a session through `termist spawn`.
+const MIGRATE_V7: &str = "
+ALTER TABLE sessions ADD COLUMN spawned_by TEXT;
+PRAGMA user_version = 7;
 ";
 
 /// A worktree of one of a project's repos, as termist keeps it.
@@ -279,6 +285,7 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
             }
             1 => {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
@@ -286,30 +293,38 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
             }
             2 => {
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
             }
             3 => {
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
             }
             4 => {
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
             }
-            5 => Self::upgrade(&mut conn, MIGRATE_V6)?,
+            5 => {
+                Self::upgrade(&mut conn, MIGRATE_V6)?;
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
+            }
+            6 => Self::upgrade(&mut conn, MIGRATE_V7)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
         // A table of the right version but the wrong shape is as unusable as garbage.
         conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                    created_ms, resumable, model, effort, user_named, archived, cwd
+                    created_ms, resumable, model, effort, user_named, archived, cwd, spawned_by
              FROM sessions LIMIT 0",
         )?;
         conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
@@ -694,6 +709,31 @@ impl Store {
     }
 
     /// Every folder's marks, for counting them when the worktrees are scanned.
+    /// Keeps which agent started the session through `termist spawn`.
+    pub fn set_spawned_by(&self, session: SessionId, by: SessionId) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET spawned_by = ?2 WHERE id = ?1",
+            params![session.to_string(), by.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Each session started by an agent, with that agent.
+    pub fn spawned_by(&self) -> anyhow::Result<HashMap<SessionId, SessionId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, spawned_by FROM sessions WHERE spawned_by IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut all = HashMap::new();
+        for row in rows {
+            let (id, by) = row?;
+            if let (Ok(id), Ok(by)) = (id.parse::<SessionId>(), by.parse::<SessionId>()) {
+                all.insert(id, by);
+            }
+        }
+        Ok(all)
+    }
+
     pub fn all_reviewed(&self) -> anyhow::Result<HashMap<PathBuf, HashMap<String, String>>> {
         let mut stmt = self
             .conn
@@ -1419,7 +1459,40 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_v6_database_keeps_its_sessions_and_learns_who_started_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        let (project, session, agent) = (ProjectId::new(), SessionId::new(), SessionId::new());
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                SCHEMA_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_ms) VALUES (?1, 'api', '/w/api', 1)",
+                params![project.to_string()],
+            )
+            .unwrap();
+            for id in [session, agent] {
+                conn.execute(
+                    "INSERT INTO sessions (id, project_id, kind, name, last_activity_ms, created_ms)
+                     VALUES (?1, ?2, 'codex', 'codex-1', 1, 1)",
+                    params![id.to_string(), project.to_string()],
+                )
+                .unwrap();
+            }
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.load().unwrap().1.len(), 2);
+        assert!(store.spawned_by().unwrap().is_empty());
+        store.set_spawned_by(session, agent).unwrap();
+        assert_eq!(store.spawned_by().unwrap()[&session], agent);
     }
 
     #[test]

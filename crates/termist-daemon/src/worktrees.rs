@@ -159,6 +159,8 @@ pub struct Made {
     pub branch: String,
     pub base: String,
     pub note: Option<String>,
+    /// The branch was made now, from `base`; not one that was open already.
+    pub new: bool,
 }
 
 /// A new worktree of the repo at `repo` on `branch`: the worktree that already has the
@@ -192,6 +194,7 @@ pub fn create(repo: &Path, branch: &str, git: Git, fetch: Git) -> Result<Made, S
                 branch: branch.to_string(),
                 base: default,
                 note: Some("the branch was open there already".into()),
+                new: false,
             });
         }
     }
@@ -236,6 +239,7 @@ pub fn create(repo: &Path, branch: &str, git: Git, fetch: Git) -> Result<Made, S
         branch: name,
         base: start,
         note,
+        new: true,
     })
 }
 
@@ -394,6 +398,7 @@ mod tests {
         let resolved = crate::place::resolved;
         assert_eq!(resolved(&again.path), resolved(&made.path));
         assert!(again.note.is_some());
+        assert!(!again.new, "the worktree that has it");
         // A branch that exists but is open nowhere (an old one, maybe merged) is not
         // taken as it is: a new branch with a number, and the note says why.
         let other = create(&site, "old", &git, &no_net).unwrap();
