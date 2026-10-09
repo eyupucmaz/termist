@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.5 - 2026-10-09
 
 Agents drive termist.
 
@@ -17,8 +17,8 @@ Agents drive termist.
 
 ### Changed
 
-- A worktree of a repo inside the project folder is a place for its cards even when the repo is not on
-  GitHub.
+- A worktree of a repo that is not on GitHub is a place for cards too (also when the project is a folder
+  inside the repo); `X` removes it, and one removed by hand is forgotten.
 
 ### Updating
 

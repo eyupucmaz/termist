@@ -12,7 +12,7 @@
 <p>
   <a href="https://eyupucmaz.github.io/termist/"><img src="https://img.shields.io/badge/website-eyupucmaz.github.io%2Ftermist-40c2bd?style=for-the-badge&labelColor=13263b" alt="Website"></a>
   <a href="#install"><img src="https://img.shields.io/badge/install-one%20line-f08a4b?style=for-the-badge&labelColor=13263b" alt="Install"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.2.4-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-0.2.5-7fb2ff?style=for-the-badge&labelColor=13263b" alt="Changelog"></a>
 </p>
 
 <p>
@@ -28,8 +28,9 @@
 </div>
 
 > [!NOTE]
-> **termist 0.2.4 is out**: your agent setups, kept. `e` lists your presets (a CLI, a model, words around
-> the task) and `Ctrl+S` in the new-task prompt saves one; a card is named after what you asked. With 0.2.3's
+> **termist 0.2.5 is out**: agents drive termist. Ask one to work in parallel and it starts another agent
+> (`termist spawn`), moves into a worktree (`termist worktree`) or opens a file for you (`termist open`).
+> With 0.2.4's presets (`e`, `Ctrl+S`) and cards named after their task, 0.2.3's
 > tools (`O` editor, `L` lazygit, `f`/`F` find, copy mode), 0.2.2's `g` (what an agent changed, file by file), 0.2.1's worktrees of their own
 > (`Ctrl+N`, `W`, `X`) and 0.2.0's pull requests next to your agents (`v`, `w`, `a`). With 0.1.4's writing (comments,
 > reviews), 0.1.3's diff and mouse, 0.1.2's pull requests (`v`), and 0.1.x's toasts, themes, scenes, sounds,
