@@ -320,7 +320,9 @@ mod tests {
     fn termist_s_words_and_folder_join_the_user_s_own_config_content() {
         let dir = std::path::Path::new("/data/opencode");
         let extra = || extra(dir, true, Some(std::path::Path::new("/w/site-worktrees")));
-        let words = "/data/opencode/termist-agents.md";
+        // The file as the OS writes its path (`\` before its name on Windows).
+        let words = teach_file(dir).display().to_string();
+        let words = words.as_str();
         // Ours alone, beside our config dir.
         let env = config_env(dir, None, None, extra());
         assert_eq!(env[0].0, "OPENCODE_CONFIG_DIR");
