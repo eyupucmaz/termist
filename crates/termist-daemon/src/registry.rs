@@ -173,6 +173,8 @@ pub struct Registry {
     last_rescan: Option<std::time::Instant>,
     /// Looks a CLI up (PATH, then the login shell).
     find_program: fn(&str) -> Option<PathBuf>,
+    /// Where `[agents]` is read from, at each start; `None`: its defaults.
+    pub config_paths: Option<termist_platform::Paths>,
     /// The models each CLI offers, and when they were read.
     catalogs: HashMap<Harness, (Vec<ModelInfo>, std::time::Instant)>,
     /// Clients that asked while a CLI's list was being read; each gets it when it comes.
@@ -288,6 +290,7 @@ impl Registry {
             rescanning: false,
             last_rescan: None,
             find_program: crate::resolve::find_program,
+            config_paths: None,
             catalogs: HashMap::new(),
             catalog_waiters: HashMap::new(),
             catalog_tx,
@@ -1968,6 +1971,7 @@ impl Registry {
             _ => kind.clone(),
         };
         let id = SessionId::new();
+        let (teach, also) = self.agent_extras(&started, &cwd);
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &started,
@@ -1978,8 +1982,8 @@ impl Registry {
             cols,
             rows,
             resume: None,
-            teach: None,
-            also: None,
+            teach,
+            also: also.as_deref(),
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
@@ -2008,6 +2012,42 @@ impl Registry {
         self.broadcast(ServerEvent::SessionUpdated(info));
         self.read_place(cwd);
         Ok(())
+    }
+
+    /// `[agents]` as config.toml says now.
+    fn agents_config(&self) -> termist_core::config::AgentsConfig {
+        self.config_paths
+            .as_ref()
+            .map(|p| termist_platform::config_file::load(p).0.agents)
+            .unwrap_or_default()
+    }
+
+    /// What an agent starting in `cwd` is told and where else it may work: termist's
+    /// words when `[agents] teach` is on, and its repo's worktrees folder, made when there
+    /// is none (a new worktree goes there, and the agent may be moved into it). Shells
+    /// and tools get neither.
+    fn agent_extras(
+        &self,
+        kind: &SessionKind,
+        cwd: &Path,
+    ) -> (Option<&'static str>, Option<PathBuf>) {
+        if !matches!(kind, SessionKind::Agent { .. }) {
+            return (None, None);
+        }
+        let teach = self
+            .agents_config()
+            .teach
+            .then_some(termist_core::agents::TEACH);
+        let also = place::repo_top(cwd)
+            .map(|top| crate::github::worktree::home(&place::main_of(&top)))
+            .filter(|home| match std::fs::create_dir_all(home) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, folder = %home.display(), "could not make the worktrees folder");
+                    false
+                }
+            });
+        (teach, also)
     }
 
     /// `dir` when a session of the project may run there: a folder in the project, or a
@@ -2096,6 +2136,7 @@ impl Registry {
         } else {
             None
         };
+        let (teach, also) = self.agent_extras(&kind, &cwd);
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &kind,
@@ -2106,8 +2147,8 @@ impl Registry {
             cols,
             rows,
             resume: resume.as_deref(),
-            teach: None,
-            also: None,
+            teach,
+            also: also.as_deref(),
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
@@ -2747,6 +2788,40 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn an_agent_in_a_repo_is_told_of_termist_and_may_work_in_its_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("site");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let mut reg = registry_with(&project(), &[]);
+        let claude = SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        // Beside the repo as git names it (macOS' /var is /private/var).
+        let home = place::resolved(tmp.path()).join("site-worktrees");
+        assert_eq!(
+            reg.agent_extras(&claude, &repo.join("src")),
+            (Some(termist_core::agents::TEACH), Some(home.clone()))
+        );
+        assert!(home.is_dir(), "made, so the agent may be let in");
+        // Not in a repo: told, but no folder.
+        let plain = tmp.path().join("notes");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(reg.agent_extras(&claude, &plain).1, None);
+        assert_eq!(
+            reg.agent_extras(&SessionKind::Shell, &repo),
+            (None, None),
+            "a shell is told nothing"
+        );
+        // `[agents] teach = false`: not told.
+        let paths = termist_platform::Paths::under(tmp.path().join("home"));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "[agents]\nteach = false\n").unwrap();
+        reg.config_paths = Some(paths);
+        assert_eq!(reg.agent_extras(&claude, &repo), (None, Some(home)));
+    }
+
     #[tokio::test]
     async fn an_agent_started_with_a_prompt_is_named_after_it() {
         let p = project();

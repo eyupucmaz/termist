@@ -89,6 +89,14 @@ pub fn main_of(path: &Path) -> PathBuf {
 }
 
 /// The path with links and `..` resolved, for comparing; as it is when that fails.
+/// The top folder of the git worktree `dir` is in (the first one up with a `.git`),
+/// read from the files: no git is run.
+pub fn repo_top(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
 pub fn resolved(path: &Path) -> PathBuf {
     plain(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
