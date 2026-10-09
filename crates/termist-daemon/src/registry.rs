@@ -1126,6 +1126,7 @@ impl Registry {
                 kind,
                 cwd,
                 prompt,
+                title_from: _,
                 model,
                 effort,
                 cols,

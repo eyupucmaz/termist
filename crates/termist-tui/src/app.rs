@@ -1608,6 +1608,7 @@ impl App {
             project,
             kind,
             cwd,
+            title_from: None,
             prompt: None,
             model: None,
             effort: None,
@@ -2426,6 +2427,7 @@ impl App {
                 kind: SessionKind::Agent { harness },
                 cwd: q.worktree.map(|(path, _)| path),
                 prompt,
+                title_from: None,
                 model: q.launch.model,
                 effort: q.launch.effort,
                 cols: cols.max(20),
@@ -3561,6 +3563,7 @@ impl App {
                 args: vec![],
             },
             cwd: Some(folder),
+            title_from: None,
             prompt: None,
             model: None,
             effort: None,
@@ -4727,6 +4730,7 @@ mod tests {
                     harness: Harness::Claude
                 },
                 cwd: None,
+                title_from: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -4763,6 +4767,7 @@ mod tests {
                     harness: Harness::Codex
                 },
                 cwd: None,
+                title_from: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -5160,6 +5165,7 @@ mod tests {
                         harness: Harness::Claude
                     },
                     cwd: None,
+                    title_from: None,
                     prompt: Some("fix the login redirect\nand add a test".into()),
                     model: Some("opus".into()),
                     effort: Some("max".into()),
