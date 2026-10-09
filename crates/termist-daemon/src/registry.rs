@@ -134,6 +134,9 @@ struct Session {
     title_cancelled: bool,
     /// The agent that started it through `termist spawn`.
     spawned_by: Option<SessionId>,
+    /// Where it ran before `termist worktree` moved it: the agent (Claude's shell goes
+    /// back there after each command) may still say it is there.
+    moved_from: Option<PathBuf>,
 }
 
 impl Session {
@@ -152,6 +155,7 @@ impl Session {
             idle_title_since: None,
             title_cancelled: false,
             spawned_by: None,
+            moved_from: None,
         }
     }
 }
@@ -1368,14 +1372,11 @@ impl Registry {
                     around,
                 },
             ),
-            // Agents move into worktrees with the next step of this change.
-            ClientRequest::MoveSession { ticket, .. } => self.send(
-                client,
-                ServerEvent::MoveFailed {
-                    ticket,
-                    message: "this daemon cannot move a session yet".into(),
-                },
-            ),
+            ClientRequest::MoveSession {
+                ticket,
+                session,
+                branch,
+            } => self.move_session(client, ticket, session, branch),
             ClientRequest::SetWorktreeShown { path, shown } => {
                 let kept = self.store.worktrees().unwrap_or_default();
                 if let Some(w) = kept.iter().find(|w| w.path == path) {
@@ -1512,7 +1513,7 @@ impl Registry {
                     self.watch_transcript(id, Path::new(path));
                 }
                 if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-                    self.moved(id, PathBuf::from(cwd));
+                    self.reported_folder(id, PathBuf::from(cwd));
                 }
                 if event == "UserPromptSubmit" {
                     self.skip_transcript_so_far(id);
@@ -2217,6 +2218,7 @@ impl Registry {
         s.activity_broadcast = None;
         s.idle_title_since = None;
         s.title_cancelled = false;
+        s.moved_from = None; // it starts where it was moved to
         s.info.title = None; // the new process sets its own
         s.info.status = AgentStatus::Fresh;
         s.resumable = resume.is_some();

@@ -38,6 +38,11 @@ pub struct Start {
 #[derive(Debug)]
 pub enum After {
     Spawn(Box<Start>),
+    Move {
+        client: ClientId,
+        ticket: u64,
+        session: SessionId,
+    },
 }
 
 /// A worktree made (or found) for an agent's request, on a blocking thread.
@@ -220,6 +225,102 @@ impl Registry {
                     },
                 ),
             },
+            After::Move {
+                client,
+                ticket,
+                session,
+            } => match result {
+                Ok(made) => {
+                    if let Some(project) = self.session(session).map(|s| s.info.project) {
+                        let id = self.repo_id(project, &repo);
+                        self.keep_worktree(project, id, &repo, &made);
+                        self.send_worktrees(project);
+                        self.scan_worktrees();
+                    }
+                    self.moved_in(client, ticket, session, made);
+                }
+                Err(why) => self.send(
+                    client,
+                    ServerEvent::MoveFailed {
+                        ticket,
+                        message: format!("couldn't make a worktree · {why}"),
+                    },
+                ),
+            },
+        }
+    }
+
+    /// `termist worktree`: the card goes on in `branch`'s worktree of its repo, made when
+    /// there is none. The agent is not restarted.
+    pub(super) fn move_session(
+        &mut self,
+        client: ClientId,
+        ticket: u64,
+        session: SessionId,
+        branch: String,
+    ) {
+        let asked = match self.session(session) {
+            None => Err("the card that asked is gone".to_string()),
+            Some(s) => {
+                let folder = s.info.cwd.clone();
+                let after = After::Move {
+                    client,
+                    ticket,
+                    session,
+                };
+                self.make_worktree(&folder, branch, after)
+            }
+        };
+        if let Err(message) = asked {
+            self.send(client, ServerEvent::MoveFailed { ticket, message });
+        }
+    }
+
+    /// The card is in the worktree now; every client hears of it.
+    fn moved_in(
+        &mut self,
+        client: ClientId,
+        ticket: u64,
+        session: SessionId,
+        made: crate::worktrees::Made,
+    ) {
+        let Some(s) = self.session_mut(session) else {
+            let message = "the card that asked is gone".to_string();
+            self.send(client, ServerEvent::MoveFailed { ticket, message });
+            return;
+        };
+        // Already in it (a folder of it, too): nothing moves.
+        let inside = place::resolved(&s.info.cwd).starts_with(place::resolved(&made.path));
+        if !inside {
+            s.moved_from = Some(s.info.cwd.clone());
+        }
+        let name = s.info.display_name().to_string();
+        if !inside {
+            self.moved(session, made.path.clone());
+        }
+        self.send(
+            client,
+            ServerEvent::Moved {
+                ticket,
+                path: made.path,
+                branch: made.branch.clone(),
+                new_from: made.new.then_some(made.base),
+            },
+        );
+        self.broadcast(ServerEvent::Notice {
+            text: format!("{name} moved to {}", made.branch),
+        });
+    }
+
+    /// The folder an agent's hook says it works in; where `termist worktree` moved it
+    /// from is no move back.
+    pub(super) fn reported_folder(&mut self, id: SessionId, cwd: PathBuf) {
+        let back = self
+            .session(id)
+            .and_then(|s| s.moved_from.as_ref())
+            .is_some_and(|from| place::resolved(from) == place::resolved(&cwd));
+        if !back {
+            self.moved(id, cwd);
         }
     }
 
@@ -501,6 +602,95 @@ mod tests {
             "{failed:?}"
         );
         assert_eq!(failed[1], "a task is needed: termist spawn \"<task>\"");
+    }
+
+    #[tokio::test]
+    async fn an_agent_goes_on_in_a_worktree_and_its_old_folder_does_not_take_it_back() {
+        let (tmp, mut reg, p, _) = site();
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CreateSession {
+                project: p.id,
+                kind: SessionKind::Agent {
+                    harness: Harness::Claude,
+                },
+                cwd: None,
+                prompt: Some("fix the login".into()),
+                title_from: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let claude = reg.sessions[1].info.id;
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        let move_to = |reg: &mut Registry, ticket, session| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::MoveSession {
+                    ticket,
+                    session,
+                    branch: "fix-login".into(),
+                },
+            })
+        };
+        move_to(&mut reg, 1, claude);
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let want = place::resolved(tmp.path())
+            .join("site-worktrees")
+            .join("fix-login");
+        let events = drain(&mut rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ServerEvent::Moved { ticket: 1, path, branch, new_from: Some(base) }
+                    if place::resolved(path) == want && branch == "fix-login" && base == "main"
+            )),
+            "{events:?}"
+        );
+        assert!(events.contains(&ServerEvent::Notice {
+            text: "Fix Login moved to fix-login".into()
+        }));
+        let card = |reg: &Registry| place::resolved(&reg.session(claude).unwrap().info.cwd);
+        assert_eq!(card(&reg), want);
+        // Claude's shell goes back to where it started after each command: no move back.
+        let said = |reg: &mut Registry, cwd: &Path| {
+            let payload = serde_json::json!({ "cwd": cwd, "session_id": "a1" });
+            reg.hook(claude, Harness::Claude, "PreToolUse", &payload);
+        };
+        said(&mut reg, &p.path);
+        assert_eq!(card(&reg), want);
+        said(&mut reg, &want.join("src"));
+        assert_eq!(card(&reg), want.join("src"), "anywhere else is a move");
+        // Moved again into the same worktree: said, not moved twice.
+        drain(&mut rx);
+        move_to(&mut reg, 2, claude);
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        assert!(drain(&mut rx).iter().any(|e| matches!(
+            e,
+            ServerEvent::Moved {
+                ticket: 2,
+                new_from: None,
+                ..
+            }
+        )));
+        assert_eq!(
+            card(&reg),
+            want.join("src"),
+            "already in it: stays where it is"
+        );
+        said(&mut reg, &p.path);
+        assert_eq!(card(&reg), want.join("src"));
+        // A card that is gone.
+        move_to(&mut reg, 3, SessionId::new());
+        assert!(drain(&mut rx).contains(&ServerEvent::MoveFailed {
+            ticket: 3,
+            message: "the card that asked is gone".into()
+        }));
     }
 
     #[tokio::test]
