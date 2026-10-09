@@ -36,6 +36,13 @@ pub enum Overlay {
         picker: ListPicker<String>,
         deleting: Option<String>,
     },
+    /// `Ctrl+S` in the new-task prompt, or `r` on a preset: its name. `replace` once
+    /// asked whether to replace the preset of that name.
+    PresetName {
+        input: TextInput,
+        name_for: NameFor,
+        replace: bool,
+    },
     /// `W`: the project's worktrees, by folder.
     Worktrees(ListPicker<std::path::PathBuf>),
     /// `f` and `F`: a file of the repo, or the lines some text is on.
@@ -178,12 +185,20 @@ impl Overlay {
         match self {
             Overlay::QuickPrompt(q) => Some(&mut q.input),
             Overlay::ModelName(input)
+            | Overlay::PresetName { input, .. }
             | Overlay::FollowUp { input, .. }
             | Overlay::Rename { input, .. } => Some(input),
             Overlay::Compose(c) => Some(&mut c.input),
             _ => None,
         }
     }
+}
+
+/// What a name is asked for: the preset to save, or the preset to rename.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameFor {
+    Save(termist_core::config::Preset),
+    Rename(String),
 }
 
 /// Where review threads go: a card on the pull request's branch, or a new agent.

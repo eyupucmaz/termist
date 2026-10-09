@@ -428,6 +428,15 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             prompt_box(f, t, body, &format!("follow-up · {name}"), input, None, top);
         }
         Overlay::Rename { input, .. } => text_box(f, t, body, "rename", 48, input, top),
+        Overlay::PresetName {
+            input, name_for, ..
+        } => {
+            let title = match name_for {
+                crate::overlay::NameFor::Save(_) => "save preset as",
+                crate::overlay::NameFor::Rename(_) => "rename preset",
+            };
+            text_box(f, t, body, title, 40, input, top)
+        }
         Overlay::Palette(picker) => {
             let rows = picker
                 .visible()
@@ -1126,12 +1135,13 @@ pub fn hint(overlay: &Overlay) -> &'static str {
         Overlay::Presets {
             deleting: Some(_), ..
         } => "y delete it · any key: keep it",
+        Overlay::PresetName { .. } => "Enter keep this name · Esc cancel",
         Overlay::Presets { .. } => {
             "j/k choose · Enter new task with it · r rename · d delete · Esc close"
         }
         Overlay::Harness(_) => "j/k choose · Enter start · 1-3 pick · Esc cancel",
         Overlay::QuickPrompt(_) => {
-            "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"
+            "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · ^S save preset · Esc cancel"
         }
         Overlay::Model(m) if m.efforts().is_empty() => {
             "type to filter · ↑↓ model · Enter choose · Esc back"
