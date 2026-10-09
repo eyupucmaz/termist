@@ -69,19 +69,47 @@ pub fn trust_hash(event: &str, command: &str, timeout: u64) -> String {
 
 /// A TOML basic string.
 pub fn toml_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// What a Codex card is started with.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Launched<'a> {
+    pub resume: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    /// `--add-dir`: a folder it may write in besides its own.
+    pub also: Option<&'a Path>,
+    /// Added to its instructions (`developer_instructions`).
+    pub teach: Option<&'a str>,
 }
 
 /// `codex [resume <id>] [-m <model>] [-c model_reasoning_effort="<level>"]
 /// -c hooks.… -c hooks.state=… [-- prompt]`. The effort flag is not a hook, so it does
 /// not change the trust hashes.
-pub fn args(
-    exe: &Path,
-    resume: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    prompt: Option<&str>,
-) -> Vec<String> {
+pub fn args(exe: &Path, launched: Launched<'_>) -> Vec<String> {
+    let Launched {
+        resume,
+        model,
+        effort,
+        prompt,
+        also,
+        teach,
+    } = launched;
     let mut args = Vec::new();
     if let Some(id) = resume {
         args.extend(["resume".to_string(), id.to_string()]);
@@ -120,6 +148,15 @@ pub fn args(
     // review screen. This form leaves the user's own trust entries untouched.
     args.push("-c".into());
     args.push(format!("hooks.state={{{}}}", state_entries.join(", ")));
+    if let Some(dir) = also {
+        args.extend(["--add-dir".to_string(), dir.display().to_string()]);
+    }
+    if let Some(words) = teach {
+        args.extend([
+            "-c".to_string(),
+            format!("developer_instructions={}", toml_string(words)),
+        ]);
+    }
     // After `--` the prompt is never read as a flag or a command, even when it starts
     // with `-` or is one word like `login`.
     if resume.is_none()
@@ -199,7 +236,13 @@ mod tests {
     #[test]
     fn every_hook_is_paired_with_its_trust_entry() {
         let exe = Path::new("/usr/local/bin/termist");
-        let args = args(exe, None, None, None, Some("fix it"));
+        let args = args(
+            exe,
+            Launched {
+                prompt: Some("fix it"),
+                ..Default::default()
+            },
+        );
         assert!(!args.iter().any(|a| a.contains("dangerously")));
         assert!(
             !args.iter().any(|a| a.contains(".trusted_hash=")),
@@ -248,13 +291,44 @@ mod tests {
     }
 
     #[test]
+    fn the_worktrees_folder_and_termist_s_words_come_before_the_prompt() {
+        let args = args(
+            Path::new("/t"),
+            Launched {
+                prompt: Some("go"),
+                also: Some(Path::new("/w/site-worktrees")),
+                teach: Some("You run inside termist.\nUse \"termist spawn\"."),
+                ..Default::default()
+            },
+        );
+        let at = |a: &str| args.iter().position(|x| x == a).unwrap();
+        assert_eq!(args[at("--add-dir") + 1], "/w/site-worktrees");
+        assert_eq!(
+            args[at("--add-dir") + 3],
+            r#"developer_instructions="You run inside termist.\nUse \"termist spawn\".""#
+        );
+        assert_eq!(&args[args.len() - 2..], ["--", "go"]);
+        // Resumed, it is told again.
+        let resumed = self::args(
+            Path::new("/t"),
+            Launched {
+                resume: Some("019a"),
+                teach: Some("words"),
+                ..Default::default()
+            },
+        );
+        assert!(resumed.contains(&r#"developer_instructions="words""#.to_string()));
+    }
+
+    #[test]
     fn resume_comes_first_and_drops_the_prompt() {
         let args = args(
             Path::new("/t"),
-            Some("019a-uuid"),
-            None,
-            None,
-            Some("ignored"),
+            Launched {
+                resume: Some("019a-uuid"),
+                prompt: Some("ignored"),
+                ..Default::default()
+            },
         );
         assert_eq!(&args[..2], ["resume", "019a-uuid"]);
         assert!(!args.contains(&"ignored".to_string()));
@@ -264,10 +338,12 @@ mod tests {
     fn model_and_effort_come_before_the_hooks_and_the_prompt_stays_last() {
         let args = args(
             Path::new("/t"),
-            Some("019a-uuid"),
-            Some("gpt-5"),
-            Some("high"),
-            None,
+            Launched {
+                resume: Some("019a-uuid"),
+                model: Some("gpt-5"),
+                effort: Some("high"),
+                ..Default::default()
+            },
         );
         assert_eq!(
             &args[..6],
@@ -280,7 +356,14 @@ mod tests {
                 "model_reasoning_effort=\"high\""
             ]
         );
-        let args = self::args(Path::new("/t"), None, Some("gpt-5"), None, Some("go"));
+        let args = self::args(
+            Path::new("/t"),
+            Launched {
+                model: Some("gpt-5"),
+                prompt: Some("go"),
+                ..Default::default()
+            },
+        );
         assert_eq!(&args[..2], ["-m", "gpt-5"]);
         assert!(!args.iter().any(|a| a.contains("model_reasoning_effort")));
         assert_eq!(args.last().map(String::as_str), Some("go"));
@@ -289,6 +372,7 @@ mod tests {
     #[test]
     fn toml_strings_escape_quotes_and_backslashes() {
         assert_eq!(toml_string(r#"C:\a "b""#), r#""C:\\a \"b\"""#);
+        assert_eq!(toml_string("a\nb\tc"), r#""a\nb\tc""#);
     }
 
     #[test]

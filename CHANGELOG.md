@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Agents drive termist.
+
+### Added
+
+- **`termist spawn`, `termist worktree`, `termist open`**: an agent asked to work in parallel starts
+  another agent (beside it, or in a branch's worktree with `--worktree`; `--wait` waits for it), moves
+  its own card into a worktree without a restart, or opens a file in your editor. Every agent is told of
+  them in a few lines of its system prompt; `[agents] teach = false` (or the settings screen) turns that
+  off. An agent has at most four of its own running (`[agents] max_spawned`), and those start none. A
+  toast says what an agent did. The commands work from a terminal too.
+- Agents start with their repo's worktrees folder open to them (Claude and Codex `--add-dir`, OpenCode
+  through its config), made beside the repo when there is none.
+
+### Changed
+
+- A worktree of a repo inside the project folder is a place for its cards even when the repo is not on
+  GitHub.
+
+### Updating
+
+This version changes how the TUI and the daemon talk, and what the daemon keeps. Run `termist update`,
+then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.2.4 - 2026-10-09
 
 Your agent setups, kept.

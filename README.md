@@ -225,6 +225,22 @@ postfix = "\nThen list what to fix, by file."
 A card started with a task is named after it (`Fix Login Redirect` rather than `codex-4`); with a preset,
 after what you typed.
 
+### Agents driving termist
+
+Ask an agent to work in parallel, and it can do it through termist: every agent is told of three
+commands (a few lines added to its system prompt; `[agents] teach = false` turns them off).
+
+- `termist spawn "write the tests"` starts another agent on a task, beside the card that asked, or with
+  `--worktree fix-login` in that branch's worktree. `--harness`, `--model`, `--effort` and `--preset`
+  choose it; `--wait` waits for it and exits 0 when it is done, 2 when it waits for you, 1 when it
+  stopped. An agent has at most four of its own running (`[agents] max_spawned`), and those start none.
+- `termist worktree fix-login` moves the card into that branch's worktree without restarting the agent.
+- `termist open src/main.rs:42` opens a file in your editor.
+
+They work from a terminal too, in a folder of an open project. Agents start with their repo's worktrees
+folder (`<repo>-worktrees`, made when there is none) open to them, so one moved there works without
+asking.
+
 ### Tools
 
 `O` opens the card's folder in your editor, and a file found with `f` (a file of the repo) or `F` (the

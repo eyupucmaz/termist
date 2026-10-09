@@ -621,6 +621,65 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_requests_round_trip() {
+        let mut dec = FrameDecoder::default();
+        let session = SessionId::new();
+        let requests = [
+            ClientRequest::Spawn {
+                ticket: 1,
+                from: Some(session),
+                cwd: "/w/site".into(),
+                task: "write the tests".into(),
+                harness: Some(Harness::Codex),
+                model: None,
+                effort: Some("high".into()),
+                worktree: Some("fix-login".into()),
+                around: Some(("Review: ".into(), "\nThen list.".into())),
+            },
+            ClientRequest::MoveSession {
+                ticket: 2,
+                session: Some(session),
+                cwd: "/w/site".into(),
+                branch: "fix-login".into(),
+            },
+        ];
+        for req in requests {
+            dec.push(&encode_frame(&req).unwrap());
+            assert_eq!(dec.next::<ClientRequest>().unwrap(), Some(req));
+        }
+        let events = [
+            ServerEvent::Spawned {
+                ticket: 1,
+                session,
+                name: "Write The Tests".into(),
+                harness: Harness::Codex,
+                place: "fix-login".into(),
+            },
+            ServerEvent::SpawnFailed {
+                ticket: 1,
+                message: "Fix Login has 4 agents running".into(),
+            },
+            ServerEvent::Moved {
+                ticket: 2,
+                path: "/w/site-worktrees/fix-login".into(),
+                branch: "fix-login".into(),
+                new_from: Some("origin/main".into()),
+            },
+            ServerEvent::MoveFailed {
+                ticket: 2,
+                message: "not in a git repo".into(),
+            },
+            ServerEvent::Notice {
+                text: "Fix Login started Write The Tests".into(),
+            },
+        ];
+        for event in events {
+            dec.push(&encode_frame(&event).unwrap());
+            assert_eq!(dec.next::<ServerEvent>().unwrap(), Some(event));
+        }
+    }
+
+    #[test]
     fn the_worktrees_of_their_own_round_trip() {
         use crate::github::RepoId;
         use crate::model::{PrEnd, Stat, WorktreeInfo};

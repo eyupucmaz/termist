@@ -10,6 +10,7 @@ use crate::worktrees::Listed;
 use crate::{claude, codex, opencode};
 
 mod ayna;
+mod kaptan;
 use anyhow::{Context, bail};
 pub use ayna::Mirrored;
 use serde_json::Value;
@@ -50,6 +51,8 @@ struct NewSession {
     model: Option<String>,
     effort: Option<String>,
     size: (u16, u16),
+    /// The agent that asks for it (`termist spawn`).
+    spawned_by: Option<SessionId>,
 }
 
 /// A repo's worktrees as a scan found them, each with what its branch changed; `None`
@@ -129,6 +132,11 @@ struct Session {
     /// Claude: the card is `Finished` only because its title looked idle. That is a
     /// guess; a turn that goes on after it undoes it.
     title_cancelled: bool,
+    /// The agent that started it through `termist spawn`.
+    spawned_by: Option<SessionId>,
+    /// Where it ran before `termist worktree` moved it: the agent (Claude's shell goes
+    /// back there after each command) may still say it is there.
+    moved_from: Option<PathBuf>,
 }
 
 impl Session {
@@ -146,6 +154,8 @@ impl Session {
             opencode_children: HashSet::new(),
             idle_title_since: None,
             title_cancelled: false,
+            spawned_by: None,
+            moved_from: None,
         }
     }
 }
@@ -173,6 +183,8 @@ pub struct Registry {
     last_rescan: Option<std::time::Instant>,
     /// Looks a CLI up (PATH, then the login shell).
     find_program: fn(&str) -> Option<PathBuf>,
+    /// Where `[agents]` is read from, at each start; `None`: its defaults.
+    pub config_paths: Option<termist_platform::Paths>,
     /// The models each CLI offers, and when they were read.
     catalogs: HashMap<Harness, (Vec<ModelInfo>, std::time::Instant)>,
     /// Clients that asked while a CLI's list was being read; each gets it when it comes.
@@ -209,6 +221,9 @@ pub struct Registry {
     worktrees_sent: HashMap<ProjectId, Vec<termist_core::WorktreeInfo>>,
     made_tx: UnboundedSender<Made>,
     made_rx: Option<UnboundedReceiver<Made>>,
+    /// Worktrees made for an agent's `termist spawn` or `termist worktree`.
+    ready_tx: UnboundedSender<kaptan::Ready>,
+    ready_rx: Option<UnboundedReceiver<kaptan::Ready>>,
     /// Fetches before a new branch is made (a stand-in in tests).
     fetch: fn(&Path, &[&str]) -> Result<String, String>,
     removed_tx: UnboundedSender<Removed>,
@@ -251,6 +266,7 @@ impl Registry {
             .max()
             .unwrap_or(0);
         let last_launch = store.last_launch();
+        let spawned = store.spawned_by().unwrap_or_default();
         let (rescans, rescans_rx) = tokio::sync::mpsc::unbounded_channel();
         let (catalog_tx, catalog_rx) = tokio::sync::mpsc::unbounded_channel();
         let github = GitHub::new(&store);
@@ -258,6 +274,7 @@ impl Registry {
         let (places_tx, places_rx) = tokio::sync::mpsc::unbounded_channel();
         let (scans_tx, scans_rx) = tokio::sync::mpsc::unbounded_channel();
         let (made_tx, made_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::mpsc::unbounded_channel();
         let (removed_tx, removed_rx) = tokio::sync::mpsc::unbounded_channel();
         let (mirror_tx, mirror_rx) = tokio::sync::mpsc::unbounded_channel();
         let gh_bin = launcher.config.gh_bin.clone();
@@ -275,7 +292,12 @@ impl Registry {
             projects,
             sessions: sessions
                 .into_iter()
-                .map(|StoredSession { info, resumable }| Session::new(info, None, resumable))
+                .map(|StoredSession { info, resumable }| {
+                    let by = spawned.get(&info.id).copied();
+                    let mut s = Session::new(info, None, resumable);
+                    s.spawned_by = by;
+                    s
+                })
                 .collect(),
             last_launch,
             colors: TermColors::default(),
@@ -288,6 +310,7 @@ impl Registry {
             rescanning: false,
             last_rescan: None,
             find_program: crate::resolve::find_program,
+            config_paths: None,
             catalogs: HashMap::new(),
             catalog_waiters: HashMap::new(),
             catalog_tx,
@@ -311,6 +334,8 @@ impl Registry {
             worktrees_sent: HashMap::new(),
             made_tx,
             made_rx: Some(made_rx),
+            ready_tx,
+            ready_rx: Some(ready_rx),
             fetch: crate::worktrees::fetch,
             removed_tx,
             removed_rx: Some(removed_rx),
@@ -365,6 +390,20 @@ impl Registry {
     /// Reads every open project's repos' worktrees on blocking threads; `worktrees_scanned`
     /// takes each answer.
     fn scan_worktrees(&mut self) {
+        // A worktree of a repo not on GitHub is not scanned: forgotten once its folder is gone.
+        let mut gone = HashSet::new();
+        for w in self.store.worktrees().unwrap_or_default() {
+            if w.repo.is_none() && !w.path.exists() {
+                if let Err(e) = self.store.delete_worktree(&w.path) {
+                    tracing::warn!(error = %e, "could not forget a worktree");
+                }
+                self.worktree_stats.remove(&w.path);
+                gone.insert(w.project);
+            }
+        }
+        for project in gone {
+            self.send_worktrees(project);
+        }
         let kept = self.store.worktrees().unwrap_or_default();
         // The pull requests kept worktrees were on: how the ones no longer open ended.
         let prs: Vec<termist_core::github::PrRef> = kept
@@ -520,39 +559,46 @@ impl Registry {
         });
     }
 
+    /// Keeps a worktree termist made of the repo at `own` as termist's own, shown.
+    fn keep_worktree(
+        &mut self,
+        project: ProjectId,
+        repo: Option<termist_core::github::RepoId>,
+        own: &Path,
+        made: &crate::worktrees::Made,
+    ) {
+        self.worktree_epoch += 1;
+        // A branch already open in the repo's own folder is no worktree to keep.
+        if place::resolved(&made.path) == place::resolved(own) {
+            return;
+        }
+        let kept = StoredWorktree {
+            project,
+            repo,
+            path: made.path.clone(),
+            branch: Some(made.branch.clone()),
+            base: Some(made.base.clone()),
+            pr: None,
+            made_by_termist: true,
+            shown: true,
+        };
+        if let Err(e) = self.store.upsert_worktree(&kept) {
+            tracing::warn!(error = %e, "could not keep a worktree");
+        }
+    }
+
     /// Keeps the worktree made, tells the client, and reads the worktrees again.
     pub fn worktree_made(&mut self, m: Made) {
         match m.result {
-            Ok(crate::worktrees::Made {
-                path,
-                branch,
-                base,
-                note,
-            }) => {
-                // A branch already open in the repo's own folder is no worktree to keep.
-                self.worktree_epoch += 1;
-                if place::resolved(&path) != place::resolved(&m.own) {
-                    let made = StoredWorktree {
-                        project: m.project,
-                        repo: Some(m.repo),
-                        path: path.clone(),
-                        branch: Some(branch.clone()),
-                        base: Some(base),
-                        pr: None,
-                        made_by_termist: true,
-                        shown: true,
-                    };
-                    if let Err(e) = self.store.upsert_worktree(&made) {
-                        tracing::warn!(error = %e, "could not keep a worktree");
-                    }
-                }
+            Ok(made) => {
+                self.keep_worktree(m.project, Some(m.repo), &m.own, &made);
                 self.send(
                     m.client,
                     ServerEvent::WorktreeMade {
                         ticket: m.ticket,
-                        path,
-                        branch,
-                        note,
+                        path: made.path,
+                        branch: made.branch,
+                        note: made.note,
                     },
                 );
                 self.send_worktrees(m.project);
@@ -585,15 +631,22 @@ impl Registry {
             .github
             .repo_views(w.project)
             .into_iter()
-            .find(|v| Some(v.id) == w.repo)
-            .ok_or("its repo is not loaded yet")?;
+            .find(|v| Some(v.id) == w.repo);
+        if w.repo.is_some() && view.is_none() {
+            return Err("its repo is not loaded yet".into());
+        }
+        // A repo not on GitHub (`termist worktree`): the one the worktree's `.git` names.
+        let repo = match &view {
+            Some(v) => v.path.clone(),
+            None => place::main_of(&path),
+        };
         let here = place::resolved(&path);
         let own = self
             .projects
             .iter()
             .any(|p| place::resolved(&p.path) == here)
-            || place::resolved(&view.path) == here
-            || view.main == here;
+            || place::resolved(&repo) == here
+            || view.as_ref().is_some_and(|v| v.main == here);
         if own {
             return Err("the project's own folder is not a worktree".into());
         }
@@ -608,7 +661,7 @@ impl Registry {
         let (tx, project) = (self.removed_tx.clone(), w.project);
         tokio::task::spawn_blocking(move || {
             let result =
-                crate::worktrees::remove(&view.path, &path, force, &crate::github::worktree::git);
+                crate::worktrees::remove(&repo, &path, force, &crate::github::worktree::git);
             let _ = tx.send(Removed {
                 client,
                 project,
@@ -1153,6 +1206,7 @@ impl Registry {
                     model,
                     effort,
                     size: (cols, rows),
+                    spawned_by: None,
                 };
                 if let Err(e) = self.create_session_named(new) {
                     self.send(
@@ -1315,6 +1369,36 @@ impl Registry {
                 branch,
                 ticket,
             } => self.create_worktree(client, project, repo, branch, ticket),
+            ClientRequest::Spawn {
+                ticket,
+                from,
+                cwd,
+                task,
+                harness,
+                model,
+                effort,
+                worktree,
+                around,
+            } => self.spawn(
+                client,
+                kaptan::Asked {
+                    ticket,
+                    from,
+                    cwd,
+                    task,
+                    harness,
+                    model,
+                    effort,
+                    worktree,
+                    around,
+                },
+            ),
+            ClientRequest::MoveSession {
+                ticket,
+                session,
+                cwd,
+                branch,
+            } => self.move_session(client, ticket, session, cwd, branch),
             ClientRequest::SetWorktreeShown { path, shown } => {
                 let kept = self.store.worktrees().unwrap_or_default();
                 if let Some(w) = kept.iter().find(|w| w.path == path) {
@@ -1451,7 +1535,7 @@ impl Registry {
                     self.watch_transcript(id, Path::new(path));
                 }
                 if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-                    self.moved(id, PathBuf::from(cwd));
+                    self.reported_folder(id, PathBuf::from(cwd));
                 }
                 if event == "UserPromptSubmit" {
                     self.skip_transcript_so_far(id);
@@ -1886,12 +1970,14 @@ impl Registry {
             model,
             effort,
             size,
+            spawned_by: None,
         })
+        .map(|_| ())
     }
 
     /// A new session; an agent started with a prompt is named after it (or after
     /// `title_from`), else `<kind>-<n>`.
-    fn create_session_named(&mut self, new: NewSession) -> anyhow::Result<()> {
+    fn create_session_named(&mut self, new: NewSession) -> anyhow::Result<SessionId> {
         let NewSession {
             project,
             kind,
@@ -1901,6 +1987,7 @@ impl Registry {
             model,
             effort,
             size: (cols, rows),
+            spawned_by,
         } = new;
         let named = match &kind {
             SessionKind::Agent { .. } => title_from
@@ -1953,6 +2040,7 @@ impl Registry {
             _ => kind.clone(),
         };
         let id = SessionId::new();
+        let (teach, also) = self.agent_extras(&started, &cwd);
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &started,
@@ -1963,11 +2051,16 @@ impl Registry {
             cols,
             rows,
             resume: None,
+            teach,
+            also: also.as_deref(),
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
             .with_context(|| format!("could not start {} ({program})", kind.label()))?;
-        self.remember_launch(&kind, prompt.as_deref(), model.as_deref());
+        // What an agent asked for is not the user's prompt to recall.
+        if spawned_by.is_none() {
+            self.remember_launch(&kind, prompt.as_deref(), model.as_deref());
+        }
         self.created += 1;
         let info = SessionInfo {
             id,
@@ -1985,12 +2078,54 @@ impl Registry {
             cwd: cwd.clone(),
             place: None,
         };
-        self.sessions
-            .push(Session::new(info.clone(), Some(cmd), false));
+        let mut session = Session::new(info.clone(), Some(cmd), false);
+        session.spawned_by = spawned_by;
+        self.sessions.push(session);
         self.persist(id);
+        if let Some(by) = spawned_by
+            && let Err(e) = self.store.set_spawned_by(id, by)
+        {
+            tracing::warn!(session = %id, error = %e, "could not keep who started it");
+        }
         self.broadcast(ServerEvent::SessionUpdated(info));
         self.read_place(cwd);
-        Ok(())
+        Ok(id)
+    }
+
+    /// `[agents]` as config.toml says now.
+    fn agents_config(&self) -> termist_core::config::AgentsConfig {
+        self.config_paths
+            .as_ref()
+            .map(|p| termist_platform::config_file::load(p).0.agents)
+            .unwrap_or_default()
+    }
+
+    /// What an agent starting in `cwd` is told and where else it may work: termist's
+    /// words when `[agents] teach` is on, and its repo's worktrees folder, made when there
+    /// is none (a new worktree goes there, and the agent may be moved into it). Shells
+    /// and tools get neither.
+    fn agent_extras(
+        &self,
+        kind: &SessionKind,
+        cwd: &Path,
+    ) -> (Option<&'static str>, Option<PathBuf>) {
+        if !matches!(kind, SessionKind::Agent { .. }) {
+            return (None, None);
+        }
+        let teach = self
+            .agents_config()
+            .teach
+            .then_some(termist_core::agents::TEACH);
+        let also = place::repo_top(cwd)
+            .map(|top| crate::github::worktree::home(&place::main_of(&top)))
+            .filter(|home| match std::fs::create_dir_all(home) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, folder = %home.display(), "could not make the worktrees folder");
+                    false
+                }
+            });
+        (teach, also)
     }
 
     /// `dir` when a session of the project may run there: a folder in the project, or a
@@ -2008,11 +2143,17 @@ impl Registry {
             return Ok(dir);
         }
         let facts = place::read(&dir, &self.git);
+        let here = place::resolved(root);
+        // The project's own repo, when the project is a folder inside it.
+        let around = place::repo_top(root).map(|top| place::resolved(&place::main_of(&top)));
         let ours = facts.as_ref().is_some_and(|f| {
-            self.github
-                .repo_views(project)
-                .iter()
-                .any(|r| r.main == f.main)
+            f.main.starts_with(&here)
+                || around.as_ref() == Some(&f.main)
+                || self
+                    .github
+                    .repo_views(project)
+                    .iter()
+                    .any(|r| r.main == f.main)
         });
         if !ours {
             bail!("{} is not a folder of this project", dir.display());
@@ -2079,6 +2220,7 @@ impl Registry {
         } else {
             None
         };
+        let (teach, also) = self.agent_extras(&kind, &cwd);
         let launch = self.launcher.launch(LaunchRequest {
             id,
             kind: &kind,
@@ -2089,6 +2231,8 @@ impl Registry {
             cols,
             rows,
             resume: resume.as_deref(),
+            teach,
+            also: also.as_deref(),
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
@@ -2099,6 +2243,7 @@ impl Registry {
         s.activity_broadcast = None;
         s.idle_title_since = None;
         s.title_cancelled = false;
+        s.moved_from = None; // it starts where it was moved to
         s.info.title = None; // the new process sets its own
         s.info.status = AgentStatus::Fresh;
         s.resumable = resume.is_some();
@@ -2185,6 +2330,7 @@ pub async fn run(
     let mut places = reg.places_rx.take().expect("a registry runs once");
     let mut scans = reg.scans_rx.take().expect("a registry runs once");
     let mut made = reg.made_rx.take().expect("a registry runs once");
+    let mut ready = reg.ready_rx.take().expect("a registry runs once");
     let mut removed = reg.removed_rx.take().expect("a registry runs once");
     let mut mirrored = reg.mirror_rx.take().expect("a registry runs once");
     let mut github_beat = tokio::time::interval(Duration::from_secs(1));
@@ -2202,6 +2348,7 @@ pub async fn run(
             Some(read) = places.recv() => reg.place_read(read),
             Some(scan) = scans.recv() => reg.worktrees_scanned(scan),
             Some(m) = made.recv() => reg.worktree_made(m),
+            Some(r) = ready.recv() => reg.worktree_ready(r),
             Some(r) = removed.recv() => reg.worktree_removed(r),
             Some(m) = mirrored.recv() => reg.mirrored(m, std::time::Instant::now()),
             _ = github_beat.tick() => {
@@ -2728,6 +2875,40 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn an_agent_in_a_repo_is_told_of_termist_and_may_work_in_its_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("site");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let mut reg = registry_with(&project(), &[]);
+        let claude = SessionKind::Agent {
+            harness: Harness::Claude,
+        };
+        // Beside the repo as git names it (macOS' /var is /private/var).
+        let home = place::resolved(tmp.path()).join("site-worktrees");
+        assert_eq!(
+            reg.agent_extras(&claude, &repo.join("src")),
+            (Some(termist_core::agents::TEACH), Some(home.clone()))
+        );
+        assert!(home.is_dir(), "made, so the agent may be let in");
+        // Not in a repo: told, but no folder.
+        let plain = tmp.path().join("notes");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(reg.agent_extras(&claude, &plain).1, None);
+        assert_eq!(
+            reg.agent_extras(&SessionKind::Shell, &repo),
+            (None, None),
+            "a shell is told nothing"
+        );
+        // `[agents] teach = false`: not told.
+        let paths = termist_platform::Paths::under(tmp.path().join("home"));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "[agents]\nteach = false\n").unwrap();
+        reg.config_paths = Some(paths);
+        assert_eq!(reg.agent_extras(&claude, &repo), (None, Some(home)));
+    }
+
     #[tokio::test]
     async fn an_agent_started_with_a_prompt_is_named_after_it() {
         let p = project();

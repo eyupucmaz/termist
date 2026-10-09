@@ -1,0 +1,1024 @@
+//! Kaptan in the registry: an agent starts another agent (`termist spawn`) or goes on in
+//! a worktree (`termist worktree`), through termist; a worktree it needs is made on a
+//! blocking thread first.
+use super::*;
+
+/// A `Spawn` as asked.
+#[derive(Debug)]
+pub struct Asked {
+    pub ticket: u64,
+    pub from: Option<SessionId>,
+    pub cwd: PathBuf,
+    pub task: String,
+    pub harness: Option<Harness>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub worktree: Option<String>,
+    pub around: Option<(String, String)>,
+}
+
+/// An agent to start once its folder is known.
+#[derive(Debug)]
+pub struct Start {
+    client: ClientId,
+    ticket: u64,
+    from: Option<SessionId>,
+    project: ProjectId,
+    folder: PathBuf,
+    /// The worktree's branch, when it starts in one made or found for it.
+    branch: Option<String>,
+    harness: Harness,
+    model: Option<String>,
+    effort: Option<String>,
+    prompt: String,
+    title_from: Option<String>,
+}
+
+/// What waits for a worktree.
+#[derive(Debug)]
+pub enum After {
+    Spawn(Box<Start>),
+    /// `session`: the card to move; `None` from outside termist.
+    Move {
+        client: ClientId,
+        ticket: u64,
+        project: ProjectId,
+        session: Option<SessionId>,
+    },
+}
+
+/// A worktree made (or found) for an agent's request, on a blocking thread.
+pub struct Ready {
+    pub after: After,
+    /// The repo's main folder.
+    pub repo: PathBuf,
+    pub result: Result<crate::worktrees::Made, String>,
+}
+
+/// "1 agent", "2 agents".
+fn agents(n: usize) -> String {
+    match n {
+        1 => "1 agent".into(),
+        n => format!("{n} agents"),
+    }
+}
+
+impl Registry {
+    /// `termist spawn`: where the agent starts (the asking card's folder, or a folder of
+    /// a project), whether the asking agent may start one more, and its worktree.
+    pub(super) fn spawn(&mut self, client: ClientId, asked: Asked) {
+        let ticket = asked.ticket;
+        if let Err(message) = self.spawn_or_wait(client, asked) {
+            self.send(client, ServerEvent::SpawnFailed { ticket, message });
+        }
+    }
+
+    fn spawn_or_wait(&mut self, client: ClientId, asked: Asked) -> Result<(), String> {
+        let Asked {
+            ticket,
+            from,
+            cwd,
+            task,
+            harness,
+            model,
+            effort,
+            worktree,
+            around,
+        } = asked;
+        let task = task.trim().to_string();
+        if task.is_empty() {
+            return Err("a task is needed: termist spawn \"<task>\"".into());
+        }
+        let (project, folder, theirs) = match from {
+            Some(by) => {
+                let s = self.session(by).ok_or("the card that asked is gone")?;
+                let theirs = match s.info.kind {
+                    SessionKind::Agent { harness } => Some(harness),
+                    _ => None,
+                };
+                (s.info.project, s.info.cwd.clone(), theirs)
+            }
+            None => (self.project_of(&cwd)?, cwd, None),
+        };
+        if let Some(by) = from {
+            self.may_start_one_more(by)?;
+        }
+        let harness = harness
+            .or(theirs)
+            .or(self.last_launch.as_ref().map(|l| l.harness))
+            .unwrap_or_else(|| self.agents_config().default);
+        let prompt = match &around {
+            Some((before, after)) => format!("{before}{task}{after}"),
+            None => task.clone(),
+        };
+        let start = Start {
+            client,
+            ticket,
+            from,
+            project,
+            folder,
+            branch: None,
+            harness,
+            model,
+            effort,
+            prompt,
+            title_from: around.is_some().then_some(task),
+        };
+        match worktree {
+            None => self.start_spawned(start),
+            Some(branch) => {
+                self.make_worktree(&start.folder.clone(), branch, After::Spawn(Box::new(start)))?
+            }
+        }
+        Ok(())
+    }
+
+    /// An agent started by an agent starts none; an agent starts at most
+    /// `[agents] max_spawned` that run at once.
+    fn may_start_one_more(&self, by: SessionId) -> Result<(), String> {
+        let s = self.session(by).ok_or("the card that asked is gone")?;
+        let name = s.info.display_name();
+        if s.spawned_by.is_some() {
+            return Err(format!(
+                "{name} was started by an agent; it cannot start another"
+            ));
+        }
+        // One that is done (or stopped) runs no more, even with its card still open.
+        let running = self
+            .sessions
+            .iter()
+            .filter(|c| {
+                c.spawned_by == Some(by)
+                    && matches!(
+                        c.info.status,
+                        AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
+                    )
+            })
+            .count();
+        if running >= self.agents_config().max_spawned as usize {
+            return Err(format!(
+                "{name} has {} running; wait for one to finish",
+                agents(running)
+            ));
+        }
+        Ok(())
+    }
+
+    /// The open project `dir` is in, or whose repo it is a worktree of; the deepest
+    /// when projects nest.
+    fn project_of(&self, dir: &Path) -> Result<ProjectId, String> {
+        let here = place::resolved(dir);
+        let main = place::repo_top(dir).map(|top| place::resolved(&place::main_of(&top)));
+        let found = self
+            .projects
+            .iter()
+            .filter(|p| {
+                let root = place::resolved(&p.path);
+                here.starts_with(&root) || main.as_ref().is_some_and(|m| m.starts_with(&root))
+            })
+            .max_by_key(|p| p.path.as_os_str().len());
+        match found {
+            None => Err(format!(
+                "{} is not in a termist project; open its folder in termist first",
+                dir.display()
+            )),
+            Some(p) if !p.open => Err(format!("{} is closed in termist; open it first", p.name)),
+            Some(p) => Ok(p.id),
+        }
+    }
+
+    /// Makes (or finds) `branch`'s worktree of the repo `folder` is in, on a blocking
+    /// thread; `worktree_ready` goes on.
+    fn make_worktree(&mut self, folder: &Path, branch: String, after: After) -> Result<(), String> {
+        let top = place::repo_top(folder).ok_or("not in a git repo")?;
+        let repo = place::main_of(&top);
+        let (tx, fetch, git) = (
+            self.ready_tx.clone(),
+            self.fetch,
+            crate::github::worktree::git,
+        );
+        tokio::task::spawn_blocking(move || {
+            let result = crate::worktrees::create(&repo, &branch, &git, &fetch);
+            let _ = tx.send(Ready {
+                after,
+                repo,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    /// The worktree is there: kept as termist's, and what waited for it goes on.
+    pub fn worktree_ready(&mut self, ready: Ready) {
+        let Ready {
+            after,
+            repo,
+            result,
+        } = ready;
+        match after {
+            After::Spawn(mut start) => match result {
+                Ok(made) => {
+                    let id = self.repo_id(start.project, &repo);
+                    self.keep_worktree(start.project, id, &repo, &made);
+                    self.send_worktrees(start.project);
+                    self.scan_worktrees();
+                    start.folder = made.path;
+                    start.branch = Some(made.branch);
+                    self.start_spawned(*start);
+                }
+                Err(why) => self.send(
+                    start.client,
+                    ServerEvent::SpawnFailed {
+                        ticket: start.ticket,
+                        message: format!("couldn't make a worktree · {why}"),
+                    },
+                ),
+            },
+            After::Move {
+                client,
+                ticket,
+                project,
+                session,
+            } => match result {
+                Ok(made) => {
+                    let id = self.repo_id(project, &repo);
+                    self.keep_worktree(project, id, &repo, &made);
+                    self.send_worktrees(project);
+                    self.scan_worktrees();
+                    match session {
+                        Some(session) => self.moved_in(client, ticket, session, made),
+                        None => self.send(
+                            client,
+                            ServerEvent::Moved {
+                                ticket,
+                                path: made.path,
+                                branch: made.branch,
+                                new_from: made.new.then_some(made.base),
+                            },
+                        ),
+                    }
+                }
+                Err(why) => self.send(
+                    client,
+                    ServerEvent::MoveFailed {
+                        ticket,
+                        message: format!("couldn't make a worktree · {why}"),
+                    },
+                ),
+            },
+        }
+    }
+
+    /// `termist worktree`: the card goes on in `branch`'s worktree of its repo, made when
+    /// there is none. The agent is not restarted.
+    pub(super) fn move_session(
+        &mut self,
+        client: ClientId,
+        ticket: u64,
+        session: Option<SessionId>,
+        cwd: PathBuf,
+        branch: String,
+    ) {
+        let asked = match session {
+            Some(id) => match self.session(id) {
+                None => Err("the card that asked is gone".to_string()),
+                Some(s) => Ok((s.info.project, s.info.cwd.clone())),
+            },
+            None => self.project_of(&cwd).map(|project| (project, cwd)),
+        }
+        .and_then(|(project, folder)| {
+            let after = After::Move {
+                client,
+                ticket,
+                project,
+                session,
+            };
+            self.make_worktree(&folder, branch, after)
+        });
+        if let Err(message) = asked {
+            self.send(client, ServerEvent::MoveFailed { ticket, message });
+        }
+    }
+
+    /// The card is in the worktree now; every client hears of it.
+    fn moved_in(
+        &mut self,
+        client: ClientId,
+        ticket: u64,
+        session: SessionId,
+        made: crate::worktrees::Made,
+    ) {
+        let Some(s) = self.session_mut(session) else {
+            let message = "the card that asked is gone".to_string();
+            self.send(client, ServerEvent::MoveFailed { ticket, message });
+            return;
+        };
+        // Already in it (a folder of it, too): nothing moves.
+        let inside = place::resolved(&s.info.cwd).starts_with(place::resolved(&made.path));
+        // Where it started stays the folder that is no move back, however often it moves.
+        if !inside && s.moved_from.is_none() {
+            s.moved_from = Some(s.info.cwd.clone());
+        }
+        let name = s.info.display_name().to_string();
+        if !inside {
+            self.moved(session, made.path.clone());
+        }
+        self.send(
+            client,
+            ServerEvent::Moved {
+                ticket,
+                path: made.path,
+                branch: made.branch.clone(),
+                new_from: made.new.then_some(made.base),
+            },
+        );
+        self.broadcast(ServerEvent::Notice {
+            text: format!("{name} moved to {}", made.branch),
+        });
+    }
+
+    /// The folder an agent's hook says it works in; where `termist worktree` moved it
+    /// from is no move back.
+    pub(super) fn reported_folder(&mut self, id: SessionId, cwd: PathBuf) {
+        let back = self
+            .session(id)
+            .and_then(|s| s.moved_from.as_ref())
+            .is_some_and(|from| place::resolved(from) == place::resolved(&cwd));
+        if !back {
+            self.moved(id, cwd);
+        }
+    }
+
+    /// The project's GitHub repo whose main folder is `repo`, when it is one.
+    fn repo_id(&self, project: ProjectId, repo: &Path) -> Option<termist_core::github::RepoId> {
+        let main = place::resolved(repo);
+        self.github
+            .repo_views(project)
+            .into_iter()
+            .find(|v| v.main == main || v.path == main)
+            .map(|v| v.id)
+    }
+
+    fn start_spawned(&mut self, start: Start) {
+        let Start {
+            client,
+            ticket,
+            from,
+            project,
+            folder,
+            branch,
+            harness,
+            model,
+            effort,
+            prompt,
+            title_from,
+        } = start;
+        let new = NewSession {
+            project,
+            kind: SessionKind::Agent { harness },
+            cwd: Some(folder.clone()),
+            prompt: Some(prompt),
+            title_from,
+            model,
+            effort,
+            size: (80, 24),
+            spawned_by: from,
+        };
+        let id = match self.create_session_named(new) {
+            Ok(id) => id,
+            Err(e) => {
+                let message = format!("{e:#}");
+                self.send(client, ServerEvent::SpawnFailed { ticket, message });
+                return;
+            }
+        };
+        let name = self
+            .session(id)
+            .map(|s| s.info.display_name().to_string())
+            .unwrap_or_default();
+        let place = branch.unwrap_or_else(|| self.place_label(project, &folder));
+        self.send(
+            client,
+            ServerEvent::Spawned {
+                ticket,
+                session: id,
+                name: name.clone(),
+                harness,
+                place,
+            },
+        );
+        if let Some(by) = from.and_then(|by| self.session(by)) {
+            let text = format!("{} started {name}", by.info.display_name());
+            self.broadcast(ServerEvent::Notice { text });
+        }
+    }
+
+    /// Where a folder is, in words: the project's name inside its folder, else the
+    /// branch of the worktree it is (as last read), else its name.
+    fn place_label(&self, project: ProjectId, folder: &Path) -> String {
+        let Some(p) = self.projects.iter().find(|p| p.id == project) else {
+            return String::new();
+        };
+        if place::resolved(folder).starts_with(place::resolved(&p.path)) {
+            return p.name.clone();
+        }
+        self.git_facts
+            .get(folder)
+            .and_then(|f| f.as_ref()?.branch.clone())
+            .or_else(|| folder.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::super::tests::{connect, registry_on, run_git};
+    use super::*;
+
+    /// A repo `site` as an open project, with a Codex card `Fix Login` in it.
+    fn site() -> (tempfile::TempDir, Registry, ProjectInfo, SessionId) {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("src")).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site,
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher.programs.codex = "true".into();
+        reg.launcher.programs.claude = "true".into();
+        reg.fetch = |_, _| Err("offline".into());
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CreateSession {
+                project: p.id,
+                kind: SessionKind::Agent {
+                    harness: Harness::Codex,
+                },
+                cwd: None,
+                prompt: Some("fix the login".into()),
+                title_from: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let id = reg.sessions[0].info.id;
+        (tmp, reg, p, id)
+    }
+
+    fn ask(reg: &mut Registry, ticket: u64, from: Option<SessionId>, cwd: &Path, task: &str) {
+        ask_in(reg, ticket, from, cwd, task, None, None);
+    }
+
+    fn ask_in(
+        reg: &mut Registry,
+        ticket: u64,
+        from: Option<SessionId>,
+        cwd: &Path,
+        task: &str,
+        worktree: Option<&str>,
+        around: Option<(&str, &str)>,
+    ) {
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::Spawn {
+                ticket,
+                from,
+                cwd: cwd.to_path_buf(),
+                task: task.into(),
+                harness: None,
+                model: None,
+                effort: None,
+                worktree: worktree.map(str::to_string),
+                around: around.map(|(a, b)| (a.to_string(), b.to_string())),
+            },
+        });
+    }
+
+    fn drain(rx: &mut UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn failed(events: &[ServerEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ServerEvent::SpawnFailed { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_agent_starts_an_agent_beside_it_and_every_client_hears_of_it() {
+        let (_tmp, mut reg, p, fix) = site();
+        let mut rx = connect(&mut reg);
+        ask(
+            &mut reg,
+            1,
+            Some(fix),
+            Path::new("/ignored"),
+            "write the tests",
+        );
+        let events = drain(&mut rx);
+        let new = reg.sessions[1].info.clone();
+        assert_eq!(new.name, "Write Tests");
+        assert_eq!(
+            new.kind,
+            SessionKind::Agent {
+                harness: Harness::Codex
+            },
+            "its CLI"
+        );
+        assert_eq!(new.cwd, p.path, "beside the agent that asked");
+        assert!(events.contains(&ServerEvent::Spawned {
+            ticket: 1,
+            session: new.id,
+            name: "Write Tests".into(),
+            harness: Harness::Codex,
+            place: "site".into(),
+        }));
+        assert!(events.contains(&ServerEvent::Notice {
+            text: "Fix Login started Write Tests".into()
+        }));
+        assert_eq!(reg.sessions[1].spawned_by, Some(fix));
+        assert_eq!(reg.store.spawned_by().unwrap()[&new.id], fix, "kept");
+        assert!(
+            !reg.store
+                .prompt_history(10)
+                .unwrap()
+                .contains(&"write the tests".to_string()),
+            "an agent's task is not the user's prompt to recall"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_has_so_many_agents_running_and_theirs_start_none() {
+        let (tmp, mut reg, _p, fix) = site();
+        let paths = termist_platform::Paths::under(tmp.path().join("home"));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "[agents]\nmax_spawned = 1\n").unwrap();
+        reg.config_paths = Some(paths);
+        let mut rx = connect(&mut reg);
+        ask(&mut reg, 1, Some(fix), Path::new("/"), "write the tests");
+        ask(&mut reg, 2, Some(fix), Path::new("/"), "update the docs");
+        let child = reg.sessions[1].info.id;
+        ask(&mut reg, 3, Some(child), Path::new("/"), "go deeper");
+        assert_eq!(
+            failed(&drain(&mut rx)),
+            [
+                "Fix Login has 1 agent running; wait for one to finish",
+                "Write Tests was started by an agent; it cannot start another",
+            ]
+        );
+        assert_eq!(reg.sessions.len(), 2);
+        // One that ended makes room.
+        reg.sessions[1].info.status = AgentStatus::Exited { code: Some(0) };
+        ask(&mut reg, 4, Some(fix), Path::new("/"), "update the docs");
+        assert_eq!(reg.sessions.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn from_outside_termist_a_folder_of_a_project_is_where_it_starts() {
+        let (tmp, mut reg, p, _) = site();
+        let mut rx = connect(&mut reg);
+        ask_in(
+            &mut reg,
+            1,
+            None,
+            &p.path.join("src"),
+            "fix login",
+            None,
+            Some(("Review: ", " then list")),
+        );
+        let events = drain(&mut rx);
+        let new = reg.sessions[1].info.clone();
+        assert_eq!(new.cwd, p.path.join("src"));
+        assert_eq!(
+            new.name, "Fix Login",
+            "named after the task, not the preset's words"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Notice { .. })),
+            "no agent asked"
+        );
+        assert_eq!(
+            reg.store.prompt_history(1).unwrap(),
+            ["Review: fix login then list"]
+        );
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        ask(&mut reg, 2, None, &elsewhere, "fix login");
+        ask(&mut reg, 3, None, &p.path, "   ");
+        let events = drain(&mut rx);
+        let failed = failed(&events);
+        assert!(
+            failed[0].ends_with("is not in a termist project; open its folder in termist first"),
+            "{failed:?}"
+        );
+        assert_eq!(failed[1], "a task is needed: termist spawn \"<task>\"");
+    }
+
+    #[tokio::test]
+    async fn an_agent_goes_on_in_a_worktree_and_its_old_folder_does_not_take_it_back() {
+        let (tmp, mut reg, p, _) = site();
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CreateSession {
+                project: p.id,
+                kind: SessionKind::Agent {
+                    harness: Harness::Claude,
+                },
+                cwd: None,
+                prompt: Some("fix the login".into()),
+                title_from: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let claude = reg.sessions[1].info.id;
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        let move_to = |reg: &mut Registry, ticket, session| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::MoveSession {
+                    ticket,
+                    session: Some(session),
+                    cwd: PathBuf::from("/ignored"),
+                    branch: "fix-login".into(),
+                },
+            })
+        };
+        move_to(&mut reg, 1, claude);
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let want = place::resolved(tmp.path())
+            .join("site-worktrees")
+            .join("fix-login");
+        let events = drain(&mut rx);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ServerEvent::Moved { ticket: 1, path, branch, new_from: Some(base) }
+                    if place::resolved(path) == want && branch == "fix-login" && base == "main"
+            )),
+            "{events:?}"
+        );
+        assert!(events.contains(&ServerEvent::Notice {
+            text: "Fix Login moved to fix-login".into()
+        }));
+        let card = |reg: &Registry| place::resolved(&reg.session(claude).unwrap().info.cwd);
+        assert_eq!(card(&reg), want);
+        // Claude's shell goes back to where it started after each command: no move back.
+        let said = |reg: &mut Registry, cwd: &Path| {
+            let payload = serde_json::json!({ "cwd": cwd, "session_id": "a1" });
+            reg.hook(claude, Harness::Claude, "PreToolUse", &payload);
+        };
+        said(&mut reg, &p.path);
+        assert_eq!(card(&reg), want);
+        said(&mut reg, &want.join("src"));
+        assert_eq!(card(&reg), want.join("src"), "anywhere else is a move");
+        // Moved again into the same worktree: said, not moved twice.
+        drain(&mut rx);
+        move_to(&mut reg, 2, claude);
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        assert!(drain(&mut rx).iter().any(|e| matches!(
+            e,
+            ServerEvent::Moved {
+                ticket: 2,
+                new_from: None,
+                ..
+            }
+        )));
+        assert_eq!(
+            card(&reg),
+            want.join("src"),
+            "already in it: stays where it is"
+        );
+        said(&mut reg, &p.path);
+        assert_eq!(card(&reg), want.join("src"));
+        // A card that is gone.
+        move_to(&mut reg, 3, SessionId::new());
+        assert!(drain(&mut rx).contains(&ServerEvent::MoveFailed {
+            ticket: 3,
+            message: "the card that asked is gone".into()
+        }));
+        // From outside termist: the worktree is made, nothing moves, nobody is told.
+        let outside = |reg: &mut Registry, ticket, cwd: &Path| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::MoveSession {
+                    ticket,
+                    session: None,
+                    cwd: cwd.to_path_buf(),
+                    branch: "docs".into(),
+                },
+            })
+        };
+        outside(&mut reg, 4, &p.path.join("src"));
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ServerEvent::Moved { ticket: 4, branch, new_from: Some(_), .. } if branch == "docs"
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Notice { .. }))
+        );
+        assert_eq!(card(&reg), want.join("src"));
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        outside(&mut reg, 5, &elsewhere);
+        assert!(drain(&mut rx).iter().any(|e| matches!(
+            e,
+            ServerEvent::MoveFailed { ticket: 5, message } if message.ends_with("open its folder in termist first")
+        )));
+    }
+
+    #[tokio::test]
+    async fn with_a_branch_the_agent_starts_in_its_worktree_beside_the_repo() {
+        let (tmp, mut reg, _p, fix) = site();
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        ask_in(
+            &mut reg,
+            1,
+            Some(fix),
+            Path::new("/"),
+            "write the tests",
+            Some("fix-login"),
+            None,
+        );
+        assert!(
+            drain(&mut rx).is_empty(),
+            "not before the worktree is there"
+        );
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let events = drain(&mut rx);
+        let want = place::resolved(tmp.path())
+            .join("site-worktrees")
+            .join("fix-login");
+        let new = reg.sessions[1].info.clone();
+        assert_eq!(place::resolved(&new.cwd), want);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ServerEvent::Spawned { place, .. } if place == "fix-login"
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Worktrees { .. }))
+        );
+        // The branch's worktree again: the same folder.
+        ask_in(
+            &mut reg,
+            2,
+            Some(fix),
+            Path::new("/"),
+            "review it",
+            Some("fix-login"),
+            None,
+        );
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        assert_eq!(place::resolved(&reg.sessions[2].info.cwd), want);
+        // A project that is no repo has no worktrees.
+        let notes = tmp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        reg.projects.push(ProjectInfo {
+            id: ProjectId::new(),
+            name: "notes".into(),
+            path: notes.clone(),
+            open: true,
+        });
+        drain(&mut rx);
+        ask_in(&mut reg, 3, None, &notes, "tidy", Some("x"), None);
+        assert_eq!(failed(&drain(&mut rx)), ["not in a git repo"]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod review_fixes {
+    use super::super::tests::{connect, registry_on, run_git};
+    use super::*;
+
+    fn site_with_claude() -> (tempfile::TempDir, Registry, ProjectInfo, SessionId) {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("src")).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site,
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher.programs.claude = "true".into();
+        reg.fetch = |_, _| Err("offline".into());
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CreateSession {
+                project: p.id,
+                kind: SessionKind::Agent {
+                    harness: Harness::Claude,
+                },
+                cwd: None,
+                prompt: Some("fix the login".into()),
+                title_from: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let id = reg.sessions[0].info.id;
+        (tmp, reg, p, id)
+    }
+
+    fn drain(rx: &mut UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    async fn move_to(
+        reg: &mut Registry,
+        ready: &mut UnboundedReceiver<Ready>,
+        card: SessionId,
+        branch: &str,
+    ) {
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::MoveSession {
+                ticket: 1,
+                session: Some(card),
+                cwd: PathBuf::from("/ignored"),
+                branch: branch.into(),
+            },
+        });
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+    }
+
+    #[tokio::test]
+    async fn a_card_moved_twice_is_not_taken_back_to_where_it_started() {
+        let (tmp, mut reg, p, claude) = site_with_claude();
+        let mut ready = reg.ready_rx.take().unwrap();
+        move_to(&mut reg, &mut ready, claude, "a").await;
+        move_to(&mut reg, &mut ready, claude, "b").await;
+        let b = place::resolved(tmp.path()).join("site-worktrees").join("b");
+        let payload = serde_json::json!({ "cwd": p.path, "session_id": "a1" });
+        reg.hook(claude, Harness::Claude, "PreToolUse", &payload);
+        assert_eq!(place::resolved(&reg.session(claude).unwrap().info.cwd), b);
+    }
+
+    #[tokio::test]
+    async fn agents_that_are_done_leave_room_for_more() {
+        let (_tmp, mut reg, p, claude) = site_with_claude();
+        let paths = termist_platform::Paths::under(_tmp.path().join("home"));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "[agents]\nmax_spawned = 1\n").unwrap();
+        reg.config_paths = Some(paths);
+        let mut rx = connect(&mut reg);
+        let ask = |reg: &mut Registry, ticket| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::Spawn {
+                    ticket,
+                    from: Some(claude),
+                    cwd: p.path.clone(),
+                    task: "write the tests".into(),
+                    harness: None,
+                    model: None,
+                    effort: None,
+                    worktree: None,
+                    around: None,
+                },
+            })
+        };
+        ask(&mut reg, 1);
+        for done in [AgentStatus::Unseen, AgentStatus::Finished] {
+            let last = reg.sessions.len() - 1;
+            reg.sessions[last].info.status = done;
+            ask(&mut reg, 2);
+        }
+        assert_eq!(reg.sessions.len(), 4, "a child that is done runs no more");
+        reg.sessions[3].info.status = AgentStatus::NeedsFeedback;
+        ask(&mut reg, 3);
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::SpawnFailed { ticket: 3, .. })),
+            "one waiting for the user still runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worktree_of_a_repo_not_on_github_is_removed_and_forgotten_when_gone() {
+        let (tmp, mut reg, p, claude) = site_with_claude();
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut removed = reg.removed_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        move_to(&mut reg, &mut ready, claude, "a").await;
+        move_to(&mut reg, &mut ready, claude, "b").await;
+        // Off `a` now: `X` removes it, though the repo is not one of GitHub's.
+        let a = reg
+            .store
+            .worktrees()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.branch.as_deref() == Some("a"))
+            .unwrap()
+            .path;
+        drain(&mut rx);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::RemoveWorktree {
+                path: a.clone(),
+                force: false,
+            },
+        });
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::RemoveFailed { .. })),
+            "removed, not refused"
+        );
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        assert!(!a.exists());
+        // `b` removed by hand: forgotten at the next read.
+        let b = place::resolved(tmp.path()).join("site-worktrees").join("b");
+        run_git(
+            &p.path,
+            &["worktree", "remove", "--force", &b.to_string_lossy()],
+        );
+        reg.scan_worktrees();
+        assert!(reg.store.worktrees().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_a_project_inside_a_repo_an_agent_starts_in_the_repo_s_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mono = tmp.path().join("mono");
+        std::fs::create_dir_all(mono.join("app")).unwrap();
+        run_git(&mono, &["init", "-q", "-b", "main"]);
+        run_git(&mono, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "app".into(),
+            path: mono.join("app"),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher.programs.claude = "true".into();
+        reg.fetch = |_, _| Err("offline".into());
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::Spawn {
+                ticket: 1,
+                from: None,
+                cwd: p.path.clone(),
+                task: "write the tests".into(),
+                harness: Some(Harness::Claude),
+                model: None,
+                effort: None,
+                worktree: Some("tests".into()),
+                around: None,
+            },
+        });
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let events = drain(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Spawned { ticket: 1, .. })),
+            "{events:?}"
+        );
+    }
+}

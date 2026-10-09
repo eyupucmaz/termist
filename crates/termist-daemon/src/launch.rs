@@ -128,6 +128,10 @@ pub struct LaunchRequest<'a> {
     pub cols: u16,
     pub rows: u16,
     pub resume: Option<&'a str>,
+    /// Told to an agent: termist's commands (`[agents] teach`); `None` tells nothing.
+    pub teach: Option<&'a str>,
+    /// A folder an agent may work in besides `cwd`: its repo's worktrees.
+    pub also: Option<&'a Path>,
 }
 
 pub struct Launch {
@@ -176,6 +180,12 @@ impl Launcher {
                     "--settings".to_string(),
                     self.claude_settings.display().to_string(),
                 ];
+                if let Some(dir) = req.also {
+                    args.extend(["--add-dir".to_string(), dir.display().to_string()]);
+                }
+                if let Some(words) = req.teach {
+                    args.extend(["--append-system-prompt".to_string(), words.to_string()]);
+                }
                 if let Some(m) = req.model {
                     args.extend(["--model".to_string(), m.to_string()]);
                 }
@@ -206,7 +216,17 @@ impl Launcher {
                 harness: Harness::Codex,
             } => (
                 self.programs.get(Harness::Codex).to_string(),
-                crate::codex::args(&self.exe, req.resume, req.model, req.effort, req.prompt),
+                crate::codex::args(
+                    &self.exe,
+                    crate::codex::Launched {
+                        resume: req.resume,
+                        model: req.model,
+                        effort: req.effort,
+                        prompt: req.prompt,
+                        also: req.also,
+                        teach: req.teach,
+                    },
+                ),
                 req.resume.map(str::to_string),
             ),
             SessionKind::Agent {
@@ -216,6 +236,11 @@ impl Launcher {
                     &self.opencode_config_dir,
                     std::env::var_os("OPENCODE_CONFIG_DIR").as_deref(),
                     std::env::var_os("OPENCODE_CONFIG_CONTENT").as_deref(),
+                    crate::opencode::extra(
+                        &self.opencode_config_dir,
+                        req.teach.is_some(),
+                        req.also,
+                    ),
                 ));
                 (
                     self.programs.get(Harness::OpenCode).to_string(),
@@ -306,6 +331,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(l.spec.program, "/bin/zsh");
         assert!(l.spec.args.is_empty());
@@ -339,6 +366,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(env(&launch, "TERMIST_HOME").as_deref(), Some("/tmp/th"));
     }
@@ -358,6 +387,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(l.spec.program, "/fake/claude");
         let a = &l.spec.args;
@@ -384,6 +415,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(
             launch.spec.args.len(),
@@ -444,6 +477,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(l.spec.program, "/fake/codex");
         assert_eq!(l.spec.args[0], "-c");
@@ -469,11 +504,73 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: None,
+            teach: None,
+            also: None,
         });
         assert_eq!(l.spec.program, "/fake/opencode");
         assert_eq!(l.spec.args, ["--prompt=fix it"]);
         let dir = env(&l, "OPENCODE_CONFIG_DIR").or_else(|| env(&l, "OPENCODE_CONFIG_CONTENT"));
         assert!(dir.is_some_and(|d| d.contains("/data/opencode")));
+    }
+
+    fn told(harness: Harness, resume: Option<&str>) -> Launch {
+        launcher().launch(LaunchRequest {
+            id: SessionId::new(),
+            kind: &SessionKind::Agent { harness },
+            prompt: Some("fix it"),
+            model: None,
+            effort: None,
+            cwd: Path::new("/w/site"),
+            cols: 80,
+            rows: 24,
+            resume,
+            teach: Some(termist_core::agents::TEACH),
+            also: Some(Path::new("/w/site-worktrees")),
+        })
+    }
+
+    #[test]
+    fn an_agent_is_told_of_termist_and_may_work_in_its_repo_s_worktrees() {
+        let c = told(Harness::Claude, None);
+        let at = |a: &str| c.spec.args.iter().position(|x| x == a).unwrap();
+        assert_eq!(c.spec.args[at("--add-dir") + 1], "/w/site-worktrees");
+        assert_eq!(
+            c.spec.args[at("--append-system-prompt") + 1],
+            termist_core::agents::TEACH
+        );
+        assert!(at("--append-system-prompt") < at("--"), "before the prompt");
+        let resumed = told(Harness::Claude, Some("c-1"));
+        assert!(
+            resumed
+                .spec
+                .args
+                .contains(&"--append-system-prompt".to_string())
+        );
+        let x = told(Harness::Codex, None);
+        assert!(x.spec.args.contains(&"--add-dir".to_string()));
+        assert!(
+            x.spec
+                .args
+                .iter()
+                .any(|a| a.starts_with("developer_instructions="))
+        );
+        let o = told(Harness::OpenCode, None);
+        let content: serde_json::Value =
+            serde_json::from_str(&env(&o, "OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
+        assert_eq!(
+            content["instructions"],
+            serde_json::json!([crate::opencode::teach_file(Path::new("/data/opencode"))
+                .display()
+                .to_string()])
+        );
+        assert_eq!(
+            content["permission"]["external_directory"]["/w/site-worktrees/**"],
+            "allow"
+        );
+        assert_eq!(
+            env(&o, "OPENCODE_CONFIG_DIR").as_deref(),
+            Some("/data/opencode")
+        );
     }
 
     fn resumed(kind: SessionKind, id: &str) -> Launch {
@@ -487,6 +584,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume: Some(id),
+            teach: None,
+            also: None,
         })
     }
 
@@ -544,6 +643,8 @@ mod tests {
             cols: 80,
             rows: 24,
             resume,
+            teach: None,
+            also: None,
         })
     }
 
@@ -609,6 +710,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 resume: None,
+                teach: None,
+                also: None,
             })
             .spec
             .args

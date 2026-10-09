@@ -878,3 +878,168 @@ async fn an_archived_session_survives_a_restart_and_resumes_when_restored() {
     .unwrap();
     screen_shows(&mut c, session.id, &["--resume fake-session"]).await;
 }
+
+/// Runs `termist <args>` in `dir` as an agent in the card `card` would (its daemon from
+/// `TERMIST_RUNTIME_DIR`, its card from `TERMIST_SESSION_ID`), or from a terminal (`None`).
+fn as_card(
+    home: &Path,
+    card: Option<SessionId>,
+    dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+) -> std::process::Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(args)
+        .current_dir(dir)
+        .env("TERMIST_HOME", home)
+        .env_remove("TERMIST_SESSION_ID")
+        .env_remove("TERMIST_RUNTIME_DIR")
+        .env_remove("VISUAL")
+        .env_remove("EDITOR")
+        .stdin(Stdio::null());
+    if let Some(id) = card {
+        cmd.env("TERMIST_SESSION_ID", id.to_string())
+            .env("TERMIST_RUNTIME_DIR", home.join("run"));
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("termist {args:?} still runs after 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+// An agent told of termist starts another (and waits for it), moves into a worktree and
+// opens a file; from a terminal, a worktree is only made and a folder outside the
+// projects is refused.
+#[tokio::test]
+async fn an_agent_drives_termist_through_spawn_worktree_and_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let site = tmp.path().join("site");
+    std::fs::create_dir_all(&site).unwrap();
+    git(&site, &["init", "-q", "-b", "main"]);
+    git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    std::fs::write(site.join("README.md"), "hi\n").unwrap();
+    let argv = fixture(tmp.path(), "fake-argv.sh");
+    let codex = fixture(tmp.path(), "fake-codex.sh");
+    let (_paths, mut c, _guard) = daemon(
+        &home,
+        &[("TERMIST_CLAUDE_BIN", &argv), ("TERMIST_CODEX_BIN", &codex)],
+    )
+    .await;
+    c.send(&ClientRequest::AddProject { path: site.clone() })
+        .await
+        .unwrap();
+    let ServerEvent::State(state) = recv_until(
+        &mut c,
+        |e| matches!(e, ServerEvent::State(s) if !s.projects.is_empty()),
+    )
+    .await
+    else {
+        unreachable!()
+    };
+    c.send(&ClientRequest::CreateSession {
+        project: state.projects[0].id,
+        kind: SessionKind::Agent {
+            harness: Harness::Claude,
+        },
+        cwd: None,
+        title_from: None,
+        prompt: Some("fix the login".into()),
+        model: None,
+        effort: None,
+        cols: 110,
+        rows: 30,
+    })
+    .await
+    .unwrap();
+    let ServerEvent::SessionUpdated(card) =
+        recv_until(&mut c, |e| matches!(e, ServerEvent::SessionUpdated(_))).await
+    else {
+        unreachable!()
+    };
+    // Told of termist, and let into the repo's worktrees.
+    screen_shows(
+        &mut c,
+        card.id,
+        &["[--append-system-prompt]", "[--add-dir]"],
+    )
+    .await;
+
+    let out = as_card(
+        &home,
+        Some(card.id),
+        &site,
+        &["spawn", "write the tests", "--harness", "codex", "--wait"],
+        &[],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "started Write Tests (codex) in site\nwaiting for you\n",
+        "{out:?}"
+    );
+    assert_eq!(out.status.code(), Some(2), "it waits for the user");
+
+    let out = as_card(&home, Some(card.id), &site, &["worktree", "fix-login"], &[]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        said.starts_with("moved to ") && said.contains("(branch fix-login, new from main)"),
+        "{said}"
+    );
+    recv_until(&mut c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(s) if s.id == card.id && s.cwd.ends_with("fix-login"))
+    })
+    .await;
+
+    let out = as_card(&home, None, &site, &["worktree", "docs"], &[]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("site-worktrees") && said.contains("(branch docs, new from main)"),
+        "{out:?}"
+    );
+
+    let out = as_card(
+        &home,
+        None,
+        &site,
+        &["open", "README.md:1"],
+        &[("EDITOR", &argv)],
+    );
+    assert!(out.status.success(), "{out:?}");
+    recv_until(&mut c, |e| {
+        matches!(e, ServerEvent::SessionUpdated(s) if matches!(s.kind, SessionKind::Tool { .. }))
+    })
+    .await;
+
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let out = as_card(&home, None, &elsewhere, &["spawn", "tidy up"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not in a termist project"),
+        "{out:?}"
+    );
+}

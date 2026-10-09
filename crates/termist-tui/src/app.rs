@@ -1016,6 +1016,20 @@ impl App {
                     until: Instant::now() + toast::AGENT_FOR,
                 });
             }
+            ServerEvent::Notice { text } => {
+                if self.config.notify.toasts {
+                    self.toasts.push(Toast {
+                        text: format!("↳ {text}"),
+                        kind: ToastKind::Notice,
+                        until: Instant::now() + toast::AGENT_FOR,
+                    });
+                }
+            }
+            // `termist spawn` and `termist worktree` wait for these; the TUI asks neither.
+            ServerEvent::Spawned { .. }
+            | ServerEvent::SpawnFailed { .. }
+            | ServerEvent::Moved { .. }
+            | ServerEvent::MoveFailed { .. } => {}
             ServerEvent::ReviewRequested {
                 project,
                 pr,
@@ -4162,6 +4176,7 @@ impl App {
             SettingRow::StatusClock => "status.clock",
             SettingRow::PullRequests => "github.enabled",
             SettingRow::DiffLayout => "diff.layout",
+            SettingRow::TeachAgents => "agents.teach",
             SettingRow::Prefix | SettingRow::Keys => return vec![],
         };
         // config.local.toml wins over the settings it sets, the old `sounds` too.
@@ -4220,7 +4235,8 @@ impl App {
             | SettingRow::StatusCpu
             | SettingRow::StatusRam
             | SettingRow::StatusBattery
-            | SettingRow::StatusClock => {
+            | SettingRow::StatusClock
+            | SettingRow::TeachAgents => {
                 let flag = match row {
                     SettingRow::Desktop => &mut self.config.notify.desktop,
                     SettingRow::Toasts => &mut self.config.notify.toasts,
@@ -4230,6 +4246,7 @@ impl App {
                     SettingRow::StatusRam => &mut self.config.status.ram,
                     SettingRow::StatusBattery => &mut self.config.status.battery,
                     SettingRow::StatusClock => &mut self.config.status.clock,
+                    SettingRow::TeachAgents => &mut self.config.agents.teach,
                     _ => &mut self.config.animations,
                 };
                 *flag = !*flag;
@@ -9136,6 +9153,29 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_row_stops_telling_agents_of_termist_and_saves_it() {
+        let (mut app, _) = app();
+        app.on_key(k(K::Char('s')));
+        let row = SETTING_ROWS
+            .iter()
+            .position(|r| *r == SettingRow::TeachAgents)
+            .unwrap();
+        if let Some(Overlay::Settings(v)) = app.overlays.last_mut() {
+            v.row = row;
+        }
+        let actions = app.on_key(k(K::Right));
+        assert!(!app.config.agents.teach);
+        assert_eq!(
+            actions,
+            [Action::WriteConfig(ConfigEdit::SetBool {
+                key: "agents.teach",
+                value: false
+            })],
+            "read by the daemon when an agent starts: nothing to send"
+        );
+    }
+
+    #[test]
     fn the_pull_requests_setting_tells_the_daemon() {
         let (mut app, _) = app();
         app.on_key(k(K::Char('s')));
@@ -9734,6 +9774,27 @@ mod tests {
         assert!(actions.contains(&Action::OpenUrl(
             "https://github.com/acme/site/pull/212".into()
         )));
+    }
+
+    #[test]
+    fn what_an_agent_did_through_termist_shows_as_a_toast_unless_toasts_are_off() {
+        let (mut app, _) = app();
+        app.on_event(ServerEvent::Notice {
+            text: "Fix Login started Write Tests".into(),
+        });
+        assert_eq!(
+            app.toasts
+                .items()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
+            ["↳ Fix Login started Write Tests"]
+        );
+        let (mut quiet, _) = self::app();
+        quiet.config.notify.toasts = false;
+        quiet.on_event(ServerEvent::Notice {
+            text: "Fix Login moved to fix-login".into(),
+        });
+        assert_eq!(quiet.toasts.items().count(), 0);
     }
 
     #[test]

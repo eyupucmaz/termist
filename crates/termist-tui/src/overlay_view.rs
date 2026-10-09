@@ -735,6 +735,14 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                                 format!("‹ {layout} ›{}", local("diff.layout")),
                             )
                         }
+                        SettingRow::TeachAgents => {
+                            let on = if app.config.agents.teach {
+                                "told of termist spawn, worktree, open"
+                            } else {
+                                "off: not told of termist's commands"
+                            };
+                            ("agents", format!("‹ {on} ›{}", local("agents.teach")))
+                        }
                         SettingRow::PullRequests => {
                             let on = if app.config.github.enabled {
                                 "on: through gh"

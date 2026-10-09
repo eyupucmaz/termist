@@ -103,11 +103,9 @@ pub async fn run(paths: Paths, config: DaemonConfig) -> anyhow::Result<()> {
         runtime_dir: paths.runtime_dir.clone(),
         termist_home: std::env::var_os("TERMIST_HOME").map(PathBuf::from),
     };
-    tokio::spawn(registry::run(
-        Registry::new(launcher, harnesses, store, notes_tx, stop_tx),
-        rx,
-        notes_rx,
-    ));
+    let mut registry = Registry::new(launcher, harnesses, store, notes_tx, stop_tx);
+    registry.config_paths = Some(paths.clone());
+    tokio::spawn(registry::run(registry, rx, notes_rx));
 
     let mut next = 0u64;
     let mut accept_errors = LogThrottle::new(Duration::from_secs(1));

@@ -1,3 +1,4 @@
+mod kaptan;
 mod update;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -41,6 +42,31 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SoundCmd,
     },
+    /// Start another agent on a task, beside this card or in a branch's worktree
+    Spawn {
+        /// What the agent is to do
+        task: String,
+        /// claude, codex or opencode; this card's CLI by default
+        #[arg(long, value_parser = parse_harness)]
+        harness: Option<termist_core::Harness>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        /// One of your presets (`e` in termist): its CLI, model and words around the task
+        #[arg(long)]
+        preset: Option<String>,
+        /// Start it in this branch's worktree, made when there is none
+        #[arg(long)]
+        worktree: Option<String>,
+        /// Wait until it is done (exit 0), waits for you (2) or stops (1)
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Go on in a branch's worktree: this card moves there (from a terminal, it is only made)
+    Worktree { branch: String },
+    /// Open a file in your editor, at a line: termist open src/main.rs:42
+    Open { target: String },
     /// Forward an agent hook event to the daemon (called by agent CLIs)
     #[command(hide = true)]
     Hook {
@@ -106,6 +132,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if matches!(
+        cli.cmd,
+        Some(Cmd::Spawn { .. } | Cmd::Worktree { .. } | Cmd::Open { .. })
+    ) {
+        return kaptan(cli.cmd.expect("matched above"));
+    }
     if let Some(Cmd::Update { check }) = &cli.cmd {
         return update::run(*check);
     }
@@ -133,7 +165,13 @@ fn main() -> ExitCode {
             }
             Some(Cmd::Kill) => kill(&paths).await,
             Some(
-                Cmd::Hook { .. } | Cmd::Config { .. } | Cmd::Sound { .. } | Cmd::Update { .. },
+                Cmd::Hook { .. }
+                | Cmd::Config { .. }
+                | Cmd::Sound { .. }
+                | Cmd::Update { .. }
+                | Cmd::Spawn { .. }
+                | Cmd::Worktree { .. }
+                | Cmd::Open { .. },
             ) => {
                 unreachable!("handled above")
             }
@@ -232,6 +270,55 @@ fn sound_test(paths: &Paths, recording: Recording) -> ExitCode {
         }
         Err(e) => {
             eprintln!("termist: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn parse_harness(s: &str) -> Result<termist_core::Harness, String> {
+    termist_core::Harness::from_id(s)
+        .ok_or_else(|| format!("unknown CLI {s}; one of: claude, codex, opencode"))
+}
+
+/// `spawn`, `worktree`, `open`: the daemon the card runs in (`TERMIST_RUNTIME_DIR`),
+/// else the usual one.
+fn kaptan(cmd: Cmd) -> ExitCode {
+    let Some(paths) = hook_paths() else {
+        eprintln!("termist: cannot tell where termist keeps its files");
+        return ExitCode::FAILURE;
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let result = runtime.block_on(async move {
+        match cmd {
+            Cmd::Spawn {
+                task,
+                harness,
+                model,
+                effort,
+                preset,
+                worktree,
+                wait,
+            } => {
+                let args = kaptan::SpawnArgs {
+                    task,
+                    harness,
+                    model,
+                    effort,
+                    preset,
+                    worktree,
+                    wait,
+                };
+                kaptan::spawn(&paths, args).await
+            }
+            Cmd::Worktree { branch } => kaptan::worktree(&paths, branch).await,
+            Cmd::Open { target } => kaptan::open(&paths, &target).await,
+            _ => unreachable!("spawn, worktree and open only"),
+        }
+    });
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("termist: {e:#}");
             ExitCode::FAILURE
         }
     }

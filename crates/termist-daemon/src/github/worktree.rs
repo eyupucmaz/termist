@@ -100,17 +100,21 @@ pub fn is_made_for(path: &Path, dir: &Path) -> bool {
                 .is_some_and(|n| n.parse::<u32>().is_ok()))
 }
 
-/// `<repo>/../<repo>-worktrees/<branch>`, each part of the branch a folder, with the
-/// characters a file name cannot hold on some system made `-`.
-pub fn folder(repo: &Path, branch: &str) -> PathBuf {
+/// `<repo>/../<repo>-worktrees`: where termist opens the repo's worktrees.
+pub fn home(repo: &Path) -> PathBuf {
     let name = repo
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    let mut dir = repo
-        .parent()
+    repo.parent()
         .unwrap_or(repo)
-        .join(format!("{name}-worktrees"));
+        .join(format!("{name}-worktrees"))
+}
+
+/// `<repo>/../<repo>-worktrees/<branch>`, each part of the branch a folder, with the
+/// characters a file name cannot hold on some system made `-`.
+pub fn folder(repo: &Path, branch: &str) -> PathBuf {
+    let mut dir = home(repo);
     for part in branch.split('/') {
         let part: String = part
             .chars()
