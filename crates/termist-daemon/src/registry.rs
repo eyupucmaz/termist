@@ -390,6 +390,20 @@ impl Registry {
     /// Reads every open project's repos' worktrees on blocking threads; `worktrees_scanned`
     /// takes each answer.
     fn scan_worktrees(&mut self) {
+        // A worktree of a repo not on GitHub is not scanned: forgotten once its folder is gone.
+        let mut gone = HashSet::new();
+        for w in self.store.worktrees().unwrap_or_default() {
+            if w.repo.is_none() && !w.path.exists() {
+                if let Err(e) = self.store.delete_worktree(&w.path) {
+                    tracing::warn!(error = %e, "could not forget a worktree");
+                }
+                self.worktree_stats.remove(&w.path);
+                gone.insert(w.project);
+            }
+        }
+        for project in gone {
+            self.send_worktrees(project);
+        }
         let kept = self.store.worktrees().unwrap_or_default();
         // The pull requests kept worktrees were on: how the ones no longer open ended.
         let prs: Vec<termist_core::github::PrRef> = kept
@@ -617,15 +631,22 @@ impl Registry {
             .github
             .repo_views(w.project)
             .into_iter()
-            .find(|v| Some(v.id) == w.repo)
-            .ok_or("its repo is not loaded yet")?;
+            .find(|v| Some(v.id) == w.repo);
+        if w.repo.is_some() && view.is_none() {
+            return Err("its repo is not loaded yet".into());
+        }
+        // A repo not on GitHub (`termist worktree`): the one the worktree's `.git` names.
+        let repo = match &view {
+            Some(v) => v.path.clone(),
+            None => place::main_of(&path),
+        };
         let here = place::resolved(&path);
         let own = self
             .projects
             .iter()
             .any(|p| place::resolved(&p.path) == here)
-            || place::resolved(&view.path) == here
-            || view.main == here;
+            || place::resolved(&repo) == here
+            || view.as_ref().is_some_and(|v| v.main == here);
         if own {
             return Err("the project's own folder is not a worktree".into());
         }
@@ -640,7 +661,7 @@ impl Registry {
         let (tx, project) = (self.removed_tx.clone(), w.project);
         tokio::task::spawn_blocking(move || {
             let result =
-                crate::worktrees::remove(&view.path, &path, force, &crate::github::worktree::git);
+                crate::worktrees::remove(&repo, &path, force, &crate::github::worktree::git);
             let _ = tx.send(Removed {
                 client,
                 project,
@@ -2123,8 +2144,11 @@ impl Registry {
         }
         let facts = place::read(&dir, &self.git);
         let here = place::resolved(root);
+        // The project's own repo, when the project is a folder inside it.
+        let around = place::repo_top(root).map(|top| place::resolved(&place::main_of(&top)));
         let ours = facts.as_ref().is_some_and(|f| {
             f.main.starts_with(&here)
+                || around.as_ref() == Some(&f.main)
                 || self
                     .github
                     .repo_views(project)

@@ -143,10 +143,17 @@ impl Registry {
                 "{name} was started by an agent; it cannot start another"
             ));
         }
+        // One that is done (or stopped) runs no more, even with its card still open.
         let running = self
             .sessions
             .iter()
-            .filter(|c| c.spawned_by == Some(by) && c.info.status.is_live())
+            .filter(|c| {
+                c.spawned_by == Some(by)
+                    && matches!(
+                        c.info.status,
+                        AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
+                    )
+            })
             .count();
         if running >= self.agents_config().max_spawned as usize {
             return Err(format!(
@@ -308,7 +315,8 @@ impl Registry {
         };
         // Already in it (a folder of it, too): nothing moves.
         let inside = place::resolved(&s.info.cwd).starts_with(place::resolved(&made.path));
-        if !inside {
+        // Where it started stays the folder that is no move back, however often it moves.
+        if !inside && s.moved_from.is_none() {
             s.moved_from = Some(s.info.cwd.clone());
         }
         let name = s.info.display_name().to_string();
@@ -804,5 +812,213 @@ mod tests {
         drain(&mut rx);
         ask_in(&mut reg, 3, None, &notes, "tidy", Some("x"), None);
         assert_eq!(failed(&drain(&mut rx)), ["not in a git repo"]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod review_fixes {
+    use super::super::tests::{connect, registry_on, run_git};
+    use super::*;
+
+    fn site_with_claude() -> (tempfile::TempDir, Registry, ProjectInfo, SessionId) {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("src")).unwrap();
+        run_git(&site, &["init", "-q", "-b", "main"]);
+        run_git(&site, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "site".into(),
+            path: site,
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher.programs.claude = "true".into();
+        reg.fetch = |_, _| Err("offline".into());
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::CreateSession {
+                project: p.id,
+                kind: SessionKind::Agent {
+                    harness: Harness::Claude,
+                },
+                cwd: None,
+                prompt: Some("fix the login".into()),
+                title_from: None,
+                model: None,
+                effort: None,
+                cols: 80,
+                rows: 24,
+            },
+        });
+        let id = reg.sessions[0].info.id;
+        (tmp, reg, p, id)
+    }
+
+    fn drain(rx: &mut UnboundedReceiver<ServerEvent>) -> Vec<ServerEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    async fn move_to(
+        reg: &mut Registry,
+        ready: &mut UnboundedReceiver<Ready>,
+        card: SessionId,
+        branch: &str,
+    ) {
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::MoveSession {
+                ticket: 1,
+                session: Some(card),
+                cwd: PathBuf::from("/ignored"),
+                branch: branch.into(),
+            },
+        });
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+    }
+
+    #[tokio::test]
+    async fn a_card_moved_twice_is_not_taken_back_to_where_it_started() {
+        let (tmp, mut reg, p, claude) = site_with_claude();
+        let mut ready = reg.ready_rx.take().unwrap();
+        move_to(&mut reg, &mut ready, claude, "a").await;
+        move_to(&mut reg, &mut ready, claude, "b").await;
+        let b = place::resolved(tmp.path()).join("site-worktrees").join("b");
+        let payload = serde_json::json!({ "cwd": p.path, "session_id": "a1" });
+        reg.hook(claude, Harness::Claude, "PreToolUse", &payload);
+        assert_eq!(place::resolved(&reg.session(claude).unwrap().info.cwd), b);
+    }
+
+    #[tokio::test]
+    async fn agents_that_are_done_leave_room_for_more() {
+        let (_tmp, mut reg, p, claude) = site_with_claude();
+        let paths = termist_platform::Paths::under(_tmp.path().join("home"));
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_path(), "[agents]\nmax_spawned = 1\n").unwrap();
+        reg.config_paths = Some(paths);
+        let mut rx = connect(&mut reg);
+        let ask = |reg: &mut Registry, ticket| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::Spawn {
+                    ticket,
+                    from: Some(claude),
+                    cwd: p.path.clone(),
+                    task: "write the tests".into(),
+                    harness: None,
+                    model: None,
+                    effort: None,
+                    worktree: None,
+                    around: None,
+                },
+            })
+        };
+        ask(&mut reg, 1);
+        for done in [AgentStatus::Unseen, AgentStatus::Finished] {
+            let last = reg.sessions.len() - 1;
+            reg.sessions[last].info.status = done;
+            ask(&mut reg, 2);
+        }
+        assert_eq!(reg.sessions.len(), 4, "a child that is done runs no more");
+        reg.sessions[3].info.status = AgentStatus::NeedsFeedback;
+        ask(&mut reg, 3);
+        assert!(
+            drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::SpawnFailed { ticket: 3, .. })),
+            "one waiting for the user still runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_worktree_of_a_repo_not_on_github_is_removed_and_forgotten_when_gone() {
+        let (tmp, mut reg, p, claude) = site_with_claude();
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut removed = reg.removed_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        move_to(&mut reg, &mut ready, claude, "a").await;
+        move_to(&mut reg, &mut ready, claude, "b").await;
+        // Off `a` now: `X` removes it, though the repo is not one of GitHub's.
+        let a = reg
+            .store
+            .worktrees()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.branch.as_deref() == Some("a"))
+            .unwrap()
+            .path;
+        drain(&mut rx);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::RemoveWorktree {
+                path: a.clone(),
+                force: false,
+            },
+        });
+        assert!(
+            !drain(&mut rx)
+                .iter()
+                .any(|e| matches!(e, ServerEvent::RemoveFailed { .. })),
+            "removed, not refused"
+        );
+        let r = removed.recv().await.unwrap();
+        reg.worktree_removed(r);
+        assert!(!a.exists());
+        // `b` removed by hand: forgotten at the next read.
+        let b = place::resolved(tmp.path()).join("site-worktrees").join("b");
+        run_git(
+            &p.path,
+            &["worktree", "remove", "--force", &b.to_string_lossy()],
+        );
+        reg.scan_worktrees();
+        assert!(reg.store.worktrees().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_a_project_inside_a_repo_an_agent_starts_in_the_repo_s_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mono = tmp.path().join("mono");
+        std::fs::create_dir_all(mono.join("app")).unwrap();
+        run_git(&mono, &["init", "-q", "-b", "main"]);
+        run_git(&mono, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let p = ProjectInfo {
+            id: ProjectId::new(),
+            name: "app".into(),
+            path: mono.join("app"),
+            open: true,
+        };
+        let store = Store::open_in_memory();
+        store.upsert_project(&p).unwrap();
+        let mut reg = registry_on(store);
+        reg.launcher.programs.claude = "true".into();
+        reg.fetch = |_, _| Err("offline".into());
+        let mut ready = reg.ready_rx.take().unwrap();
+        let mut rx = connect(&mut reg);
+        reg.handle(Msg::Request {
+            client: ClientId(1),
+            req: ClientRequest::Spawn {
+                ticket: 1,
+                from: None,
+                cwd: p.path.clone(),
+                task: "write the tests".into(),
+                harness: Some(Harness::Claude),
+                model: None,
+                effort: None,
+                worktree: Some("tests".into()),
+                around: None,
+            },
+        });
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let events = drain(&mut rx);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Spawned { ticket: 1, .. })),
+            "{events:?}"
+        );
     }
 }
