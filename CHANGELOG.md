@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+Your agent setups, kept.
+
+### Added
+
+- **Presets**: in the new-task prompt `Ctrl+S` saves the agent, model, effort and the words around the
+  cursor as a preset; `e` lists them and opens the new task with one, ready for the task. `r` renames one,
+  `d` deletes it. They are kept in config.toml as `[[presets]]`, and `termist config check` reports one
+  that cannot be used.
+- **Cards named after their task**: an agent started with a prompt is named after its first words
+  (`Fix Login Redirect` rather than `codex-4`), on every client, in the palette and in notifications. Claude
+  Code's own title still wins once it has a subject.
+
+### Updating
+
+This version changes how the TUI and the daemon talk. Run `termist update`, then, when your sessions can
+stop, `termist kill` and start `termist` again.
+
 ## 0.2.3 - 2026-10-08
 
 Tools next to your agents.

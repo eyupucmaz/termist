@@ -306,7 +306,11 @@ impl SessionInfo {
         if self.user_named {
             return &self.name;
         }
-        self.title.as_deref().unwrap_or(&self.name)
+        // An agent's title before it has a subject is only its program's name.
+        self.title
+            .as_deref()
+            .filter(|t| !crate::autoname::generic_title(t))
+            .unwrap_or(&self.name)
     }
 }
 
@@ -321,6 +325,37 @@ pub struct StateSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_card_shows_its_own_name_its_agent_s_title_or_its_name() {
+        let mut s = SessionInfo {
+            id: crate::SessionId::new(),
+            project: crate::ProjectId::new(),
+            kind: SessionKind::Agent {
+                harness: Harness::Claude,
+            },
+            name: "Fix Login".into(),
+            status: crate::AgentStatus::Fresh,
+            agent_session_id: None,
+            title: Some("✳ Claude Code".into()),
+            last_activity_ms: 0,
+            model: None,
+            effort: None,
+            user_named: false,
+            archived: false,
+            cwd: "/w".into(),
+            place: None,
+        };
+        assert_eq!(
+            s.display_name(),
+            "Fix Login",
+            "the program's own name says nothing"
+        );
+        s.title = Some("✳ Login redirect".into());
+        assert_eq!(s.display_name(), "✳ Login redirect");
+        s.user_named = true;
+        assert_eq!(s.display_name(), "Fix Login");
+    }
 
     #[test]
     fn an_editor_is_gui_by_its_program_s_name() {

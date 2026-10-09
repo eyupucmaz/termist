@@ -27,6 +27,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use termist_core::config::Preset;
 use termist_core::config::{ColorDepth, Config, PanePosition, Sound};
 use termist_core::github::{CommentKind, GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoInfo};
 use termist_core::{
@@ -1608,6 +1609,7 @@ impl App {
             project,
             kind,
             cwd,
+            title_from: None,
             prompt: None,
             model: None,
             effort: None,
@@ -1816,6 +1818,8 @@ impl App {
             Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
+            Some(Overlay::Presets { .. }) => self.presets_key(key),
+            Some(Overlay::PresetName { .. }) => self.preset_name_key(key),
             Some(Overlay::Finder(_)) => self.finder_key(key, Instant::now()),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
             Some(Overlay::Help { .. }) => {
@@ -2280,6 +2284,7 @@ impl App {
             launch,
             worktree,
             new_worktree: None,
+            preset: None,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -2308,6 +2313,29 @@ impl App {
                     picker.select_index(i);
                 }
                 self.overlays.push(Overlay::Harness(picker));
+            }
+            KeyCode::Char('s') if ctrl => {
+                // The words before the cursor go first, the rest after what is typed.
+                let (prefix, postfix) = q.input.split_at_cursor();
+                let preset = Preset {
+                    name: String::new(),
+                    harness: q.launch.harness,
+                    model: q.launch.model.clone(),
+                    effort: q.launch.effort.clone(),
+                    prefix: prefix.to_string(),
+                    postfix: postfix.to_string(),
+                    local: false,
+                };
+                let name = q
+                    .preset
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                self.overlays.push(Overlay::PresetName {
+                    input: TextInput::with_text(&name, false),
+                    name_for: overlay::NameFor::Save(preset),
+                    replace: false,
+                });
             }
             KeyCode::Char('o') if ctrl => {
                 let launch = q.launch.clone();
@@ -2424,8 +2452,9 @@ impl App {
             Action::Send(ClientRequest::CreateSession {
                 project: q.project,
                 kind: SessionKind::Agent { harness },
-                cwd: q.worktree.map(|(path, _)| path),
+                cwd: q.worktree.clone().map(|(path, _)| path),
                 prompt,
+                title_from: q.title_from(),
                 model: q.launch.model,
                 effort: q.launch.effort,
                 cols: cols.max(20),
@@ -3407,6 +3436,215 @@ impl App {
         }
     }
 
+    /// `e`: the presets; none says how to make one.
+    fn open_presets(&mut self) {
+        if self.config.presets.is_empty() {
+            self.message = Some("no presets · in the new-task prompt, ^S saves one".into());
+            return;
+        }
+        let names = self.config.presets.iter().map(|p| p.name.clone()).collect();
+        self.overlays.push(Overlay::Presets {
+            picker: ListPicker::new(names, |n: &String| n.clone(), false),
+            deleting: None,
+        });
+    }
+
+    /// A key in the presets: Enter opens the new-task prompt with one, `r` renames,
+    /// `d` deletes after asking.
+    fn presets_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Presets { picker, deleting }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        if let Some(name) = deleting.take() {
+            self.message = None;
+            if key.code != KeyCode::Char('y') {
+                return vec![];
+            }
+            let list: Vec<Preset> = self
+                .main_presets()
+                .into_iter()
+                .filter(|p| p.name != name)
+                .collect();
+            return self.write_presets(list);
+        }
+        let chosen = picker.selected().cloned();
+        let local = chosen
+            .as_ref()
+            .and_then(|n| self.config.presets.iter().find(|p| &p.name == n))
+            .is_some_and(|p| p.local);
+        match key.code {
+            KeyCode::Char('r' | 'd') if local => {
+                let name = chosen.unwrap_or_default();
+                self.message = Some(format!("{name} is set in config.local.toml"));
+                vec![]
+            }
+            KeyCode::Char('r') => {
+                if let Some(name) = chosen {
+                    self.overlays.push(Overlay::PresetName {
+                        input: TextInput::with_text(&name, false),
+                        name_for: overlay::NameFor::Rename(name),
+                        replace: false,
+                    });
+                }
+                vec![]
+            }
+            KeyCode::Char('d') => {
+                if let Some(name) = &chosen {
+                    self.message = Some(format!("delete preset {name}? y/N"));
+                }
+                if let Some(Overlay::Presets { deleting, .. }) = self.overlays.last_mut() {
+                    *deleting = chosen;
+                }
+                vec![]
+            }
+            KeyCode::Esc => {
+                self.overlays.pop();
+                vec![]
+            }
+            KeyCode::Enter => {
+                let chosen = picker.selected().cloned();
+                self.overlays.pop();
+                let Some(preset) = chosen
+                    .and_then(|name| self.config.presets.iter().find(|p| p.name == name).cloned())
+                else {
+                    return vec![];
+                };
+                self.prompt_with(preset)
+            }
+            _ => {
+                picker.key(key);
+                vec![]
+            }
+        }
+    }
+
+    /// The presets config.toml keeps (config.local.toml's are not written).
+    fn main_presets(&self) -> Vec<Preset> {
+        self.config
+            .presets
+            .iter()
+            .filter(|p| !p.local)
+            .cloned()
+            .collect()
+    }
+
+    /// `list` as config.toml's presets: kept here too, the list on screen redrawn.
+    fn write_presets(&mut self, list: Vec<Preset>) -> Vec<Action> {
+        let known = self.main_presets().into_iter().map(|p| p.name).collect();
+        let local: Vec<Preset> = self
+            .config
+            .presets
+            .iter()
+            .filter(|p| p.local)
+            .cloned()
+            .collect();
+        self.config.presets = list.iter().cloned().chain(local).collect();
+        let names: Vec<String> = self.config.presets.iter().map(|p| p.name.clone()).collect();
+        for o in &mut self.overlays {
+            if let Overlay::Presets { picker, .. } = o {
+                let at = picker.highlight();
+                *picker = ListPicker::new(names.clone(), |n: &String| n.clone(), false);
+                picker.select_index(at.min(names.len().saturating_sub(1)));
+            }
+        }
+        if names.is_empty() {
+            self.overlays
+                .retain(|o| !matches!(o, Overlay::Presets { .. }));
+        }
+        vec![Action::WriteConfig(ConfigEdit::Presets { list, known })]
+    }
+
+    /// A key in the name box: Enter saves or renames, asking before it replaces.
+    fn preset_name_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::PresetName {
+            input,
+            name_for,
+            replace,
+        }) = self.overlays.last_mut()
+        else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.overlays.pop();
+                self.message = None;
+                return vec![];
+            }
+            KeyCode::Enter => {}
+            _ => {
+                input.key(key);
+                *replace = false;
+                return vec![];
+            }
+        }
+        let name = input.text().trim().to_string();
+        let (name_for, asked) = (name_for.clone(), *replace);
+        if name.is_empty() {
+            self.message = Some("a preset needs a name".into());
+            return vec![];
+        }
+        let taken = self.config.presets.iter().find(|p| p.name == name).cloned();
+        if taken.as_ref().is_some_and(|p| p.local) {
+            self.message = Some(format!("{name} is set in config.local.toml"));
+            return vec![];
+        }
+        let mut list = self.main_presets();
+        match name_for {
+            overlay::NameFor::Save(mut preset) => {
+                if taken.is_some() && !asked {
+                    if let Some(Overlay::PresetName { replace, .. }) = self.overlays.last_mut() {
+                        *replace = true;
+                    }
+                    self.message = Some(format!(
+                        "replace preset {name}? Enter: replace · Esc: keep it"
+                    ));
+                    return vec![];
+                }
+                preset.name = name.clone();
+                match list.iter_mut().find(|p| p.name == name) {
+                    Some(p) => *p = preset,
+                    None => list.push(preset),
+                }
+                self.message = Some(format!("saved preset {name}"));
+            }
+            overlay::NameFor::Rename(old) => {
+                if taken.is_some() && name != old {
+                    self.message = Some(format!("there is a preset {name} already"));
+                    return vec![];
+                }
+                if let Some(p) = list.iter_mut().find(|p| p.name == old) {
+                    p.name = name;
+                }
+            }
+        }
+        self.overlays.pop();
+        self.write_presets(list)
+    }
+
+    /// The new-task prompt with a preset's CLI, model and effort, and its words around
+    /// the cursor.
+    fn prompt_with(&mut self, preset: termist_core::config::Preset) -> Vec<Action> {
+        let Some(project) = self.project else {
+            self.message = Some("no project open".into());
+            return vec![];
+        };
+        let target = self.empty_worktree().or_else(|| self.card_worktree());
+        let actions = self.quick_prompt_in(project, "", target);
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            let text = format!("{}{}", preset.prefix, preset.postfix);
+            let mut input = TextInput::with_text_at(&text, preset.prefix.len(), true);
+            input.set_history(self.prompt_history.clone());
+            q.input = input;
+            q.launch = LaunchOptions {
+                harness: preset.harness,
+                model: preset.model.clone(),
+                effort: preset.effort.clone(),
+            };
+            q.preset = Some(preset);
+        }
+        actions
+    }
+
     /// `g`: the diff of the selection's folder: a band's stand-in's worktree, else the
     /// card's worktree or folder, else the project's.
     fn open_local_diff(&mut self) -> Vec<Action> {
@@ -3561,6 +3799,7 @@ impl App {
                 args: vec![],
             },
             cwd: Some(folder),
+            title_from: None,
             prompt: None,
             model: None,
             effort: None,
@@ -3762,6 +4001,7 @@ impl App {
             }
             KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::LocalDiff => return self.open_local_diff(),
+            KeyAction::Presets => self.open_presets(),
             KeyAction::Lazygit => return self.open_lazygit(),
             KeyAction::FindFile => return self.open_finder(FindKind::Files),
             KeyAction::Grep => return self.open_finder(FindKind::Grep),
@@ -4727,6 +4967,7 @@ mod tests {
                     harness: Harness::Claude
                 },
                 cwd: None,
+                title_from: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -4738,6 +4979,233 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(fresh.clone()));
         assert_eq!(app.selected, Some(fresh.id));
         assert_eq!(app.mode, Mode::Focus);
+    }
+
+    fn preset(name: &str, prefix: &str, postfix: &str) -> termist_core::config::Preset {
+        termist_core::config::Preset {
+            name: name.into(),
+            harness: Harness::Codex,
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+            prefix: prefix.into(),
+            postfix: postfix.into(),
+            local: false,
+        }
+    }
+
+    fn with_presets(app: &mut App) {
+        app.on_event(ServerEvent::Harnesses(vec![
+            HarnessInfo {
+                harness: Harness::Claude,
+                available: true,
+            },
+            HarnessInfo {
+                harness: Harness::Codex,
+                available: true,
+            },
+        ]));
+        app.config.presets = vec![
+            preset("review", "Review this: ", "\nThen list what to fix."),
+            preset("plain", "", ""),
+        ];
+    }
+
+    #[test]
+    fn e_lists_the_presets_and_enter_opens_the_prompt_ready_for_the_task() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Presets { .. })));
+        app.on_key(k(K::Enter));
+        let q = quick_prompt(&app);
+        assert_eq!(
+            (
+                q.launch.harness,
+                q.launch.model.as_deref(),
+                q.launch.effort.as_deref()
+            ),
+            (Harness::Codex, Some("gpt-5"), Some("high"))
+        );
+        assert_eq!(q.input.text(), "Review this: \nThen list what to fix.");
+        assert_eq!(
+            q.input.split_at_cursor().0,
+            "Review this: ",
+            "typed between its words"
+        );
+        for c in "fix login".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { prompt: Some(prompt), title_from: Some(from), .. }]
+                if prompt == "Review this: fix login\nThen list what to fix." && from == "fix login"
+        ));
+    }
+
+    #[test]
+    fn a_preset_s_words_edited_at_the_end_still_name_the_card_after_what_is_typed() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Enter));
+        for c in "fix login".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        // The postfix's line break deleted: the words typed are still the name.
+        app.on_key(k(K::Delete));
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { title_from: Some(from), .. }]
+                if from.starts_with("fix login")
+        ));
+    }
+
+    fn written(actions: &[Action]) -> Option<Vec<String>> {
+        actions.iter().find_map(|a| match a {
+            Action::WriteConfig(ConfigEdit::Presets { list, .. }) => {
+                Some(list.iter().map(|p| p.name.clone()).collect())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn ctrl_s_saves_the_prompt_as_a_preset_split_at_the_cursor() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Enter));
+        for c in "the parser ".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        app.on_key(ctrl('s'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::PresetName { .. })
+        ));
+        app.on_key(ctrl('u'));
+        for c in "parser".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            written(&actions),
+            Some(vec!["review".into(), "plain".into(), "parser".into()])
+        );
+        let saved = app
+            .config
+            .presets
+            .iter()
+            .find(|p| p.name == "parser")
+            .unwrap();
+        assert_eq!(
+            saved.prefix, "Review this: the parser ",
+            "before the cursor"
+        );
+        assert_eq!(saved.postfix, "\nThen list what to fix.", "after it");
+        assert_eq!(
+            (saved.harness, saved.model.as_deref()),
+            (Harness::Codex, Some("gpt-5"))
+        );
+        assert!(
+            matches!(app.overlays.last(), Some(Overlay::QuickPrompt(_))),
+            "the task is still to start"
+        );
+        assert_eq!(app.message.as_deref(), Some("saved preset parser"));
+        // The same name again asks first.
+        app.on_key(ctrl('s'));
+        app.on_key(ctrl('u'));
+        for c in "review".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        assert_eq!(written(&app.on_key(k(K::Enter))), None);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("replace preset review? Enter: replace · Esc: keep it")
+        );
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            written(&actions),
+            Some(vec!["review".into(), "plain".into(), "parser".into()])
+        );
+        assert_eq!(app.config.presets[0].prefix, "Review this: the parser ");
+    }
+
+    #[test]
+    fn r_renames_and_d_deletes_a_preset_but_not_one_from_the_local_file() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Char('r')));
+        app.on_key(ctrl('u'));
+        for c in "audit".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert_eq!(
+            written(&actions),
+            Some(vec!["audit".into(), "plain".into()])
+        );
+        assert!(
+            matches!(app.overlays.last(), Some(Overlay::Presets { .. })),
+            "back in the list"
+        );
+        app.on_key(k(K::Char('j')));
+        app.on_key(k(K::Char('d')));
+        assert_eq!(app.message.as_deref(), Some("delete preset plain? y/N"));
+        assert!(written(&app.on_key(k(K::Char('n')))).is_none(), "kept");
+        app.on_key(k(K::Char('d')));
+        let actions = app.on_key(k(K::Char('y')));
+        assert_eq!(written(&actions), Some(vec!["audit".into()]));
+        let mut local = preset("mine", "", "");
+        local.local = true;
+        app.config.presets.push(local);
+        app.on_key(k(K::Esc));
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Char('j')));
+        assert!(written(&app.on_key(k(K::Char('d')))).is_none());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("mine is set in config.local.toml")
+        );
+    }
+
+    #[test]
+    fn a_preset_with_nothing_typed_names_the_card_and_none_says_how_to_make_one() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Enter));
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { title_from: Some(from), .. }] if from == "review"
+        ));
+        // Without a preset the prompt names it.
+        app.on_key(k(K::Char('p')));
+        for c in "add tests".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [
+                _,
+                ClientRequest::CreateSession {
+                    title_from: None,
+                    ..
+                }
+            ]
+        ));
+        app.config.presets.clear();
+        app.on_key(k(K::Char('e')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("no presets · in the new-task prompt, ^S saves one")
+        );
     }
 
     #[test]
@@ -4763,6 +5231,7 @@ mod tests {
                     harness: Harness::Codex
                 },
                 cwd: None,
+                title_from: None,
                 prompt: None,
                 model: None,
                 effort: None,
@@ -5160,6 +5629,7 @@ mod tests {
                         harness: Harness::Claude
                     },
                     cwd: None,
+                    title_from: None,
                     prompt: Some("fix the login redirect\nand add a test".into()),
                     model: Some("opus".into()),
                     effort: Some("max".into()),

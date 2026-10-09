@@ -274,6 +274,22 @@ pub struct Config {
     pub github: GitHubConfig,
     pub diff: DiffConfig,
     pub keys: KeysConfig,
+    /// `e`: agent setups kept for again, config.toml's then config.local.toml's.
+    pub presets: Vec<Preset>,
+}
+
+/// An agent setup kept for again: its CLI, model and effort, and the words around what
+/// is typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preset {
+    pub name: String,
+    pub harness: Harness,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub prefix: String,
+    pub postfix: String,
+    /// From config.local.toml: shown, never written.
+    pub local: bool,
 }
 
 impl Default for Config {
@@ -299,6 +315,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             diff: DiffConfig::default(),
             keys: KeysConfig::default(),
+            presets: vec![],
         }
     }
 }
@@ -323,16 +340,19 @@ impl Config {
     pub fn parse(main: &str, local: Option<&str>) -> (Config, Vec<Problem>) {
         let mut problems = Vec::new();
         let mut table = read_table("config.toml", main, &mut problems);
+        // Each file's presets are its own: a list, not merged key by key.
+        let main_presets = table.remove("presets");
+        let mut local_presets = None;
         if let Some(local) = local {
-            merge(
-                &mut table,
-                read_table("config.local.toml", local, &mut problems),
-            );
+            let mut over = read_table("config.local.toml", local, &mut problems);
+            local_presets = over.remove("presets");
+            merge(&mut table, over);
         }
-        let config = Reader {
+        let mut reader = Reader {
             problems: &mut problems,
-        }
-        .config(table);
+        };
+        let mut config = reader.config(table);
+        config.presets = reader.presets(main_presets, local_presets);
         (config, problems)
     }
 }
@@ -402,9 +422,81 @@ impl Reader<'_> {
             github: self.github(&mut t),
             diff: self.diff(&mut t),
             keys: self.keys(&mut t),
+            presets: vec![],
         };
         self.unknown("", t);
         config
+    }
+
+    /// The presets of config.toml then config.local.toml; one that cannot be used is
+    /// reported and left out, and a name seen before is used once.
+    fn presets(&mut self, main: Option<Value>, local: Option<Value>) -> Vec<Preset> {
+        let mut presets: Vec<Preset> = vec![];
+        for (list, local) in [(main, false), (local, true)] {
+            let Some(list) = list else {
+                continue;
+            };
+            let Value::Array(items) = list else {
+                self.problem("presets", "should be a list of [[presets]] tables");
+                continue;
+            };
+            for (i, item) in items.into_iter().enumerate() {
+                let at = format!("presets[{i}]");
+                let Value::Table(mut t) = item else {
+                    self.problem(&at, "should be a table");
+                    continue;
+                };
+                let Some(preset) = self.preset(&mut t, &at, local) else {
+                    continue;
+                };
+                self.unknown(&at, t);
+                if presets.iter().any(|p| p.name == preset.name) {
+                    self.problem(
+                        &format!("{at}.name"),
+                        format!("{:?} is there twice; the first one is used", preset.name),
+                    );
+                    continue;
+                }
+                presets.push(preset);
+            }
+        }
+        presets
+    }
+
+    fn preset(&mut self, t: &mut Table, at: &str, local: bool) -> Option<Preset> {
+        let name = self.string(t, at, "name").filter(|n| !n.trim().is_empty());
+        let harness = self.string(t, at, "harness");
+        let model = self.string(t, at, "model").filter(|m| !m.is_empty());
+        let effort = self.string(t, at, "effort").filter(|e| !e.is_empty());
+        let prefix = self.string(t, at, "prefix").unwrap_or_default();
+        let postfix = self.string(t, at, "postfix").unwrap_or_default();
+        let Some(name) = name else {
+            self.problem(&format!("{at}.name"), "a preset needs a name");
+            return None;
+        };
+        let harness = match harness.as_deref().map(|h| (h, Harness::from_id(h))) {
+            Some((_, Some(h))) => h,
+            Some((h, None)) => {
+                self.problem(
+                    &format!("{at}.harness"),
+                    format!("unknown CLI {h:?}; CLIs: claude, codex, opencode"),
+                );
+                return None;
+            }
+            None => {
+                self.problem(&format!("{at}.harness"), "a preset needs a CLI");
+                return None;
+            }
+        };
+        Some(Preset {
+            name,
+            harness,
+            model,
+            effort,
+            prefix,
+            postfix,
+            local,
+        })
     }
 
     fn scenes(&mut self, t: &mut Table) -> ScenesConfig {
@@ -852,6 +944,71 @@ default = "codex"
         assert_eq!(c.keys.grid["g"], "quick_prompt");
         assert_eq!(c.keys.grid["p"], "none");
         assert_eq!(c.keys.focus["z"], "help");
+    }
+
+    #[test]
+    fn presets_come_from_both_files_and_a_broken_one_is_left_out() {
+        let main = r#"
+[[presets]]
+name = "review"
+harness = "claude"
+model = "opus"
+effort = "high"
+prefix = "Review this carefully: "
+postfix = "\nThen list what to fix."
+
+[[presets]]
+name = "odd"
+harness = "vim"
+
+[[presets]]
+harness = "codex"
+
+[[presets]]
+name = "quick"
+harness = "claude"
+colour = "red"
+"#;
+        let local = "[[presets]]\nname = \"mine\"\nharness = \"codex\"\n\n[[presets]]\nname = \"review\"\nharness = \"codex\"\n";
+        let (c, problems) = Config::parse(main, Some(local));
+        let names: Vec<(&str, bool)> = c
+            .presets
+            .iter()
+            .map(|p| (p.name.as_str(), p.local))
+            .collect();
+        assert_eq!(names, [("review", false), ("quick", false), ("mine", true)]);
+        let review = &c.presets[0];
+        assert_eq!(
+            (
+                review.harness,
+                review.model.as_deref(),
+                review.effort.as_deref()
+            ),
+            (Harness::Claude, Some("opus"), Some("high"))
+        );
+        assert_eq!(
+            (review.prefix.as_str(), review.postfix.as_str()),
+            ("Review this carefully: ", "\nThen list what to fix.")
+        );
+        assert_eq!(c.presets[1].prefix, "", "no text: none");
+        let said: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+        assert!(
+            said.iter().any(|p| p.starts_with("presets[1].harness")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|p| p.starts_with("presets[2].name")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|p| p.starts_with("presets[3].colour")),
+            "{said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|p| p.contains("review") && p.contains("twice")),
+            "{said:?}"
+        );
     }
 
     #[test]

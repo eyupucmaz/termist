@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -30,6 +30,9 @@ pub enum ClientRequest {
         kind: SessionKind,
         cwd: Option<PathBuf>,
         prompt: Option<String>,
+        /// What the card's name is made from, when not the prompt: the words typed
+        /// into a preset's prompt, or the preset's name.
+        title_from: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         cols: u16,
@@ -406,7 +409,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_13_since_the_tools() {
-        assert_eq!(PROTOCOL_VERSION, 13);
+    fn the_protocol_is_14_since_the_presets() {
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 }

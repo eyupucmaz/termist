@@ -31,6 +31,18 @@ pub enum Overlay {
     },
     /// `Ctrl+T` in the quick prompt: where the task starts.
     Target(ListPicker<TargetChoice>),
+    /// `e`: the presets, by name; `deleting` while one waits for `y`.
+    Presets {
+        picker: ListPicker<String>,
+        deleting: Option<String>,
+    },
+    /// `Ctrl+S` in the new-task prompt, or `r` on a preset: its name. `replace` once
+    /// asked whether to replace the preset of that name.
+    PresetName {
+        input: TextInput,
+        name_for: NameFor,
+        replace: bool,
+    },
     /// `W`: the project's worktrees, by folder.
     Worktrees(ListPicker<std::path::PathBuf>),
     /// `f` and `F`: a file of the repo, or the lines some text is on.
@@ -173,12 +185,20 @@ impl Overlay {
         match self {
             Overlay::QuickPrompt(q) => Some(&mut q.input),
             Overlay::ModelName(input)
+            | Overlay::PresetName { input, .. }
             | Overlay::FollowUp { input, .. }
             | Overlay::Rename { input, .. } => Some(input),
             Overlay::Compose(c) => Some(&mut c.input),
             _ => None,
         }
     }
+}
+
+/// What a name is asked for: the preset to save, or the preset to rename.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameFor {
+    Save(termist_core::config::Preset),
+    Rename(String),
 }
 
 /// Where review threads go: a card on the pull request's branch, or a new agent.
@@ -300,6 +320,26 @@ pub struct QuickPrompt {
     pub worktree: Option<(std::path::PathBuf, String)>,
     /// `Ctrl+N`: a new worktree, on a branch named from the prompt, in this repo.
     pub new_worktree: Option<NewWorktree>,
+    /// The preset it was opened with (`e`): the card is named after what is typed
+    /// between its words.
+    pub preset: Option<termist_core::config::Preset>,
+}
+
+impl QuickPrompt {
+    /// What the card is named after when not the whole prompt: the words typed into a
+    /// preset's, or the preset's name when nothing was.
+    pub fn title_from(&self) -> Option<String> {
+        let p = self.preset.as_ref()?;
+        let text = self.input.text();
+        // A prefix or postfix edited away leaves the rest as what was typed.
+        let rest = text.strip_prefix(p.prefix.as_str()).unwrap_or(text);
+        let middle = rest.strip_suffix(p.postfix.as_str()).unwrap_or(rest).trim();
+        Some(if middle.is_empty() {
+            p.name.clone()
+        } else {
+            middle.to_string()
+        })
+    }
 }
 
 /// A worktree to make for the task: in which repo (`repo@` before the branch where the
@@ -648,6 +688,7 @@ mod tests {
             launch: launch(Harness::Claude, Some("opus"), Some("high")),
             worktree: None,
             new_worktree: None,
+            preset: None,
         };
         q.set_harness(Harness::Codex);
         assert_eq!(q.launch, launch(Harness::Codex, None, Some("high")));

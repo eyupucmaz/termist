@@ -3315,6 +3315,45 @@ mod tests {
     }
 
     #[test]
+    fn the_presets_and_a_prompt_opened_with_one() {
+        let mut app = fixture();
+        app.on_event(ServerEvent::Harnesses(vec![termist_core::HarnessInfo {
+            harness: termist_core::Harness::Claude,
+            available: true,
+        }]));
+        let p =
+            |name: &str, harness, model: Option<&str>, prefix: &str| termist_core::config::Preset {
+                name: name.into(),
+                harness,
+                model: model.map(str::to_string),
+                effort: Some("high".into()),
+                prefix: prefix.into(),
+                postfix: "\nThen list what to fix.".into(),
+                local: false,
+            };
+        app.config.presets = vec![
+            p(
+                "review",
+                termist_core::Harness::Claude,
+                Some("opus"),
+                "Review this change carefully: ",
+            ),
+            p(
+                "tests",
+                termist_core::Harness::Codex,
+                None,
+                "Write the tests for ",
+            ),
+        ];
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        insta::assert_snapshot!("presets", render(&mut app, 100, 16).backend());
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = screen_text(&render(&mut app, 100, 24));
+        assert!(text.contains("new task · review"), "{text}");
+        assert!(text.contains("Review this change carefully:"), "{text}");
+    }
+
+    #[test]
     fn the_finder_shows_what_matched() {
         let mut app = fixture();
         app.on_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT));
