@@ -638,7 +638,8 @@ mod tests {
             },
             ClientRequest::MoveSession {
                 ticket: 2,
-                session,
+                session: Some(session),
+                cwd: "/w/site".into(),
                 branch: "fix-login".into(),
             },
         ];

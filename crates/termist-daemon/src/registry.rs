@@ -1375,8 +1375,9 @@ impl Registry {
             ClientRequest::MoveSession {
                 ticket,
                 session,
+                cwd,
                 branch,
-            } => self.move_session(client, ticket, session, branch),
+            } => self.move_session(client, ticket, session, cwd, branch),
             ClientRequest::SetWorktreeShown { path, shown } => {
                 let kept = self.store.worktrees().unwrap_or_default();
                 if let Some(w) = kept.iter().find(|w| w.path == path) {

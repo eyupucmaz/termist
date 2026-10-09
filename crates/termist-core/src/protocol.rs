@@ -257,10 +257,13 @@ pub enum ClientRequest {
         around: Option<(String, String)>,
     },
     /// `termist worktree`: the session goes on in `branch`'s worktree of its repo, made
-    /// when there is none; it is not restarted. Answered with `Moved` or `MoveFailed`.
+    /// when there is none; it is not restarted. From outside termist (`None`), the
+    /// worktree of the repo `cwd` is in is only made. Answered with `Moved` or
+    /// `MoveFailed`.
     MoveSession {
         ticket: u64,
-        session: SessionId,
+        session: Option<SessionId>,
+        cwd: PathBuf,
         branch: String,
     },
     Shutdown,

@@ -38,10 +38,12 @@ pub struct Start {
 #[derive(Debug)]
 pub enum After {
     Spawn(Box<Start>),
+    /// `session`: the card to move; `None` from outside termist.
     Move {
         client: ClientId,
         ticket: u64,
-        session: SessionId,
+        project: ProjectId,
+        session: Option<SessionId>,
     },
 }
 
@@ -228,16 +230,26 @@ impl Registry {
             After::Move {
                 client,
                 ticket,
+                project,
                 session,
             } => match result {
                 Ok(made) => {
-                    if let Some(project) = self.session(session).map(|s| s.info.project) {
-                        let id = self.repo_id(project, &repo);
-                        self.keep_worktree(project, id, &repo, &made);
-                        self.send_worktrees(project);
-                        self.scan_worktrees();
+                    let id = self.repo_id(project, &repo);
+                    self.keep_worktree(project, id, &repo, &made);
+                    self.send_worktrees(project);
+                    self.scan_worktrees();
+                    match session {
+                        Some(session) => self.moved_in(client, ticket, session, made),
+                        None => self.send(
+                            client,
+                            ServerEvent::Moved {
+                                ticket,
+                                path: made.path,
+                                branch: made.branch,
+                                new_from: made.new.then_some(made.base),
+                            },
+                        ),
                     }
-                    self.moved_in(client, ticket, session, made);
                 }
                 Err(why) => self.send(
                     client,
@@ -256,21 +268,26 @@ impl Registry {
         &mut self,
         client: ClientId,
         ticket: u64,
-        session: SessionId,
+        session: Option<SessionId>,
+        cwd: PathBuf,
         branch: String,
     ) {
-        let asked = match self.session(session) {
-            None => Err("the card that asked is gone".to_string()),
-            Some(s) => {
-                let folder = s.info.cwd.clone();
-                let after = After::Move {
-                    client,
-                    ticket,
-                    session,
-                };
-                self.make_worktree(&folder, branch, after)
-            }
-        };
+        let asked = match session {
+            Some(id) => match self.session(id) {
+                None => Err("the card that asked is gone".to_string()),
+                Some(s) => Ok((s.info.project, s.info.cwd.clone())),
+            },
+            None => self.project_of(&cwd).map(|project| (project, cwd)),
+        }
+        .and_then(|(project, folder)| {
+            let after = After::Move {
+                client,
+                ticket,
+                project,
+                session,
+            };
+            self.make_worktree(&folder, branch, after)
+        });
         if let Err(message) = asked {
             self.send(client, ServerEvent::MoveFailed { ticket, message });
         }
@@ -631,7 +648,8 @@ mod tests {
                 client: ClientId(1),
                 req: ClientRequest::MoveSession {
                     ticket,
-                    session,
+                    session: Some(session),
+                    cwd: PathBuf::from("/ignored"),
                     branch: "fix-login".into(),
                 },
             })
@@ -691,6 +709,39 @@ mod tests {
             ticket: 3,
             message: "the card that asked is gone".into()
         }));
+        // From outside termist: the worktree is made, nothing moves, nobody is told.
+        let outside = |reg: &mut Registry, ticket, cwd: &Path| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::MoveSession {
+                    ticket,
+                    session: None,
+                    cwd: cwd.to_path_buf(),
+                    branch: "docs".into(),
+                },
+            })
+        };
+        outside(&mut reg, 4, &p.path.join("src"));
+        let r = ready.recv().await.unwrap();
+        reg.worktree_ready(r);
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ServerEvent::Moved { ticket: 4, branch, new_from: Some(_), .. } if branch == "docs"
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ServerEvent::Notice { .. }))
+        );
+        assert_eq!(card(&reg), want.join("src"));
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        outside(&mut reg, 5, &elsewhere);
+        assert!(drain(&mut rx).iter().any(|e| matches!(
+            e,
+            ServerEvent::MoveFailed { ticket: 5, message } if message.ends_with("open its folder in termist first")
+        )));
     }
 
     #[tokio::test]
