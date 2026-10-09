@@ -27,6 +27,8 @@ pub enum ToastKind {
     },
     /// Something asked of GitHub did not happen.
     Failed,
+    /// Something an agent did through termist: `↳ Fix Login started Write Tests`.
+    Notice,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1315,6 +1315,21 @@ impl Registry {
                 branch,
                 ticket,
             } => self.create_worktree(client, project, repo, branch, ticket),
+            // Agents start agents and move into worktrees with the next steps of this change.
+            ClientRequest::Spawn { ticket, .. } => self.send(
+                client,
+                ServerEvent::SpawnFailed {
+                    ticket,
+                    message: "this daemon cannot start agents for agents yet".into(),
+                },
+            ),
+            ClientRequest::MoveSession { ticket, .. } => self.send(
+                client,
+                ServerEvent::MoveFailed {
+                    ticket,
+                    message: "this daemon cannot move a session yet".into(),
+                },
+            ),
             ClientRequest::SetWorktreeShown { path, shown } => {
                 let kept = self.store.worktrees().unwrap_or_default();
                 if let Some(w) = kept.iter().find(|w| w.path == path) {

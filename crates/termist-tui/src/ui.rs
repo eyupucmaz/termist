@@ -1005,7 +1005,8 @@ fn draw_toasts(f: &mut Frame, app: &App) {
             }
             crate::toast::ToastKind::Copied
             | crate::toast::ToastKind::Review { .. }
-            | crate::toast::ToastKind::Failed => {
+            | crate::toast::ToastKind::Failed
+            | crate::toast::ToastKind::Notice => {
                 let mut chars = text.chars();
                 let mark: String = chars.next().into_iter().collect();
                 let style = match toast.kind {

@@ -192,6 +192,11 @@ impl Default for WorktreesConfig {
 pub struct AgentsConfig {
     pub default: Harness,
     pub new_worktree_by_default: bool,
+    /// Agents are told of `termist spawn`, `worktree` and `open` (a few lines added to
+    /// their system prompt).
+    pub teach: bool,
+    /// How many agents one agent may have running that it started itself.
+    pub max_spawned: u32,
 }
 
 impl Default for AgentsConfig {
@@ -199,6 +204,8 @@ impl Default for AgentsConfig {
         AgentsConfig {
             default: Harness::Claude,
             new_worktree_by_default: false,
+            teach: true,
+            max_spawned: 4,
         }
     }
 }
@@ -610,6 +617,10 @@ impl Reader<'_> {
             new_worktree_by_default: self
                 .bool(&mut a, "agents", "new_worktree_by_default")
                 .unwrap_or(d.new_worktree_by_default),
+            teach: self.bool(&mut a, "agents", "teach").unwrap_or(d.teach),
+            max_spawned: self
+                .count(&mut a, "agents", "max_spawned", 1..=32)
+                .unwrap_or(d.max_spawned),
         };
         self.unknown("agents", a);
         agents
@@ -700,6 +711,31 @@ impl Reader<'_> {
                 self.problem(
                     &join(parent, key),
                     format!("should be true or false, not {other}"),
+                );
+                None
+            }
+        }
+    }
+
+    fn count(
+        &mut self,
+        t: &mut Table,
+        parent: &str,
+        key: &str,
+        range: std::ops::RangeInclusive<u32>,
+    ) -> Option<u32> {
+        match t.remove(key)? {
+            Value::Integer(n) if u32::try_from(n).is_ok_and(|n| range.contains(&n)) => {
+                Some(n as u32)
+            }
+            other => {
+                self.problem(
+                    &join(parent, key),
+                    format!(
+                        "should be a number from {} to {}, not {other}",
+                        range.start(),
+                        range.end()
+                    ),
                 );
                 None
             }
@@ -803,6 +839,20 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_section_turns_teaching_off_and_bounds_the_agents_an_agent_starts() {
+        let (c, problems) = parse("[agents]\nteach = false\nmax_spawned = 2\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!c.agents.teach);
+        assert_eq!(c.agents.max_spawned, 2);
+        let (c, problems) = parse("[agents]\nmax_spawned = 0\n");
+        assert_eq!(c.agents.max_spawned, 4);
+        assert!(
+            problems[0].starts_with("agents.max_spawned") && problems[0].contains("from 1 to 32"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn the_github_section_turns_pull_requests_off() {
         let (c, problems) = parse("[github]\nenabled = false\n");
         assert!(problems.is_empty(), "{problems:?}");
@@ -882,6 +932,8 @@ location = "sibling"
 [agents]
 default = "claude"
 new_worktree_by_default = false
+teach = true                    # agents learn termist spawn, worktree and open
+max_spawned = 4                 # agents one agent may have running
 
 [github]
 enabled = true                  # pull requests through the gh CLI (`v`)

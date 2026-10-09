@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -241,6 +241,28 @@ pub enum ClientRequest {
         from: Pos,
         backward: bool,
     },
+    /// `termist spawn`: an agent on `task`, started by the session `from` (in its
+    /// folder) or, from outside termist, in `cwd`. `worktree`: in that branch's worktree
+    /// of the repo, made when there is none. `around`: a preset's words before and
+    /// after the task. Answered with `Spawned` or `SpawnFailed` carrying `ticket`.
+    Spawn {
+        ticket: u64,
+        from: Option<SessionId>,
+        cwd: PathBuf,
+        task: String,
+        harness: Option<Harness>,
+        model: Option<String>,
+        effort: Option<String>,
+        worktree: Option<String>,
+        around: Option<(String, String)>,
+    },
+    /// `termist worktree`: the session goes on in `branch`'s worktree of its repo, made
+    /// when there is none; it is not restarted. Answered with `Moved` or `MoveFailed`.
+    MoveSession {
+        ticket: u64,
+        session: SessionId,
+        branch: String,
+    },
     Shutdown,
 }
 
@@ -401,6 +423,36 @@ pub enum ServerEvent {
         repo: String,
         title: String,
     },
+    /// A `Spawn` of this client started `session`, named `name`, in `place` (the
+    /// worktree's branch, or the project's name).
+    Spawned {
+        ticket: u64,
+        session: SessionId,
+        name: String,
+        harness: Harness,
+        place: String,
+    },
+    SpawnFailed {
+        ticket: u64,
+        message: String,
+    },
+    /// A `MoveSession` of this client: the card is in `path` now, on `branch`;
+    /// `new_from` is the ref a new branch was made from.
+    Moved {
+        ticket: u64,
+        path: PathBuf,
+        branch: String,
+        new_from: Option<String>,
+    },
+    MoveFailed {
+        ticket: u64,
+        message: String,
+    },
+    /// Something an agent did through termist, for every client to show:
+    /// `Fix Login started Write Tests`.
+    Notice {
+        text: String,
+    },
     Ack,
 }
 
@@ -409,7 +461,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_14_since_the_presets() {
-        assert_eq!(PROTOCOL_VERSION, 14);
+    fn the_protocol_is_15_since_agents_drive_termist() {
+        assert_eq!(PROTOCOL_VERSION, 15);
     }
 }

@@ -1016,6 +1016,20 @@ impl App {
                     until: Instant::now() + toast::AGENT_FOR,
                 });
             }
+            ServerEvent::Notice { text } => {
+                if self.config.notify.toasts {
+                    self.toasts.push(Toast {
+                        text: format!("↳ {text}"),
+                        kind: ToastKind::Notice,
+                        until: Instant::now() + toast::AGENT_FOR,
+                    });
+                }
+            }
+            // `termist spawn` and `termist worktree` wait for these; the TUI asks neither.
+            ServerEvent::Spawned { .. }
+            | ServerEvent::SpawnFailed { .. }
+            | ServerEvent::Moved { .. }
+            | ServerEvent::MoveFailed { .. } => {}
             ServerEvent::ReviewRequested {
                 project,
                 pr,
@@ -9734,6 +9748,27 @@ mod tests {
         assert!(actions.contains(&Action::OpenUrl(
             "https://github.com/acme/site/pull/212".into()
         )));
+    }
+
+    #[test]
+    fn what_an_agent_did_through_termist_shows_as_a_toast_unless_toasts_are_off() {
+        let (mut app, _) = app();
+        app.on_event(ServerEvent::Notice {
+            text: "Fix Login started Write Tests".into(),
+        });
+        assert_eq!(
+            app.toasts
+                .items()
+                .map(|t| t.text.clone())
+                .collect::<Vec<_>>(),
+            ["↳ Fix Login started Write Tests"]
+        );
+        let (mut quiet, _) = self::app();
+        quiet.config.notify.toasts = false;
+        quiet.on_event(ServerEvent::Notice {
+            text: "Fix Login moved to fix-login".into(),
+        });
+        assert_eq!(quiet.toasts.items().count(), 0);
     }
 
     #[test]
