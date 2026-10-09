@@ -1817,6 +1817,7 @@ impl App {
             Some(Overlay::Hand { .. }) => self.hand_key(key),
             Some(Overlay::Rename { .. }) => self.rename_key(key),
             Some(Overlay::Palette(_)) => self.palette_key(key),
+            Some(Overlay::Presets { .. }) => self.presets_key(key),
             Some(Overlay::Finder(_)) => self.finder_key(key, Instant::now()),
             Some(Overlay::OpenProject(_)) => self.open_project_key(key),
             Some(Overlay::Help { .. }) => {
@@ -2281,6 +2282,7 @@ impl App {
             launch,
             worktree,
             new_worktree: None,
+            preset: None,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -2425,9 +2427,9 @@ impl App {
             Action::Send(ClientRequest::CreateSession {
                 project: q.project,
                 kind: SessionKind::Agent { harness },
-                cwd: q.worktree.map(|(path, _)| path),
+                cwd: q.worktree.clone().map(|(path, _)| path),
                 prompt,
-                title_from: None,
+                title_from: q.title_from(),
                 model: q.launch.model,
                 effort: q.launch.effort,
                 cols: cols.max(20),
@@ -3409,6 +3411,70 @@ impl App {
         }
     }
 
+    /// `e`: the presets; none says how to make one.
+    fn open_presets(&mut self) {
+        if self.config.presets.is_empty() {
+            self.message = Some("no presets · in the new-task prompt, ^S saves one".into());
+            return;
+        }
+        let names = self.config.presets.iter().map(|p| p.name.clone()).collect();
+        self.overlays.push(Overlay::Presets {
+            picker: ListPicker::new(names, |n: &String| n.clone(), false),
+            deleting: None,
+        });
+    }
+
+    /// A key in the presets: Enter opens the new-task prompt with one.
+    fn presets_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(Overlay::Presets { picker, .. }) = self.overlays.last_mut() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.overlays.pop();
+                vec![]
+            }
+            KeyCode::Enter => {
+                let chosen = picker.selected().cloned();
+                self.overlays.pop();
+                let Some(preset) = chosen
+                    .and_then(|name| self.config.presets.iter().find(|p| p.name == name).cloned())
+                else {
+                    return vec![];
+                };
+                self.prompt_with(preset)
+            }
+            _ => {
+                picker.key(key);
+                vec![]
+            }
+        }
+    }
+
+    /// The new-task prompt with a preset's CLI, model and effort, and its words around
+    /// the cursor.
+    fn prompt_with(&mut self, preset: termist_core::config::Preset) -> Vec<Action> {
+        let Some(project) = self.project else {
+            self.message = Some("no project open".into());
+            return vec![];
+        };
+        let target = self.empty_worktree().or_else(|| self.card_worktree());
+        let actions = self.quick_prompt_in(project, "", target);
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            let text = format!("{}{}", preset.prefix, preset.postfix);
+            let mut input = TextInput::with_text_at(&text, preset.prefix.len(), true);
+            input.set_history(self.prompt_history.clone());
+            q.input = input;
+            q.launch = LaunchOptions {
+                harness: preset.harness,
+                model: preset.model.clone(),
+                effort: preset.effort.clone(),
+            };
+            q.preset = Some(preset);
+        }
+        actions
+    }
+
     /// `g`: the diff of the selection's folder: a band's stand-in's worktree, else the
     /// card's worktree or folder, else the project's.
     fn open_local_diff(&mut self) -> Vec<Action> {
@@ -3765,6 +3831,7 @@ impl App {
             }
             KeyAction::Worktrees => self.open_worktrees(),
             KeyAction::LocalDiff => return self.open_local_diff(),
+            KeyAction::Presets => self.open_presets(),
             KeyAction::Lazygit => return self.open_lazygit(),
             KeyAction::FindFile => return self.open_finder(FindKind::Files),
             KeyAction::Grep => return self.open_finder(FindKind::Grep),
@@ -4742,6 +4809,104 @@ mod tests {
         app.on_event(ServerEvent::SessionUpdated(fresh.clone()));
         assert_eq!(app.selected, Some(fresh.id));
         assert_eq!(app.mode, Mode::Focus);
+    }
+
+    fn preset(name: &str, prefix: &str, postfix: &str) -> termist_core::config::Preset {
+        termist_core::config::Preset {
+            name: name.into(),
+            harness: Harness::Codex,
+            model: Some("gpt-5".into()),
+            effort: Some("high".into()),
+            prefix: prefix.into(),
+            postfix: postfix.into(),
+            local: false,
+        }
+    }
+
+    fn with_presets(app: &mut App) {
+        app.on_event(ServerEvent::Harnesses(vec![
+            HarnessInfo {
+                harness: Harness::Claude,
+                available: true,
+            },
+            HarnessInfo {
+                harness: Harness::Codex,
+                available: true,
+            },
+        ]));
+        app.config.presets = vec![
+            preset("review", "Review this: ", "\nThen list what to fix."),
+            preset("plain", "", ""),
+        ];
+    }
+
+    #[test]
+    fn e_lists_the_presets_and_enter_opens_the_prompt_ready_for_the_task() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        assert!(matches!(app.overlays.last(), Some(Overlay::Presets { .. })));
+        app.on_key(k(K::Enter));
+        let q = quick_prompt(&app);
+        assert_eq!(
+            (
+                q.launch.harness,
+                q.launch.model.as_deref(),
+                q.launch.effort.as_deref()
+            ),
+            (Harness::Codex, Some("gpt-5"), Some("high"))
+        );
+        assert_eq!(q.input.text(), "Review this: \nThen list what to fix.");
+        assert_eq!(
+            q.input.split_at_cursor().0,
+            "Review this: ",
+            "typed between its words"
+        );
+        for c in "fix login".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { prompt: Some(prompt), title_from: Some(from), .. }]
+                if prompt == "Review this: fix login\nThen list what to fix." && from == "fix login"
+        ));
+    }
+
+    #[test]
+    fn a_preset_with_nothing_typed_names_the_card_and_none_says_how_to_make_one() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Enter));
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { title_from: Some(from), .. }] if from == "review"
+        ));
+        // Without a preset the prompt names it.
+        app.on_key(k(K::Char('p')));
+        for c in "add tests".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [
+                _,
+                ClientRequest::CreateSession {
+                    title_from: None,
+                    ..
+                }
+            ]
+        ));
+        app.config.presets.clear();
+        app.on_key(k(K::Char('e')));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            app.message.as_deref(),
+            Some("no presets · in the new-task prompt, ^S saves one")
+        );
     }
 
     #[test]

@@ -363,7 +363,10 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                         Some(Style::default().fg(t.status(termist_core::AgentStatus::Finished))),
                     )
                 }
-                _ => ("new task".to_string(), None),
+                _ => match &q.preset {
+                    Some(p) => (format!("new task · {}", p.name), None),
+                    None => ("new task".to_string(), None),
+                },
             };
             prompt_box_in(
                 f,
@@ -462,6 +465,50 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
             );
         }
         Overlay::Finder(finder) => draw_finder(f, t, body, finder),
+        Overlay::Presets { picker, .. } => {
+            let available = |h: termist_core::Harness| {
+                app.harnesses.iter().any(|i| i.harness == h && i.available)
+            };
+            let rows = picker
+                .visible()
+                .filter_map(|(_, name, on)| {
+                    let p = app.config.presets.iter().find(|p| &p.name == name)?;
+                    let setup = [
+                        Some(p.harness.id()),
+                        p.model.as_deref(),
+                        p.effort.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                    let words: String = p.prefix.replace('\n', " ").chars().take(28).collect();
+                    let style = if available(p.harness) {
+                        Style::default()
+                    } else {
+                        t.dim
+                    };
+                    Some(Line::from(vec![
+                        Span::styled(format!(" {:<12}", p.name), highlighted(style, on)),
+                        Span::styled(format!(" {setup:<24}"), highlighted(t.dim, on)),
+                        Span::styled(format!(" {words}"), highlighted(t.dim, on)),
+                    ]))
+                })
+                .collect();
+            draw_list(
+                f,
+                t,
+                body,
+                ListBox {
+                    title: "presets".into(),
+                    width: 72,
+                    query: None,
+                    rows,
+                    highlight: picker.highlight(),
+                    extra: vec![],
+                },
+            );
+        }
         Overlay::OpenProject(open) => {
             let rows = open
                 .list
@@ -1076,6 +1123,12 @@ fn draw_finder(f: &mut Frame, t: &Theme, body: Rect, finder: &crate::finder::Fin
 pub fn hint(overlay: &Overlay) -> &'static str {
     match overlay {
         Overlay::Finder(_) => "type to find · Tab files/text · ↑/↓ choose · Enter open · Esc close",
+        Overlay::Presets {
+            deleting: Some(_), ..
+        } => "y delete it · any key: keep it",
+        Overlay::Presets { .. } => {
+            "j/k choose · Enter new task with it · r rename · d delete · Esc close"
+        }
         Overlay::Harness(_) => "j/k choose · Enter start · 1-3 pick · Esc cancel",
         Overlay::QuickPrompt(_) => {
             "Enter start · Alt+Enter newline · ↑ history · Tab CLI · ^O model · ^P project · Esc cancel"

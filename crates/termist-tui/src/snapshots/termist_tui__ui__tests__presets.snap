@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 100, 16).backend()"
+---
+" termist   orbit-api ◆1✓1                                                                     12:00 "
+"┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮                                                    "
+"┃◆ claude-1            ┃│✓ shell-2             │                                                    "
+"┃claude · waiting      ┃│shell · done          │                                                    "
+"┗━━━━━━━━━━━━━━━━━━━━━━┛╰──────────────────────╯                                                    "
+"┌ claude-1 — claude ───────────────────────────────────────────────────────────────────────────────┐"
+"│hello        ┌ presets ─────────────────────────────────────────────────────────────┐             │"
+"│             │ review       claude opus high         Review this change carefully   │             │"
+"│             │ tests        codex high               Write the tests for            │             │"
+"│             └──────────────────────────────────────────────────────────────────────┘             │"
+"│                                                                                                  │"
+"│                                                                                                  │"
+"│                                                                                                  │"
+"│                                                                                                  │"
+"└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"j/k choose · Enter new task with it · r rename · d delete · Esc close                               "

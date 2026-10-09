@@ -41,6 +41,23 @@ impl TextInput {
         input
     }
 
+    /// An input holding `text`, with the cursor after its first `at` bytes (a char
+    /// boundary at or before it).
+    pub fn with_text_at(text: &str, at: usize, multiline: bool) -> TextInput {
+        let mut input = TextInput::with_text(text, multiline);
+        let mut at = at.min(input.text.len());
+        while !input.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        input.cursor = at;
+        input
+    }
+
+    /// The text before the cursor and after it.
+    pub fn split_at_cursor(&self) -> (&str, &str) {
+        self.text.split_at(self.cursor)
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }
