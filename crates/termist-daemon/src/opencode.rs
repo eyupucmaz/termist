@@ -55,12 +55,73 @@ export const TermistPlugin = async () => ({
 })
 "#;
 
+/// Writes the plugin, and beside it the words agents are told of termist (OpenCode
+/// reads instructions from a file).
 pub fn write_plugin(config_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = config_dir.join("plugins");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("termist.ts");
     std::fs::write(&path, PLUGIN_TS)?;
+    std::fs::write(teach_file(config_dir), termist_core::agents::TEACH)?;
     Ok(path)
+}
+
+/// Where `write_plugin` puts termist's words for agents.
+pub fn teach_file(config_dir: &Path) -> PathBuf {
+    config_dir.join("termist-agents.md")
+}
+
+/// What a card adds to OpenCode's config: termist's words as instructions, and leave
+/// to work in `also` (its repo's worktrees) without asking. `None`: nothing.
+pub fn extra(config_dir: &Path, teach: bool, also: Option<&Path>) -> Option<Value> {
+    let mut extra = serde_json::Map::new();
+    if teach {
+        extra.insert(
+            "instructions".into(),
+            json!([teach_file(config_dir).display().to_string()]),
+        );
+    }
+    if let Some(dir) = also {
+        let pattern = format!("{}/**", dir.display().to_string().replace('\\', "/"));
+        extra.insert(
+            "permission".into(),
+            json!({ "external_directory": { pattern: "allow" } }),
+        );
+    }
+    (!extra.is_empty()).then_some(Value::Object(extra))
+}
+
+/// `extra` laid over `content`: its instructions after the user's, its folders among
+/// theirs. `None` when `content` is not the shape OpenCode reads.
+fn with_extra(mut content: Value, extra: Option<Value>) -> Option<Value> {
+    let Some(Value::Object(extra)) = extra else {
+        return Some(content);
+    };
+    let config = content.as_object_mut()?;
+    if let Some(Value::Array(more)) = extra.get("instructions") {
+        let list = config.entry("instructions").or_insert(json!([]));
+        if list.is_null() {
+            *list = json!([]);
+        }
+        list.as_array_mut()?.extend(more.iter().cloned());
+    }
+    if let Some(Value::Object(dirs)) = extra
+        .get("permission")
+        .and_then(|p| p.get("external_directory"))
+    {
+        let permission = config.entry("permission").or_insert(json!({}));
+        let permission = permission.as_object_mut()?;
+        let external = permission.entry("external_directory").or_insert(json!({}));
+        // A single word ("ask") for every folder becomes the rule for the others.
+        if let Value::String(all) = external {
+            *external = json!({ "*": all.clone() });
+        }
+        let external = external.as_object_mut()?;
+        for (dir, rule) in dirs {
+            external.insert(dir.clone(), rule.clone());
+        }
+    }
+    Some(content)
 }
 
 /// A `file://` URL for `path`, percent-encoded as an RFC 3986 path: a space or a `#`
@@ -96,27 +157,47 @@ fn file_url(path: &Path) -> String {
 /// Spawn env for an OpenCode session. The user's own `OPENCODE_CONFIG_DIR` wins; then
 /// our plugin is added through `OPENCODE_CONFIG_CONTENT` instead (untested upstream,
 /// so logged), merged into the user's own `OPENCODE_CONFIG_CONTENT` if they have one.
+/// `extra` (see `extra`) always goes through `OPENCODE_CONFIG_CONTENT`, over theirs.
 pub fn config_env(
     config_dir: &Path,
     users_dir: Option<&OsStr>,
     users_content: Option<&OsStr>,
+    extra: Option<Value>,
 ) -> Vec<(String, String)> {
+    // An empty value configures nothing: as if it were unset.
+    let users = users_content.filter(|c| !c.to_string_lossy().trim().is_empty());
     if users_dir.is_none() {
-        return vec![(
+        let mut env = vec![(
             "OPENCODE_CONFIG_DIR".into(),
             config_dir.display().to_string(),
         )];
+        if extra.is_none() {
+            return env;
+        }
+        let content = match users {
+            None => Some(json!({})),
+            Some(users) => users
+                .to_str()
+                .and_then(|u| serde_json::from_str::<Value>(u).ok()),
+        };
+        match content.and_then(|c| with_extra(c, extra)) {
+            Some(content) => env.push(("OPENCODE_CONFIG_CONTENT".into(), content.to_string())),
+            None => tracing::warn!(
+                "could not read OPENCODE_CONFIG_CONTENT as a JSON object; it is passed on \
+                 unchanged, without termist's words for the agent"
+            ),
+        }
+        return env;
     }
     tracing::warn!(
         "OPENCODE_CONFIG_DIR is set; adding the termist plugin through OPENCODE_CONFIG_CONTENT"
     );
     let plugin = file_url(&config_dir.join("plugins").join("termist.ts"));
-    // An empty value configures nothing: as if it were unset.
-    let content = match users_content.filter(|c| !c.to_string_lossy().trim().is_empty()) {
+    let content = match users {
         None => Some(json!({ "plugin": [plugin] })),
         Some(users) => with_plugin(users, plugin),
     };
-    match content {
+    match content.and_then(|c| with_extra(c, extra)) {
         Some(content) => vec![("OPENCODE_CONFIG_CONTENT".into(), content.to_string())],
         None => {
             tracing::warn!(
@@ -226,16 +307,65 @@ mod tests {
     }
 
     #[test]
+    fn the_words_for_agents_are_written_beside_the_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(teach_file(tmp.path())).unwrap(),
+            termist_core::agents::TEACH
+        );
+    }
+
+    #[test]
+    fn termist_s_words_and_folder_join_the_user_s_own_config_content() {
+        let dir = std::path::Path::new("/data/opencode");
+        let extra = || extra(dir, true, Some(std::path::Path::new("/w/site-worktrees")));
+        let words = "/data/opencode/termist-agents.md";
+        // Ours alone, beside our config dir.
+        let env = config_env(dir, None, None, extra());
+        assert_eq!(env[0].0, "OPENCODE_CONFIG_DIR");
+        let v: serde_json::Value = serde_json::from_str(&env[1].1).unwrap();
+        assert_eq!(
+            v,
+            json!({"instructions": [words],
+                   "permission": {"external_directory": {"/w/site-worktrees/**": "allow"}}})
+        );
+        // Theirs kept: their instructions first, their folder rules beside ours.
+        let users = r#"{"instructions":["AGENTS.md"],"permission":{"external_directory":{"/notes/**":"allow"}}}"#;
+        let env = config_env(dir, None, Some(OsStr::new(users)), extra());
+        let v: serde_json::Value = serde_json::from_str(&env[1].1).unwrap();
+        assert_eq!(v["instructions"], json!(["AGENTS.md", words]));
+        assert_eq!(
+            v["permission"]["external_directory"],
+            json!({"/notes/**": "allow", "/w/site-worktrees/**": "allow"})
+        );
+        // One word for every folder stays the rule for the others.
+        let users = r#"{"permission":{"external_directory":"deny"}}"#;
+        let env = config_env(dir, None, Some(OsStr::new(users)), extra());
+        let v: serde_json::Value = serde_json::from_str(&env[1].1).unwrap();
+        assert_eq!(
+            v["permission"]["external_directory"],
+            json!({"*": "deny", "/w/site-worktrees/**": "allow"})
+        );
+        // Nothing to add: nothing but our config dir.
+        assert_eq!(extra_none(dir).len(), 1);
+    }
+
+    fn extra_none(dir: &std::path::Path) -> Vec<(String, String)> {
+        config_env(dir, None, None, extra(dir, false, None))
+    }
+
+    #[test]
     fn our_config_dir_is_used_unless_the_user_has_their_own() {
         let dir = std::path::Path::new("/data/opencode");
         assert_eq!(
-            config_env(dir, None, None),
+            config_env(dir, None, None, None),
             vec![(
                 "OPENCODE_CONFIG_DIR".to_string(),
                 "/data/opencode".to_string()
             )]
         );
-        let env = config_env(dir, Some(OsStr::new("/home/me/.oc")), None);
+        let env = config_env(dir, Some(OsStr::new("/home/me/.oc")), None, None);
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "OPENCODE_CONFIG_CONTENT");
         let v: serde_json::Value = serde_json::from_str(&env[0].1).unwrap();
@@ -249,6 +379,7 @@ mod tests {
             std::path::Path::new("/data/opencode"),
             Some(OsStr::new("/home/me/.oc")),
             Some(OsStr::new(users)),
+            None,
         );
         let (key, value) = env.into_iter().next()?;
         assert_eq!(key, "OPENCODE_CONFIG_CONTENT");

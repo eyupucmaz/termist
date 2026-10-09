@@ -1978,6 +1978,8 @@ impl Registry {
             cols,
             rows,
             resume: None,
+            teach: None,
+            also: None,
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
@@ -2104,6 +2106,8 @@ impl Registry {
             cols,
             rows,
             resume: resume.as_deref(),
+            teach: None,
+            also: None,
         });
         let program = launch.spec.program.clone();
         let cmd = session::spawn(launch.spec, self.colors, self.notes.clone())
