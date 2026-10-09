@@ -119,9 +119,11 @@ pub enum SettingRow {
     PullRequests,
     /// A pull request's diff: unified or split.
     DiffLayout,
+    /// Agents are told of `termist spawn`, `worktree` and `open`.
+    TeachAgents,
 }
 
-pub const SETTING_ROWS: [SettingRow; 19] = [
+pub const SETTING_ROWS: [SettingRow; 20] = [
     SettingRow::Theme,
     SettingRow::Colors,
     SettingRow::Prefix,
@@ -141,6 +143,7 @@ pub const SETTING_ROWS: [SettingRow; 19] = [
     SettingRow::StatusClock,
     SettingRow::PullRequests,
     SettingRow::DiffLayout,
+    SettingRow::TeachAgents,
 ];
 
 /// What a captured key will be.
