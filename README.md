@@ -157,6 +157,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 |---|---|
 | `p` | new task: type a prompt; `Tab` picks the agent, `^O` model and effort, from the list each CLI offers, `^P` project, `^T` where it starts, `^N` a new worktree |
 | `P` | new task like the selected card: its agent, model and worktree |
+| `e` | your presets: one opens the new task with its agent, model, effort and words (`Ctrl+S` in the new task saves one) |
 | `n` / `t` | new agent session / new shell, in the selected card's worktree |
 | `W` / `X` | the worktrees: show, hide, remove / remove the selected one (asks; the branch stays) |
 | `g` | what the selected card's branch changed, file by file (`Ctrl+a g` while typing into it) |
@@ -203,6 +204,26 @@ made outside termist too, to show one as a band or hide it.
 [agents]
 new_worktree_by_default = false   # the new-task prompt starts with Ctrl+N on
 ```
+
+### Presets
+
+A setup you start often (an agent, its model and effort, and words you put around the task) is a preset.
+In the new-task prompt `Ctrl+S` saves the one on screen: the words before the cursor go first, the ones
+after it last. `e` lists them; `Enter` opens the new task with one, the cursor where the task goes; `r`
+renames one, `d` deletes it. They are kept in config.toml:
+
+```toml
+[[presets]]
+name = "review"
+harness = "claude"
+model = "opus"
+effort = "high"
+prefix = "Review this change carefully: "
+postfix = "\nThen list what to fix, by file."
+```
+
+A card started with a task is named after it (`Fix Login Redirect` rather than `codex-4`); with a preset,
+after what you typed.
 
 ### Tools
 
