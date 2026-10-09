@@ -40,6 +40,18 @@ const PLACES_ROUND: Duration = Duration::from_secs(30);
 /// What git said about a session folder, read on a blocking thread.
 pub struct PlaceRead(pub PathBuf, pub Option<GitFacts>);
 
+/// What a new session is asked to be.
+struct NewSession {
+    project: ProjectId,
+    kind: SessionKind,
+    cwd: Option<PathBuf>,
+    prompt: Option<String>,
+    title_from: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    size: (u16, u16),
+}
+
 /// A repo's worktrees as a scan found them, each with what its branch changed; `None`
 /// when git could not list them.
 pub struct WorktreeScan {
@@ -1126,15 +1138,23 @@ impl Registry {
                 kind,
                 cwd,
                 prompt,
-                title_from: _,
+                title_from,
                 model,
                 effort,
                 cols,
                 rows,
             } => {
-                if let Err(e) =
-                    self.create_session(project, kind, cwd, prompt, model, effort, (cols, rows))
-                {
+                let new = NewSession {
+                    project,
+                    kind,
+                    cwd,
+                    prompt,
+                    title_from,
+                    model,
+                    effort,
+                    size: (cols, rows),
+                };
+                if let Err(e) = self.create_session_named(new) {
                     self.send(
                         client,
                         ServerEvent::Error {
@@ -1855,8 +1875,40 @@ impl Registry {
         prompt: Option<String>,
         model: Option<String>,
         effort: Option<String>,
-        (cols, rows): (u16, u16),
+        size: (u16, u16),
     ) -> anyhow::Result<()> {
+        self.create_session_named(NewSession {
+            project,
+            kind,
+            cwd,
+            prompt,
+            title_from: None,
+            model,
+            effort,
+            size,
+        })
+    }
+
+    /// A new session; an agent started with a prompt is named after it (or after
+    /// `title_from`), else `<kind>-<n>`.
+    fn create_session_named(&mut self, new: NewSession) -> anyhow::Result<()> {
+        let NewSession {
+            project,
+            kind,
+            cwd,
+            prompt,
+            title_from,
+            model,
+            effort,
+            size: (cols, rows),
+        } = new;
+        let named = match &kind {
+            SessionKind::Agent { .. } => title_from
+                .as_deref()
+                .or(prompt.as_deref())
+                .and_then(termist_core::autoname::from_prompt),
+            _ => None,
+        };
         let Some(root) = self
             .projects
             .iter()
@@ -1920,7 +1972,7 @@ impl Registry {
         let info = SessionInfo {
             id,
             project,
-            name: format!("{}-{}", kind.label(), self.created),
+            name: named.unwrap_or_else(|| format!("{}-{}", kind.label(), self.created)),
             kind,
             status: AgentStatus::Fresh,
             agent_session_id: launch.agent_session_id,
@@ -2672,6 +2724,63 @@ mod tests {
         assert_eq!(reg.sessions[0].info.effort.as_deref(), Some("xhigh"));
         if let Some(cmd) = &reg.sessions[0].cmd {
             let _ = cmd.send(SessionCmd::Kill);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_started_with_a_prompt_is_named_after_it() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        reg.launcher.programs.codex = "true".into();
+        let codex = || SessionKind::Agent {
+            harness: Harness::Codex,
+        };
+        let ask = |reg: &mut Registry, prompt: Option<&str>, title_from: Option<&str>| {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::CreateSession {
+                    project: p.id,
+                    kind: codex(),
+                    cwd: None,
+                    prompt: prompt.map(str::to_string),
+                    title_from: title_from.map(str::to_string),
+                    model: None,
+                    effort: None,
+                    cols: 80,
+                    rows: 24,
+                },
+            })
+        };
+        ask(&mut reg, Some("please fix the login redirect"), None);
+        ask(
+            &mut reg,
+            Some("Review this carefully: fix login\nThen list"),
+            Some("fix login"),
+        );
+        ask(&mut reg, Some("please"), None);
+        ask(&mut reg, None, None);
+        let names: Vec<&str> = reg.sessions.iter().map(|s| s.info.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Fix Login Redirect", "Fix Login", "codex-3", "codex-4"],
+            "from the prompt, from the words typed into a preset, else as before"
+        );
+        // Sent with its name the first time: no card flashes `codex-1`.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerEvent::SessionUpdated(s)) if s.name == "Fix Login Redirect"
+        ));
+        assert_eq!(
+            reg.store.load().unwrap().1[0].info.name,
+            "Fix Login Redirect",
+            "kept"
+        );
+        for s in &reg.sessions {
+            if let Some(cmd) = &s.cmd {
+                let _ = cmd.send(SessionCmd::Kill);
+            }
         }
     }
 
