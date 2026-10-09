@@ -17,6 +17,9 @@ pub enum ConfigEdit {
         table: &'static str,
         bindings: Vec<(String, String)>,
     },
+    /// The whole of `[[presets]]` (config.local.toml's are not among them). Empty
+    /// removes it.
+    Presets(Vec<termist_core::config::Preset>),
 }
 
 /// A new config.toml starts with a word on what it is.
@@ -76,6 +79,29 @@ pub fn apply(text: &str, edit: &ConfigEdit) -> Result<String, String> {
                 doc.remove("keys");
             }
         }
+        ConfigEdit::Presets(list) => {
+            doc.remove("presets");
+            if !list.is_empty() {
+                let mut all = toml_edit::ArrayOfTables::new();
+                for p in list {
+                    let mut t = Table::new();
+                    t["name"] = value(p.name.as_str());
+                    t["harness"] = value(p.harness.id());
+                    for (key, v) in [
+                        ("model", p.model.as_deref().unwrap_or_default()),
+                        ("effort", p.effort.as_deref().unwrap_or_default()),
+                        ("prefix", p.prefix.as_str()),
+                        ("postfix", p.postfix.as_str()),
+                    ] {
+                        if !v.is_empty() {
+                            t[key] = value(v);
+                        }
+                    }
+                    all.push(t);
+                }
+                doc.insert("presets", Item::ArrayOfTables(all));
+            }
+        }
     }
     Ok(if fresh {
         format!("{HEADER}\n{doc}")
@@ -129,6 +155,45 @@ mod tests {
                 .map(|(k, a)| (k.to_string(), a.to_string()))
                 .collect(),
         }
+    }
+
+    fn preset(name: &str, prefix: &str, postfix: &str) -> termist_core::config::Preset {
+        termist_core::config::Preset {
+            name: name.into(),
+            harness: termist_core::Harness::Claude,
+            model: Some("opus".into()),
+            effort: None,
+            prefix: prefix.into(),
+            postfix: postfix.into(),
+            local: false,
+        }
+    }
+
+    #[test]
+    fn presets_are_written_as_a_list_and_read_back_the_same() {
+        let text = "# mine\ntheme = \"moda\" # dark\n";
+        let list = vec![
+            preset("review", "Review this: ", "\nThen list what to fix."),
+            preset("plain", "", ""),
+        ];
+        let out = apply(text, &ConfigEdit::Presets(list.clone())).unwrap();
+        assert!(
+            out.starts_with("# mine\ntheme = \"moda\" # dark\n"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("effort"),
+            "nothing for what is not set: {out}"
+        );
+        let (read, problems) = Config::parse(&out, None);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(read.presets, list);
+        // Written again: the list is replaced, not added to; none removes it.
+        let out = apply(&out, &ConfigEdit::Presets(vec![list[1].clone()])).unwrap();
+        assert_eq!(Config::parse(&out, None).0.presets, [list[1].clone()]);
+        let out = apply(&out, &ConfigEdit::Presets(vec![])).unwrap();
+        assert!(!out.contains("presets"), "{out}");
+        assert!(out.contains("theme = \"moda\" # dark"));
     }
 
     #[test]
