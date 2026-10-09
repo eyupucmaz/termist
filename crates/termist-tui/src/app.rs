@@ -3530,6 +3530,7 @@ impl App {
 
     /// `list` as config.toml's presets: kept here too, the list on screen redrawn.
     fn write_presets(&mut self, list: Vec<Preset>) -> Vec<Action> {
+        let known = self.main_presets().into_iter().map(|p| p.name).collect();
         let local: Vec<Preset> = self
             .config
             .presets
@@ -3550,7 +3551,7 @@ impl App {
             self.overlays
                 .retain(|o| !matches!(o, Overlay::Presets { .. }));
         }
-        vec![Action::WriteConfig(ConfigEdit::Presets(list))]
+        vec![Action::WriteConfig(ConfigEdit::Presets { list, known })]
     }
 
     /// A key in the name box: Enter saves or renames, asking before it replaces.
@@ -5042,9 +5043,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_preset_s_words_edited_at_the_end_still_name_the_card_after_what_is_typed() {
+        let (mut app, _) = app();
+        with_presets(&mut app);
+        app.on_key(k(K::Char('e')));
+        app.on_key(k(K::Enter));
+        for c in "fix login".chars() {
+            app.on_key(k(K::Char(c)));
+        }
+        // The postfix's line break deleted: the words typed are still the name.
+        app.on_key(k(K::Delete));
+        let actions = app.on_key(k(K::Enter));
+        assert!(matches!(
+            sent(&actions)[..],
+            [_, ClientRequest::CreateSession { title_from: Some(from), .. }]
+                if from.starts_with("fix login")
+        ));
+    }
+
     fn written(actions: &[Action]) -> Option<Vec<String>> {
         actions.iter().find_map(|a| match a {
-            Action::WriteConfig(ConfigEdit::Presets(list)) => {
+            Action::WriteConfig(ConfigEdit::Presets { list, .. }) => {
                 Some(list.iter().map(|p| p.name.clone()).collect())
             }
             _ => None,

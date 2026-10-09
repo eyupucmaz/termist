@@ -17,9 +17,13 @@ pub enum ConfigEdit {
         table: &'static str,
         bindings: Vec<(String, String)>,
     },
-    /// The whole of `[[presets]]` (config.local.toml's are not among them). Empty
-    /// removes it.
-    Presets(Vec<termist_core::config::Preset>),
+    /// `[[presets]]` (config.local.toml's are not among them): the presets termist knows (`known`, by name) replaced by `list`; any other
+    /// `[[presets]]` table, one it could not read or never saw, stays as written. The
+    /// list keeps its place in the file and the comment above it; none left removes it.
+    Presets {
+        list: Vec<termist_core::config::Preset>,
+        known: Vec<String>,
+    },
 }
 
 /// A new config.toml starts with a word on what it is.
@@ -79,25 +83,50 @@ pub fn apply(text: &str, edit: &ConfigEdit) -> Result<String, String> {
                 doc.remove("keys");
             }
         }
-        ConfigEdit::Presets(list) => {
-            doc.remove("presets");
-            if !list.is_empty() {
-                let mut all = toml_edit::ArrayOfTables::new();
-                for p in list {
-                    let mut t = Table::new();
-                    t["name"] = value(p.name.as_str());
-                    t["harness"] = value(p.harness.id());
-                    for (key, v) in [
-                        ("model", p.model.as_deref().unwrap_or_default()),
-                        ("effort", p.effort.as_deref().unwrap_or_default()),
-                        ("prefix", p.prefix.as_str()),
-                        ("postfix", p.postfix.as_str()),
-                    ] {
-                        if !v.is_empty() {
-                            t[key] = value(v);
-                        }
-                    }
+        ConfigEdit::Presets { list, known } => {
+            let old: Vec<Table> = match doc.remove("presets") {
+                Some(Item::ArrayOfTables(a)) => a.into_iter().collect(),
+                _ => vec![],
+            };
+            let lead = old
+                .first()
+                .and_then(|t| t.decor().prefix())
+                .and_then(|p| p.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let at = old.first().and_then(Table::position);
+            let named = |t: &Table| t.get("name").and_then(Item::as_str).map(str::to_string);
+            let fresh_tables: Vec<Table> = list.iter().map(preset_table).collect();
+            let mut all = toml_edit::ArrayOfTables::new();
+            let mut placed = false;
+            for t in old {
+                let name = named(&t);
+                let theirs = name.as_ref().is_some_and(|n| known.contains(n));
+                let replaced = name
+                    .as_ref()
+                    .is_some_and(|n| list.iter().any(|p| &p.name == n));
+                if theirs && !placed {
+                    fresh_tables.iter().for_each(|f| all.push(f.clone()));
+                    placed = true;
+                } else if !theirs && !replaced {
                     all.push(t);
+                }
+            }
+            if !placed {
+                fresh_tables.into_iter().for_each(|f| all.push(f));
+            }
+            if all.is_empty() {
+                if !lead.trim().is_empty() {
+                    keep_comment(&mut doc, &lead, at.unwrap_or(isize::MAX));
+                }
+            } else {
+                for (i, t) in all.iter_mut().enumerate() {
+                    if at.is_some() {
+                        t.set_position(at);
+                    }
+                    if i == 0 && at.is_some() {
+                        t.decor_mut().set_prefix(lead.clone());
+                    }
                 }
                 doc.insert("presets", Item::ArrayOfTables(all));
             }
@@ -108,6 +137,75 @@ pub fn apply(text: &str, edit: &ConfigEdit) -> Result<String, String> {
     } else {
         doc.to_string()
     })
+}
+
+/// A preset as a `[[presets]]` table, nothing written for what is not set.
+fn preset_table(p: &termist_core::config::Preset) -> Table {
+    let mut t = Table::new();
+    t["name"] = value(p.name.as_str());
+    t["harness"] = value(p.harness.id());
+    for (key, v) in [
+        ("model", p.model.as_deref().unwrap_or_default()),
+        ("effort", p.effort.as_deref().unwrap_or_default()),
+        ("prefix", p.prefix.as_str()),
+        ("postfix", p.postfix.as_str()),
+    ] {
+        if !v.is_empty() {
+            t[key] = value(v);
+        }
+    }
+    t
+}
+
+/// The comment that stood above a removed table, kept above the table that came next,
+/// or at the end of the file when none did.
+fn keep_comment(doc: &mut DocumentMut, comment: &str, after: isize) {
+    fn next(t: &Table, after: isize, best: &mut Option<isize>) {
+        for (_, item) in t.iter() {
+            let tables: Vec<&Table> = match item {
+                Item::Table(t) => vec![t],
+                Item::ArrayOfTables(a) => a.iter().collect(),
+                _ => vec![],
+            };
+            for t in tables {
+                if let Some(p) = t.position().filter(|&p| p > after && !t.is_implicit()) {
+                    *best = Some(best.map_or(p, |b| b.min(p)));
+                }
+                next(t, after, best);
+            }
+        }
+    }
+    fn prepend(t: &mut Table, at: isize, comment: &str) -> bool {
+        for (_, item) in t.iter_mut() {
+            let tables: Vec<&mut Table> = match item {
+                Item::Table(t) => vec![t],
+                Item::ArrayOfTables(a) => a.iter_mut().collect(),
+                _ => vec![],
+            };
+            for t in tables {
+                if t.position() == Some(at) && !t.is_implicit() {
+                    let was = t
+                        .decor()
+                        .prefix()
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default();
+                    let now = format!("{comment}{}", was.trim_start_matches('\n'));
+                    t.decor_mut().set_prefix(now);
+                    return true;
+                }
+                if prepend(t, at, comment) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    let mut best = None;
+    next(doc.as_table(), after, &mut best);
+    if !best.is_some_and(|at| prepend(doc.as_table_mut(), at, comment)) {
+        let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
+        doc.set_trailing(format!("{comment}{trailing}"));
+    }
 }
 
 /// Puts `new` at the dotted `path`, making its table if there is none. A comment after
@@ -176,7 +274,14 @@ mod tests {
             preset("review", "Review this: ", "\nThen list what to fix."),
             preset("plain", "", ""),
         ];
-        let out = apply(text, &ConfigEdit::Presets(list.clone())).unwrap();
+        let out = apply(
+            text,
+            &ConfigEdit::Presets {
+                list: list.clone(),
+                known: vec![],
+            },
+        )
+        .unwrap();
         assert!(
             out.starts_with("# mine\ntheme = \"moda\" # dark\n"),
             "{out}"
@@ -189,11 +294,63 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(read.presets, list);
         // Written again: the list is replaced, not added to; none removes it.
-        let out = apply(&out, &ConfigEdit::Presets(vec![list[1].clone()])).unwrap();
+        let out = apply(
+            &out,
+            &ConfigEdit::Presets {
+                list: vec![list[1].clone()],
+                known: vec!["review".into(), "plain".into()],
+            },
+        )
+        .unwrap();
         assert_eq!(Config::parse(&out, None).0.presets, [list[1].clone()]);
-        let out = apply(&out, &ConfigEdit::Presets(vec![])).unwrap();
+        let out = apply(
+            &out,
+            &ConfigEdit::Presets {
+                list: vec![],
+                known: vec!["plain".into()],
+            },
+        )
+        .unwrap();
         assert!(!out.contains("presets"), "{out}");
         assert!(out.contains("theme = \"moda\" # dark"));
+    }
+
+    #[test]
+    fn presets_keep_their_place_their_comment_and_what_termist_did_not_know() {
+        let text = "# mine\n\n[[presets]]\nname = \"review\"\nharness = \"claude\"\n\n[[presets]]\nname = \"deploy\"\nharness = \"clade\"\n\n[scenes]\nsplash = false\n";
+        let edit = |list: Vec<termist_core::config::Preset>, known: &[&str]| ConfigEdit::Presets {
+            list,
+            known: known.iter().map(|n| n.to_string()).collect(),
+        };
+        let out = apply(text, &edit(vec![preset("careful", "", "")], &["review"])).unwrap();
+        assert!(
+            out.starts_with("# mine\n\n[[presets]]\nname = \"careful\""),
+            "{out}"
+        );
+        // A preset termist never showed (here a broken one) stays as written.
+        assert!(
+            out.contains("name = \"deploy\"\nharness = \"clade\""),
+            "{out}"
+        );
+        assert!(out.find("deploy") < out.find("[scenes]"), "{out}");
+        let out = apply(&out, &edit(vec![], &["careful"])).unwrap();
+        assert!(out.starts_with("# mine\n"), "{out}");
+        assert!(!out.contains("careful") && out.contains("deploy"), "{out}");
+    }
+
+    #[test]
+    fn the_last_preset_removed_leaves_the_comment_above_it() {
+        let edit = ConfigEdit::Presets {
+            list: vec![],
+            known: vec!["a".to_string()],
+        };
+        let alone = "# mine\n\n[[presets]]\nname = \"a\"\nharness = \"claude\"\n";
+        let out = apply(alone, &edit).unwrap();
+        assert!(out.contains("# mine") && !out.contains("presets"), "{out}");
+        let before = "# mine\n\n[[presets]]\nname = \"a\"\nharness = \"claude\"\n\n[scenes]\nsplash = false\n";
+        let out = apply(before, &edit).unwrap();
+        assert!(out.starts_with("# mine\n"), "{out}");
+        assert!(out.contains("[scenes]\nsplash = false"), "{out}");
     }
 
     #[test]

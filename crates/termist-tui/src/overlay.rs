@@ -331,12 +331,9 @@ impl QuickPrompt {
     pub fn title_from(&self) -> Option<String> {
         let p = self.preset.as_ref()?;
         let text = self.input.text();
-        let middle = text
-            .strip_prefix(p.prefix.as_str())
-            .unwrap_or(text)
-            .strip_suffix(p.postfix.as_str())
-            .unwrap_or_default()
-            .trim();
+        // A prefix or postfix edited away leaves the rest as what was typed.
+        let rest = text.strip_prefix(p.prefix.as_str()).unwrap_or(text);
+        let middle = rest.strip_suffix(p.postfix.as_str()).unwrap_or(rest).trim();
         Some(if middle.is_empty() {
             p.name.clone()
         } else {
