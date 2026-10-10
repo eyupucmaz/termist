@@ -481,6 +481,7 @@ impl Store {
                             user_named,
                             archived,
                             cwd: cwd.map(PathBuf::from).unwrap_or_default(),
+                            issue: None,
                             place: None,
                         },
                         resumable,
@@ -874,6 +875,7 @@ mod tests {
             archived: false,
             cwd: "/p".into(),
             place: None,
+            issue: None,
         }
     }
 

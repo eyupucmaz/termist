@@ -103,6 +103,7 @@ pub struct Catalog(pub Harness, pub Vec<ModelInfo>);
 /// A CLI's model list is asked for again after this long.
 pub const CATALOG_FRESH: Duration = Duration::from_secs(60 * 60);
 
+#[allow(clippy::large_enum_variant)] // a request is moved once, from its connection
 pub enum Msg {
     Connected {
         client: ClientId,
@@ -1191,6 +1192,7 @@ impl Registry {
                 kind,
                 cwd,
                 prompt,
+                issue: _,
                 title_from,
                 model,
                 effort,
@@ -2076,6 +2078,7 @@ impl Registry {
             user_named: false,
             archived: false,
             cwd: cwd.clone(),
+            issue: None,
             place: None,
         };
         let mut session = Session::new(info.clone(), Some(cmd), false);
@@ -2424,6 +2427,7 @@ mod tests {
             archived: false,
             cwd: p.path.clone(),
             place: None,
+            issue: None,
         }
     }
 
@@ -2926,6 +2930,7 @@ mod tests {
                     kind: codex(),
                     cwd: None,
                     prompt: prompt.map(str::to_string),
+                    issue: None,
                     title_from: title_from.map(str::to_string),
                     model: None,
                     effort: None,

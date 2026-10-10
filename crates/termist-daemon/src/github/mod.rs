@@ -295,6 +295,8 @@ struct Focus {
     pr: Option<PrRef>,
     /// The diff of `pr`.
     diff: bool,
+    /// The project's issues.
+    issues: bool,
 }
 
 /// A failure in a few words, for a message after "couldn't …".
@@ -588,12 +590,26 @@ impl GitHub {
             }
             return fx;
         }
-        if let ClientRequest::SetPrFocus { project, pr, diff } = req {
+        if let ClientRequest::SetPrFocus {
+            project,
+            pr,
+            diff,
+            issues,
+        } = req
+        {
             // Only a client that is still known: a late request after `gone` is ignored.
             let Some(focus) = self.clients.get_mut(&client) else {
                 return fx;
             };
-            let before = std::mem::replace(focus, Focus { project, pr, diff });
+            let before = std::mem::replace(
+                focus,
+                Focus {
+                    project,
+                    pr,
+                    diff,
+                    issues,
+                },
+            );
             if let Some(p) = project
                 && before.project != Some(p)
             {
@@ -2154,6 +2170,7 @@ mod tests {
             project: Some(p0),
             pr: None,
             diff: false,
+            issues: false,
         });
         w.tick();
         answer(&mut w, 0, "work", &["site", "admin"], vec![]);
@@ -2301,6 +2318,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: Some(pr),
             diff: false,
+            issues: false,
         });
         let fx = w.tick();
         assert!(
@@ -2338,6 +2356,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: false,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2360,6 +2379,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: Some(pr),
             diff: false,
+            issues: false,
         });
         w.join(ClientId(2));
         w.gh.gone(w.client);
@@ -2375,6 +2395,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: None,
             diff: false,
+            issues: false,
         });
         assert!(w.tick().jobs.is_empty());
     }
@@ -2391,6 +2412,7 @@ mod tests {
                 project: Some(w.projects[0].id),
                 pr: None,
                 diff: false,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2415,6 +2437,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: None,
             diff: false,
+            issues: false,
         });
         w.tick();
         let ids = vec![w.id("site"), w.id("admin")];
@@ -2668,6 +2691,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: Some(pr),
+            issues: false,
             diff,
         });
         (w, pr)
@@ -2797,6 +2821,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: true,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2841,6 +2866,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: true,
+                issues: false,
             },
             &w.store,
             &w.projects,

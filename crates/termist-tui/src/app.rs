@@ -779,6 +779,8 @@ impl App {
                 }
                 self.repo_lists.insert(project, (accounts, repos));
             }
+            // Defter: the issues tab keeps them (next task).
+            ServerEvent::Issues { .. } => {}
             ServerEvent::PrDetail { pr, state, detail } => {
                 self.pr_details.insert(pr, (state, detail.map(|d| *d)));
             }
@@ -1623,6 +1625,7 @@ impl App {
             project,
             kind,
             cwd,
+            issue: None,
             title_from: None,
             prompt: None,
             model: None,
@@ -2468,6 +2471,7 @@ impl App {
                 kind: SessionKind::Agent { harness },
                 cwd: q.worktree.clone().map(|(path, _)| path),
                 prompt,
+                issue: None,
                 title_from: q.title_from(),
                 model: q.launch.model,
                 effort: q.launch.effort,
@@ -3340,6 +3344,7 @@ impl App {
             project: focus.0,
             pr: focus.1,
             diff: focus.2,
+            issues: false,
         })]
     }
 
@@ -3813,6 +3818,7 @@ impl App {
                 args: vec![],
             },
             cwd: Some(folder),
+            issue: None,
             title_from: None,
             prompt: None,
             model: None,
@@ -4804,6 +4810,7 @@ mod tests {
             archived: false,
             cwd: "/p".into(),
             place: None,
+            issue: None,
         }
     }
 
@@ -4984,6 +4991,7 @@ mod tests {
                     harness: Harness::Claude
                 },
                 cwd: None,
+                issue: None,
                 title_from: None,
                 prompt: None,
                 model: None,
@@ -5248,6 +5256,7 @@ mod tests {
                     harness: Harness::Codex
                 },
                 cwd: None,
+                issue: None,
                 title_from: None,
                 prompt: None,
                 model: None,
@@ -5646,6 +5655,7 @@ mod tests {
                         harness: Harness::Claude
                     },
                     cwd: None,
+                    issue: None,
                     title_from: None,
                     prompt: Some("fix the login redirect\nand add a test".into()),
                     model: Some("opus".into()),

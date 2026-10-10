@@ -210,6 +210,27 @@ pub struct SessionInfo {
     pub cwd: PathBuf,
     /// What the daemon read about `cwd`; `None` until read.
     pub place: Option<Box<Place>>,
+    /// The issue it was started from (`i`, `Enter`).
+    pub issue: Option<IssueLink>,
+}
+
+/// The issue a session works on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueLink {
+    pub number: u32,
+    pub url: String,
+}
+
+impl IssueLink {
+    /// `https://github.com/acme/site/issues/12` is #12; any other address is no issue.
+    pub fn from_url(url: &str) -> Option<IssueLink> {
+        let mut parts = url.trim_end_matches('/').rsplit('/');
+        let number = parts.next()?.parse().ok()?;
+        (parts.next()? == "issues").then(|| IssueLink {
+            number,
+            url: url.to_string(),
+        })
+    }
 }
 
 /// A worktree of one of a project's repos, as the daemon keeps and reads it.
@@ -327,6 +348,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_issue_is_read_from_its_address() {
+        assert_eq!(
+            IssueLink::from_url("https://github.com/acme/site/issues/123"),
+            Some(IssueLink {
+                number: 123,
+                url: "https://github.com/acme/site/issues/123".into(),
+            })
+        );
+        assert_eq!(
+            IssueLink::from_url("https://github.com/acme/site/issues/7/").map(|i| i.number),
+            Some(7)
+        );
+        assert_eq!(
+            IssueLink::from_url("https://github.com/acme/site/pull/7"),
+            None
+        );
+        assert_eq!(
+            IssueLink::from_url("https://github.com/acme/site/issues/x"),
+            None
+        );
+        assert_eq!(IssueLink::from_url("7"), None);
+    }
+
+    #[test]
     fn a_card_shows_its_own_name_its_agent_s_title_or_its_name() {
         let mut s = SessionInfo {
             id: crate::SessionId::new(),
@@ -344,6 +389,7 @@ mod tests {
             user_named: false,
             archived: false,
             cwd: "/w".into(),
+            issue: None,
             place: None,
         };
         assert_eq!(
@@ -430,6 +476,7 @@ mod tests {
             user_named: false,
             archived: false,
             cwd: "/p".into(),
+            issue: None,
             place: None,
         };
         assert_eq!(s.display_name(), "shell-1");

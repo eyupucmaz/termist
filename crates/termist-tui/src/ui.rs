@@ -1193,6 +1193,7 @@ mod tests {
             user_named: false,
             archived: false,
             cwd: "/p".into(),
+            issue: None,
             place: None,
         };
         let waiting = mk(
@@ -1446,6 +1447,7 @@ mod tests {
                 user_named: false,
                 archived: false,
                 cwd: root.into(),
+                issue: None,
                 place: Some(Box::new(Place {
                     root: root.into(),
                     branch: branch.map(str::to_string),

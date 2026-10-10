@@ -167,6 +167,7 @@ mod tests {
                     gone: false,
                 })
             }),
+            issue: None,
         }
     }
 

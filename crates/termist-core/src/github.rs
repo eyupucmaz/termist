@@ -131,6 +131,43 @@ pub struct RepoPrs {
     pub failed_at: Option<String>,
 }
 
+/// An open issue, as a row of the issue list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueSummary {
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    pub body: String,
+    pub author: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    /// You, by login, are among `assignees`.
+    pub assigned_you: bool,
+    pub comments: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One repo's open issues.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoIssues {
+    pub repo: RepoId,
+    /// The folder's name.
+    pub name: String,
+    /// `owner/name` on GitHub.
+    pub slug: String,
+    pub state: GhState,
+    /// Your login on the account this repo is read with.
+    pub viewer: Option<String>,
+    /// The repo has issues turned on; `true` until read.
+    pub enabled: bool,
+    pub issues: Vec<IssueSummary>,
+    /// Open issues on GitHub: more than `issues` when over the limit.
+    pub total: u32,
+    pub fetched_at: Option<String>,
+    pub failed_at: Option<String>,
+}
+
 /// A repo in the repos window.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoInfo {
