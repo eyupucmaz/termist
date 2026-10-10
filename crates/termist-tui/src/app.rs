@@ -2730,7 +2730,9 @@ impl App {
                 && q.project != id
             {
                 q.project = id;
-                q.worktree = None; // the worktree was the other project's
+                // The worktrees were the other project's (an issue's new one too, in its repo).
+                q.worktree = None;
+                q.new_worktree = None;
             }
         }
         vec![]
@@ -3476,7 +3478,10 @@ impl App {
         let focus = match &mut self.view {
             View::Prs(view) => {
                 if view.project != project {
+                    // Afresh, but on the same tab.
+                    let section = view.section;
                     *view = PrView::for_project(project);
+                    view.section = section;
                 }
                 let empty = ProjectPrs::default();
                 let data = project.and_then(|p| self.prs.get(&p)).unwrap_or(&empty);
@@ -9501,6 +9506,36 @@ mod tests {
         let actions = app.on_key(k(K::Char('i')));
         assert_eq!(app.view, View::Grid, "i again: back to the grid");
         assert_eq!(issue_focus(&actions), [(None, false)]);
+    }
+
+    #[test]
+    fn another_project_tab_keeps_the_issues_tab() {
+        let (mut app, s) = app();
+        let web = s[3].project;
+        app.on_key(k(K::Char('i')));
+        let actions = app.on_key(k(K::Char(']')));
+        assert!(matches!(&app.view, View::Prs(v) if v.section == Section::Issues));
+        assert_eq!(issue_focus(&actions), [(Some(web), true)]);
+    }
+
+    #[test]
+    fn another_project_in_an_issue_s_prompt_drops_the_issue_s_worktree() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        with_prs(&mut app, api);
+        with_issues(&mut app, api);
+        app.on_key(k(K::Char('i')));
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('p'));
+        type_text(&mut app, "web");
+        app.on_key(k(K::Enter));
+        let q = quick(&app);
+        assert_eq!(q.project, s[3].project);
+        assert_eq!(
+            q.new_worktree, None,
+            "the worktree was the other project's repo's"
+        );
+        assert!(q.issue.is_some(), "the task is still the issue's");
     }
 
     #[test]

@@ -706,6 +706,7 @@ impl GitHub {
                 r.stored.visible = visible;
                 let project = r.stored.project;
                 self.hurry_project(project, now);
+                self.hurry_issues(project, now);
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
                 self.send_issues(project, To::All, &mut fx);

@@ -439,6 +439,23 @@ mod tests {
     }
 
     #[test]
+    fn a_repo_shown_or_hidden_is_read_again_now() {
+        let mut w = two_projects();
+        look(&mut w, 0, true);
+        w.tick();
+        answer(&mut w, vec![]);
+        w.now += 5 * S;
+        w.request(ClientRequest::SetRepoVisible {
+            repo: w.id("admin"),
+            visible: false,
+        });
+        assert_eq!(
+            ticked(&mut w),
+            [(0, "work".to_string(), vec!["site".to_string()])]
+        );
+    }
+
+    #[test]
     fn a_failed_read_keeps_the_last_issues_and_says_when() {
         let mut w = two_projects();
         look(&mut w, 0, true);
