@@ -398,9 +398,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             app.theme.archive.add_modifier(Modifier::BOLD),
         ));
     }
-    if matches!(app.view, View::Prs(_)) {
+    if let View::Prs(v) = &app.view {
+        let what = match v.section {
+            crate::prs::Section::Pulls => "pull requests ",
+            crate::prs::Section::Issues => "issues ",
+        };
         spans.push(Span::styled(
-            "pull requests ",
+            what,
             app.theme.accent.add_modifier(Modifier::BOLD),
         ));
     }
@@ -3573,6 +3577,68 @@ mod tests {
     fn the_inbox_beside_the_selected_pr() {
         let mut app = pr_fixture();
         insta::assert_snapshot!(render(&mut app, 110, 16).backend());
+    }
+
+    /// The PR fixture on its Issues tab: site with #123 and #7, api with issues off.
+    fn issues_fixture() -> App {
+        let mut app = pr_fixture();
+        let project = app.state.projects[0].id;
+        let mut data = crate::prs::issues::tests::data();
+        data.repos[0].issues[0].comments = 3;
+        data.repos[0].issues[0].assignees = vec!["alice".into(), "carol".into()];
+        data.repos[0].issues[0].body =
+            "Steps:\n\n1. log in from `/cars?q=bmw`\n2. the query is gone\n<!-- template -->"
+                .into();
+        app.on_event(ServerEvent::Issues {
+            project,
+            state: GhState::Ok,
+            repos: data.repos,
+        });
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn the_issues_beside_the_selected_one() {
+        let mut app = issues_fixture();
+        let text = screen(&render(&mut app, 110, 16));
+        assert!(text.contains("issues off"), "{text}");
+        assert!(text.contains("@alice +1"), "{text}");
+        assert!(text.contains("3 comments"), "{text}");
+        assert!(text.contains("+3 more on GitHub"), "{text}");
+        assert!(!text.contains("template"), "comments are not shown");
+        insta::assert_snapshot!(render(&mut app, 110, 16).backend());
+    }
+
+    #[test]
+    fn issues_without_gh_say_how_to_get_it() {
+        let mut app = issues_fixture();
+        let project = app.state.projects[0].id;
+        app.issues.get_mut(&project).unwrap().state = GhState::NoGh;
+        let text = screen(&render(&mut app, 80, 12));
+        assert!(
+            text.contains("termist reads issues through the GitHub CLI."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_names_in_the_title_switch_the_list() {
+        let mut app = issues_fixture();
+        render(&mut app, 80, 12);
+        let (section, x0, _) = app.pr_layout.borrow().sections[0];
+        assert_eq!(section, crate::prs::Section::Pulls);
+        let row = app.pr_layout.borrow().section_row;
+        app.on_mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: x0 + 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(&app.view, View::Prs(v) if v.section == crate::prs::Section::Pulls));
+        assert!(screen(&render(&mut app, 80, 12)).contains("#212"));
     }
 
     #[test]

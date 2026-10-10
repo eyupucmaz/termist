@@ -49,6 +49,8 @@ pub enum Action {
     PullRequests,
     /// The selected card's pull request, in the browser.
     PullRequestInBrowser,
+    /// The project's open issues (the pull request view's Issues tab).
+    Issues,
     /// Read GitHub again now.
     RefreshGitHub,
     Palette,
@@ -121,6 +123,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     ArchiveView,
     PullRequests,
     PullRequestInBrowser,
+    Issues,
     RefreshGitHub,
     Kill,
     Settings,
@@ -134,6 +137,7 @@ pub const FOCUS_ACTIONS: &[Action] = &[
     QuickPrompt,
     Palette,
     PullRequests,
+    Issues,
     LocalDiff,
     Presets,
     Lazygit,
@@ -178,6 +182,7 @@ impl Action {
             ArchiveView => "archive_view",
             PullRequests => "pull_requests",
             PullRequestInBrowser => "pull_request_in_browser",
+            Issues => "issues",
             RefreshGitHub => "refresh_github",
             Palette => "palette",
             HalfPageDown => "half_page_down",
@@ -233,6 +238,7 @@ impl Action {
             ArchiveView => "archived",
             PullRequests => "pull requests",
             PullRequestInBrowser => "PR in browser",
+            Issues => "issues",
             RefreshGitHub => "refresh",
             Palette => "sessions",
             HalfPageDown => "half page down",
@@ -277,6 +283,7 @@ impl Action {
             ArchiveView => "show archived cards",
             PullRequests => "the project's pull requests",
             PullRequestInBrowser => "the card's pull request in the browser",
+            Issues => "the project's open issues",
             RefreshGitHub => "read GitHub again now",
             Palette => "find a session",
             HalfPageDown => "half a page down",
@@ -500,6 +507,7 @@ impl Keymap {
             ("A", ArchiveView),
             ("v", PullRequests),
             ("V", PullRequestInBrowser),
+            ("i", Issues),
             ("R", RefreshGitHub),
             ("d", Kill),
             ("s", Settings),
@@ -518,6 +526,7 @@ impl Keymap {
             ("p", QuickPrompt),
             ("/", Palette),
             ("v", PullRequests),
+            ("i", Issues),
             ("g", LocalDiff),
             ("e", Presets),
             ("L", Lazygit),
@@ -760,6 +769,7 @@ mod tests {
         assert_eq!(grid('3'), Some(Tab(3)));
         assert_eq!(grid('A'), Some(ArchiveView));
         assert_eq!(grid('v'), Some(PullRequests));
+        assert_eq!(grid('i'), Some(Issues));
         assert_eq!(grid('R'), Some(RefreshGitHub));
         assert_eq!(
             m.action(Context::Focus, &ev(KeyCode::Char('v'), KeyModifiers::NONE)),

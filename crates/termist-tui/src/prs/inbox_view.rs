@@ -1,7 +1,9 @@
 //! The inbox: a project's open pull requests repo by repo, and on a wide screen the
 //! selected one beside them.
 use super::markdown::{cut, render, width_of};
-use super::{Filter, PrView, ProjectPrs, Row, checks_mark, conflict_mark, review_mark, rows};
+use super::{
+    Filter, PrView, ProjectPrs, Row, checks_mark, conflict_mark, review_mark, rows, section_title,
+};
 use crate::app::App;
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -17,12 +19,13 @@ use termist_core::github::{
 /// From this wide the selected pull request shows beside the list.
 pub const PREVIEW_FROM: u16 = 100;
 
-/// What to tell the user for a project-wide or repo-wide trouble.
-pub fn trouble(state: &GhState) -> Option<Vec<String>> {
+/// What to tell the user for a project-wide or repo-wide trouble; `what` is what
+/// termist reads there ("pull requests", "issues").
+pub fn trouble(state: &GhState, what: &str) -> Option<Vec<String>> {
     Some(match state {
         GhState::Ok => return None,
         GhState::NoGh => vec![
-            "termist reads pull requests through the GitHub CLI.".into(),
+            format!("termist reads {what} through the GitHub CLI."),
             "Install gh, then run: gh auth login".into(),
         ],
         GhState::LoggedOut => vec!["gh is not logged in.".into(), "Run: gh auth login".into()],
@@ -76,7 +79,7 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
     let Some(data) = app.prs.get(&project) else {
         return say(f, t, area, &["Reading GitHub…".into()]);
     };
-    if let Some(lines) = trouble(&data.state) {
+    if let Some(lines) = trouble(&data.state, "pull requests") {
         return say(f, t, area, &lines);
     }
     if data.discovered == 0 {
@@ -129,11 +132,12 @@ fn draw_list(f: &mut Frame, app: &App, view: &PrView, data: &ProjectPrs, name: &
         .filter_map(|r| r.failed_at.as_deref())
         .filter_map(unix_secs)
         .max();
-    let mut title = vec![Span::raw(format!(
-        " {name} · {} of {} repos ",
+    let mut title = section_title(app, view, area);
+    title.push(Span::raw(format!(
+        "· {name} · {} of {} repos ",
         data.repos.len(),
         data.discovered
-    ))];
+    )));
     title.push(match (fetched, failed) {
         (_, Some(bad)) if fetched.is_none_or(|ok| bad > ok) => {
             Span::styled(format!("⟳ failed {} ago ", age(now - bad)), t.warn)

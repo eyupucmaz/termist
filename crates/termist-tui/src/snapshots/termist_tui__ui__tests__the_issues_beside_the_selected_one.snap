@@ -1,0 +1,20 @@
+---
+source: crates/termist-tui/src/ui.rs
+expression: "render(&mut app, 110, 16).backend()"
+---
+" termist issues   orbit-api ◆1✓1⇄1                                                                      12:00 "
+"┌ Pull requests │ Issues · orbit-api ⟳ 1h ago ────────┐┌ #123 Login redirect loses the query ────────────────┐"
+"│ all  assigned to you  mine                          ││acme/site · opened by bob 1d ago                     │"
+"│                                                     ││labels bug, ui · assigned alice, carol · 3 comments  │"
+"│ site                                              2 ││                                                     │"
+"│▌ #123  Login re… bug ui  @alice +1  3 comments   2h ││Steps:                                               │"
+"│  #7    Docs for the dealer filter         docs   2h ││                                                     │"
+"│   +3 more on GitHub                                 ││1. log in from /cars?q=bmw                           │"
+"│ api · issues off                                    ││2. the query is gone                                 │"
+"│                                                     ││                                                     │"
+"│                                                     ││                                                     │"
+"│                                                     ││                                                     │"
+"│                                                     ││                                                     │"
+"│                                                     ││                                                     │"
+"└─────────────────────────────────────────────────────┘└─────────────────────────────────────────────────────┘"
+"issues · / search · f assigned to you · Tab pull requests · m repos · b browser · R refresh · Esc grid        "
