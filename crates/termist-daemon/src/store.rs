@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use termist_core::github::RepoId;
 use termist_core::{
-    AgentStatus, Harness, LaunchOptions, ProjectId, ProjectInfo, SessionId, SessionInfo,
+    AgentStatus, Harness, IssueLink, LaunchOptions, ProjectId, ProjectInfo, SessionId, SessionInfo,
     SessionKind, now_ms,
 };
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// How many prompts the history keeps.
 pub const PROMPT_HISTORY_MAX: usize = 200;
@@ -121,6 +121,12 @@ PRAGMA user_version = 6;
 const MIGRATE_V7: &str = "
 ALTER TABLE sessions ADD COLUMN spawned_by TEXT;
 PRAGMA user_version = 7;
+";
+
+/// v7 brought to v8: the issue a session was started from, by its address.
+const MIGRATE_V8: &str = "
+ALTER TABLE sessions ADD COLUMN issue TEXT;
+PRAGMA user_version = 8;
 ";
 
 /// A worktree of one of a project's repos, as termist keeps it.
@@ -286,6 +292,7 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
             1 => {
                 Self::upgrade(&mut conn, MIGRATE_V2)?;
@@ -294,6 +301,7 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
             2 => {
                 Self::upgrade(&mut conn, MIGRATE_V3)?;
@@ -301,30 +309,39 @@ impl Store {
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
             3 => {
                 Self::upgrade(&mut conn, MIGRATE_V4)?;
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
             4 => {
                 Self::upgrade(&mut conn, MIGRATE_V5)?;
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
             5 => {
                 Self::upgrade(&mut conn, MIGRATE_V6)?;
                 Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
             }
-            6 => Self::upgrade(&mut conn, MIGRATE_V7)?,
+            6 => {
+                Self::upgrade(&mut conn, MIGRATE_V7)?;
+                Self::upgrade(&mut conn, MIGRATE_V8)?;
+            }
+            7 => Self::upgrade(&mut conn, MIGRATE_V8)?,
             SCHEMA_VERSION => {}
             other => anyhow::bail!("unknown schema version {other}"),
         }
         // A table of the right version but the wrong shape is as unusable as garbage.
         conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                    created_ms, resumable, model, effort, user_named, archived, cwd, spawned_by
+                    created_ms, resumable, model, effort, user_named, archived, cwd, spawned_by,
+                    issue
              FROM sessions LIMIT 0",
         )?;
         conn.prepare("SELECT id, name, path, created_ms, open FROM projects LIMIT 0")?;
@@ -376,12 +393,13 @@ impl Store {
     pub fn upsert_session(&self, s: &SessionInfo, resumable: bool) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions (id, project_id, kind, name, agent_session_id, title, last_activity_ms,
-                                   created_ms, resumable, model, effort, user_named, archived, cwd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                                   created_ms, resumable, model, effort, user_named, archived, cwd, issue)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, agent_session_id = excluded.agent_session_id,
                title = excluded.title, last_activity_ms = excluded.last_activity_ms,
                resumable = excluded.resumable, model = excluded.model, effort = excluded.effort,
-               user_named = excluded.user_named, archived = excluded.archived, cwd = excluded.cwd",
+               user_named = excluded.user_named, archived = excluded.archived, cwd = excluded.cwd,
+               issue = excluded.issue",
             params![
                 s.id.to_string(),
                 s.project.to_string(),
@@ -396,7 +414,8 @@ impl Store {
                 s.effort,
                 s.user_named,
                 s.archived,
-                s.cwd.to_string_lossy()
+                s.cwd.to_string_lossy(),
+                s.issue.as_ref().map(|i| i.url.as_str())
             ],
         )?;
         Ok(())
@@ -435,7 +454,7 @@ impl Store {
             .collect();
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, kind, name, agent_session_id, title, last_activity_ms, resumable,
-                    model, effort, user_named, archived, cwd
+                    model, effort, user_named, archived, cwd, issue
              FROM sessions ORDER BY created_ms, rowid",
         )?;
         let sessions = stmt
@@ -457,6 +476,7 @@ impl Store {
                         r.get::<_, bool>(10)?,
                         r.get::<_, bool>(11)?,
                         r.get::<_, Option<String>>(12)?,
+                        r.get::<_, Option<String>>(13)?,
                     ),
                 ))
             })?
@@ -464,7 +484,7 @@ impl Store {
             .filter_map(
                 |(
                     (id, project, kind, name, agent_session_id, title, last, resumable),
-                    (model, effort, user_named, archived, cwd),
+                    (model, effort, user_named, archived, cwd, issue),
                 )| {
                     Some(StoredSession {
                         info: SessionInfo {
@@ -481,7 +501,7 @@ impl Store {
                             user_named,
                             archived,
                             cwd: cwd.map(PathBuf::from).unwrap_or_default(),
-                            issue: None,
+                            issue: issue.as_deref().and_then(IssueLink::from_url),
                             place: None,
                         },
                         resumable,
@@ -1495,6 +1515,53 @@ mod tests {
         assert!(store.spawned_by().unwrap().is_empty());
         store.set_spawned_by(session, agent).unwrap();
         assert_eq!(store.spawned_by().unwrap()[&session], agent);
+    }
+
+    #[test]
+    fn a_v7_store_gains_the_issue_and_a_session_keeps_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termist.db");
+        let p = project("/code/api");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in [
+                SCHEMA_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
+            ] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_ms) VALUES (?1, 'api', '/code/api', 1)",
+                params![p.id.to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, kind, name, last_activity_ms, created_ms)
+                 VALUES (?1, ?2, 'codex', 'codex-1', 1, 1)",
+                params![SessionId::new().to_string(), p.id.to_string()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.load().unwrap().1[0].info.issue,
+            None,
+            "an old card has none"
+        );
+        let mut s = session(p.id, SessionKind::Shell, "Login");
+        s.issue = IssueLink::from_url("https://github.com/acme/api/issues/123");
+        store.upsert_session(&s, false).unwrap();
+        s.name = "Login redirect".into();
+        store.upsert_session(&s, false).unwrap();
+        let (_, sessions) = Store::open(&path).unwrap().load().unwrap();
+        assert_eq!(
+            sessions[1]
+                .info
+                .issue
+                .as_ref()
+                .map(|i| (i.number, i.url.as_str())),
+            Some((123, "https://github.com/acme/api/issues/123")),
+            "kept through a rename and a reopen"
+        );
     }
 
     #[test]

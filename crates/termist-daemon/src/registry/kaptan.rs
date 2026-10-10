@@ -383,6 +383,7 @@ impl Registry {
             effort,
             size: (80, 24),
             spawned_by: from,
+            issue: None,
         };
         let id = match self.create_session_named(new) {
             Ok(id) => id,
