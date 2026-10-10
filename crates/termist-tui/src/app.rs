@@ -3426,6 +3426,22 @@ impl App {
         s.place.as_ref()?.pr
     }
 
+    /// `Shift+I`: the issue the selected card was started from, in the browser.
+    fn card_issue_in_browser(&mut self) -> Vec<Action> {
+        let url = self
+            .selected
+            .and_then(|id| self.state.sessions.iter().find(|s| s.id == id))
+            .and_then(|s| s.issue.as_ref())
+            .map(|i| i.url.clone());
+        match url {
+            Some(url) => vec![Action::OpenUrl(url)],
+            None => {
+                self.message = Some("no issue for this card".into());
+                vec![]
+            }
+        }
+    }
+
     /// `Shift+V`: the selected card's pull request in the browser.
     fn card_pr_in_browser(&mut self) -> Vec<Action> {
         let url = self.card_pr().and_then(|pr| {
@@ -4225,6 +4241,7 @@ impl App {
             KeyAction::ArchiveView => self.set_archive_view(!self.archive_view()),
             KeyAction::PullRequests => self.toggle_prs(Section::Pulls),
             KeyAction::Issues => self.toggle_prs(Section::Issues),
+            KeyAction::IssueInBrowser => return self.card_issue_in_browser(),
             KeyAction::PullRequestInBrowser => return self.card_pr_in_browser(),
             KeyAction::RefreshGitHub => {
                 if let Some(project) = self.project
@@ -9604,6 +9621,23 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn shift_i_opens_the_card_s_issue_or_says_it_has_none() {
+        let (mut app, s) = app();
+        app.select(s[0].id);
+        assert!(app.on_key(k(K::Char('I'))).is_empty());
+        assert_eq!(app.message.as_deref(), Some("no issue for this card"));
+        let mut info = s[0].clone();
+        info.issue = termist_core::IssueLink::from_url("https://github.com/acme/site/issues/123");
+        app.on_event(ServerEvent::SessionUpdated(info));
+        assert_eq!(
+            app.on_key(k(K::Char('I'))),
+            [Action::OpenUrl(
+                "https://github.com/acme/site/issues/123".into()
+            )]
+        );
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub enum Action {
     PullRequestInBrowser,
     /// The project's open issues (the pull request view's Issues tab).
     Issues,
+    /// The selected card's issue, in the browser.
+    IssueInBrowser,
     /// Read GitHub again now.
     RefreshGitHub,
     Palette,
@@ -124,6 +126,7 @@ pub const GRID_ACTIONS: &[Action] = &[
     PullRequests,
     PullRequestInBrowser,
     Issues,
+    IssueInBrowser,
     RefreshGitHub,
     Kill,
     Settings,
@@ -183,6 +186,7 @@ impl Action {
             PullRequests => "pull_requests",
             PullRequestInBrowser => "pull_request_in_browser",
             Issues => "issues",
+            IssueInBrowser => "issue_in_browser",
             RefreshGitHub => "refresh_github",
             Palette => "palette",
             HalfPageDown => "half_page_down",
@@ -239,6 +243,7 @@ impl Action {
             PullRequests => "pull requests",
             PullRequestInBrowser => "PR in browser",
             Issues => "issues",
+            IssueInBrowser => "issue in browser",
             RefreshGitHub => "refresh",
             Palette => "sessions",
             HalfPageDown => "half page down",
@@ -284,6 +289,7 @@ impl Action {
             PullRequests => "the project's pull requests",
             PullRequestInBrowser => "the card's pull request in the browser",
             Issues => "the project's open issues",
+            IssueInBrowser => "the card's issue in the browser",
             RefreshGitHub => "read GitHub again now",
             Palette => "find a session",
             HalfPageDown => "half a page down",
@@ -508,6 +514,7 @@ impl Keymap {
             ("v", PullRequests),
             ("V", PullRequestInBrowser),
             ("i", Issues),
+            ("I", IssueInBrowser),
             ("R", RefreshGitHub),
             ("d", Kill),
             ("s", Settings),
@@ -770,6 +777,7 @@ mod tests {
         assert_eq!(grid('A'), Some(ArchiveView));
         assert_eq!(grid('v'), Some(PullRequests));
         assert_eq!(grid('i'), Some(Issues));
+        assert_eq!(grid('I'), Some(IssueInBrowser));
         assert_eq!(grid('R'), Some(RefreshGitHub));
         assert_eq!(
             m.action(Context::Focus, &ev(KeyCode::Char('v'), KeyModifiers::NONE)),

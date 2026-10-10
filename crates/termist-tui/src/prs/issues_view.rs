@@ -210,14 +210,27 @@ fn row_line(app: &App, row: &IssueRow, selected: bool, width: usize, now: i64) -
         IssueRow::More { more, .. } => {
             Line::from(Span::styled(format!("   +{more} more on GitHub"), t.dim))
         }
-        IssueRow::Issue { issue, .. } => issue_line(t, issue, selected, width, now),
+        IssueRow::Issue { issue, .. } => {
+            let card = app
+                .state
+                .sessions
+                .iter()
+                .find(|s| !s.archived && s.issue.as_ref().is_some_and(|i| i.url == issue.url))
+                .map(|s| s.display_name());
+            issue_line(t, issue, card, selected, width, now)
+        }
     }
 }
 
-/// `▌ #123  Login redirect loses the query   bug ui  @alice  3 comments  2d`.
+/// Below this many columns for its title, a row's tail gives way.
+const TITLE_ROOM: usize = 24;
+
+/// `▌ #123  Login redirect loses the query   bug ui  @alice  3 comments  2d`; a card
+/// working on it comes first in the tail: `● Fix Login`.
 fn issue_line(
     t: &Theme,
     issue: &IssueSummary,
+    card: Option<&str>,
     selected: bool,
     width: usize,
     now: i64,
@@ -228,34 +241,51 @@ fn issue_line(
         Span::raw(" ")
     };
     let number = Span::styled(format!(" #{:<4} ", issue.number), t.dim);
-    let mut tail: Vec<Span> = vec![];
-    if !issue.labels.is_empty() {
-        tail.push(Span::styled(cut(&issue.labels.join(" "), 18), t.dim));
-    }
-    if let Some(first) = issue.assignees.first() {
+    let card = card.map(|name| Span::styled(format!("● {}", cut(name, 16)), t.accent));
+    let mut labels =
+        (!issue.labels.is_empty()).then(|| Span::styled(cut(&issue.labels.join(" "), 18), t.dim));
+    let mut assignee = issue.assignees.first().map(|first| {
         let more = match issue.assignees.len() {
             1 => String::new(),
             n => format!(" +{}", n - 1),
         };
-        tail.push(Span::raw(format!("@{first}{more}")));
-    }
-    if issue.comments > 0 {
+        Span::raw(format!("@{first}{more}"))
+    });
+    let mut comments = (issue.comments > 0).then(|| {
         let word = if issue.comments == 1 {
             "comment"
         } else {
             "comments"
         };
-        tail.push(Span::styled(format!("{} {word}", issue.comments), t.dim));
-    }
+        Span::styled(format!("{} {word}", issue.comments), t.dim)
+    });
     let when = unix_secs(&issue.updated_at)
         .map(|u| age(now - u))
         .unwrap_or_default();
+    let when = Span::styled(format!("{when:>3} "), t.dim);
+    // The title first: the tail gives way, labels before the comments before who.
+    for give in 0..3 {
+        let tail: usize = [&card, &labels, &assignee, &comments]
+            .into_iter()
+            .flatten()
+            .map(|s| s.width() + 2)
+            .sum();
+        let used = 1 + number.width() + 1 + tail + when.width();
+        if width.saturating_sub(used) >= TITLE_ROOM {
+            break;
+        }
+        match give {
+            0 => labels = None,
+            1 => comments = None,
+            _ => assignee = None,
+        }
+    }
     let mut right: Vec<Span> = vec![];
-    for s in tail {
+    for s in [card, labels, assignee, comments].into_iter().flatten() {
         right.push(s);
         right.push(Span::raw("  "));
     }
-    right.push(Span::styled(format!("{when:>3} "), t.dim));
+    right.push(when);
     let right_width: usize = right.iter().map(Span::width).sum();
     let fixed = 1 + number.width() + 1 + right_width;
     let room = width.saturating_sub(fixed);

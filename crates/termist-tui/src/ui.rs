@@ -726,6 +726,13 @@ fn draw_card(
             theme.dim,
         )),
     ];
+    // The issue it works on, on its top edge.
+    let block = match &s.issue {
+        Some(issue) => block.title_top(
+            Line::from(Span::styled(format!(" #{} ", issue.number), theme.dim)).right_aligned(),
+        ),
+        None => block,
+    };
     f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
@@ -3647,6 +3654,43 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Work on acme/site#123"), "{text}");
+    }
+
+    #[test]
+    fn a_card_on_an_issue_says_which_and_the_issue_says_which_card() {
+        let mut app = issues_fixture();
+        let mut info = app.state.sessions[0].clone();
+        info.issue = termist_core::IssueLink::from_url("https://github.com/acme/site/issues/123");
+        let name = info.display_name().to_string();
+        app.on_event(ServerEvent::SessionUpdated(info));
+        let text = screen(&render(&mut app, 110, 16));
+        // The list's row: its number is padded, the preview's title is not.
+        let row = text.lines().find(|l| l.contains("#123  ")).unwrap();
+        assert!(
+            row.contains(&format!("● {}", &name[..name.len().min(4)])),
+            "{row}"
+        );
+        let row = text.lines().find(|l| l.contains("#7 ")).unwrap();
+        assert!(!row.contains('●'), "{row}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 110, 30));
+        assert!(text.contains(" #123 ┓"), "on the card's edge: {text}");
+    }
+
+    #[test]
+    fn long_labels_give_way_to_the_title() {
+        let mut app = issues_fixture();
+        let project = app.state.projects[0].id;
+        app.issues.get_mut(&project).unwrap().repos[0].issues[0].labels =
+            vec!["Type: Enhancement".into(), "Effort: Hard".into()];
+        let text = screen(&render(&mut app, 110, 16));
+        let row = text.lines().find(|l| l.contains("#123  ")).unwrap();
+        assert!(row.contains("Login redirect loses"), "{row}");
+        assert!(!row.contains("Type:"), "{row}");
+        assert!(
+            row.contains("@alice +1"),
+            "who has it stays while it fits: {row}"
+        );
     }
 
     #[test]
