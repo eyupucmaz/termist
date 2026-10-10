@@ -792,7 +792,7 @@ pub fn hint(app: &App, view: &PrView) -> String {
     if view.section == Section::Issues {
         if let Some(n) = view.issues.reading.and(view.issues.selected) {
             return format!(
-                "#{} · j/k scroll · Space page · b browser · Esc list",
+                "#{} · j/k scroll · Space page · Enter agent · b browser · Esc list",
                 n.number
             );
         }
@@ -800,7 +800,7 @@ pub fn hint(app: &App, view: &PrView) -> String {
             return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
         }
         return format!(
-            "issues · Space read · / search · f {} · Tab pull requests · m repos · b browser · {} refresh · Esc grid",
+            "issues · Enter agent · Space read · / search · f {} · Tab pull requests · m repos · b browser · {} refresh · Esc grid",
             view.issues.filter.next().label(),
             key(Action::RefreshGitHub)
         );

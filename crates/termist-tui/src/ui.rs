@@ -3634,6 +3634,22 @@ mod tests {
     }
 
     #[test]
+    fn the_quick_prompt_of_an_issue_says_so() {
+        let mut app = issues_fixture();
+        app.on_event(ServerEvent::Harnesses(vec![termist_core::HarnessInfo {
+            harness: termist_core::Harness::Claude,
+            available: true,
+        }]));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 100, 24));
+        assert!(
+            text.contains("new worktree ⎇ site@123-login-redirect-loses-the · issue #123"),
+            "{text}"
+        );
+        assert!(text.contains("Work on acme/site#123"), "{text}");
+    }
+
+    #[test]
     fn issues_without_gh_say_how_to_get_it() {
         let mut app = issues_fixture();
         let project = app.state.projects[0].id;

@@ -159,11 +159,36 @@ pub fn rows<'a>(data: &'a ProjectIssues, list: &IssueList) -> Vec<IssueRow<'a>> 
     out
 }
 
+/// The most of an issue's description a prompt carries.
+pub const BODY_MAX: usize = 2000;
+
+/// The new task's words for an issue: what to work on, its description (cut at
+/// `BODY_MAX`, template comments out) and where it is.
+pub fn prompt(slug: &str, issue: &IssueSummary) -> String {
+    let mut out = format!("Work on {slug}#{}: {}", issue.number, issue.title);
+    let body = super::markdown::strip_comments(&issue.body.replace("\r\n", "\n"));
+    let body = body.trim();
+    if !body.is_empty() {
+        out.push_str("\n\n");
+        if body.chars().count() > BODY_MAX {
+            out.extend(body.chars().take(BODY_MAX));
+            out.push('…');
+        } else {
+            out.push_str(body);
+        }
+    }
+    out.push_str("\n\n");
+    out.push_str(&issue.url);
+    out
+}
+
 /// What a key in the Issues tab asks of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IssueAction {
     /// Back to the grid.
     Close,
+    /// `Enter`: a new task on this issue.
+    Start(IssueRef),
     Browser(String),
     Repos,
 }
@@ -232,6 +257,7 @@ impl IssueList {
                         .selection(data)
                         .map(|(_, i)| IssueAction::Browser(i.url.clone()));
                 }
+                KeyCode::Enter => return self.selected.map(IssueAction::Start),
                 KeyCode::Esc => {
                     self.reading = None;
                     return None;
@@ -269,6 +295,7 @@ impl IssueList {
             KeyCode::PageUp => self.step(&list, -10),
             KeyCode::Home | KeyCode::Char('g') => self.step(&list, isize::MIN),
             KeyCode::End | KeyCode::Char('G') => self.step(&list, isize::MAX),
+            KeyCode::Enter => return self.selected.map(IssueAction::Start),
             KeyCode::Char('/') => self.typing = true,
             KeyCode::Char(' ') if self.selection(data).is_some() => self.reading = Some(0),
             KeyCode::Char('f') => {
@@ -418,6 +445,43 @@ pub(crate) mod tests {
         assert_eq!(
             list.key(key(KeyCode::Esc), &data, &layout),
             Some(IssueAction::Close)
+        );
+    }
+
+    #[test]
+    fn the_prompt_says_what_to_work_on_then_the_description_then_where() {
+        let mut i = issue(123, "Login redirect loses the query");
+        i.body = "Steps:\r\n1. log in\r\n<!-- template -->\r\n".into();
+        assert_eq!(
+            prompt("acme/site", &i),
+            "Work on acme/site#123: Login redirect loses the query\n\nSteps:\n1. log in\n\nhttps://github.com/acme/site/issues/123"
+        );
+        i.body = "  ".into();
+        assert_eq!(
+            prompt("acme/site", &i),
+            "Work on acme/site#123: Login redirect loses the query\n\nhttps://github.com/acme/site/issues/123",
+            "no description, no paragraph"
+        );
+        i.body = "ğ".repeat(BODY_MAX + 10);
+        let long = prompt("acme/site", &i);
+        assert!(long.contains(&format!("{}…\n\nhttps://", "ğ".repeat(BODY_MAX))));
+    }
+
+    #[test]
+    fn enter_starts_a_task_on_the_issue_from_the_list_or_while_reading_it() {
+        let data = data();
+        let layout = PrLayout::default();
+        let mut list = IssueList::default();
+        list.repair(&rows(&data, &list));
+        let at = list.selected.unwrap();
+        assert_eq!(
+            list.key(key(KeyCode::Enter), &data, &layout),
+            Some(IssueAction::Start(at))
+        );
+        list.key(key(KeyCode::Char(' ')), &data, &layout);
+        assert_eq!(
+            list.key(key(KeyCode::Enter), &data, &layout),
+            Some(IssueAction::Start(at))
         );
     }
 

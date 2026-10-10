@@ -2034,6 +2034,7 @@ impl App {
                         repo,
                         repo_name,
                         seed,
+                        name_from: q.issue.as_ref().map(|i| i.words()),
                     });
                 }
             }
@@ -2262,7 +2263,67 @@ impl App {
             repo,
             repo_name,
             seed: termist_core::now_ms(),
+            name_from: None,
         })
+    }
+
+    /// A new worktree for `issue`: in its repo, on a branch named after it.
+    fn issue_worktree(
+        &self,
+        project: ProjectId,
+        issue: &overlay::FromIssue,
+    ) -> overlay::NewWorktree {
+        let repos = self
+            .prs
+            .get(&project)
+            .map(|d| d.repos.as_slice())
+            .unwrap_or(&[]);
+        let repo_name = (repos.len() > 1)
+            .then(|| {
+                repos
+                    .iter()
+                    .find(|r| r.repo == issue.repo)
+                    .map(|r| r.name.clone())
+            })
+            .flatten();
+        overlay::NewWorktree {
+            repo: issue.repo,
+            repo_name,
+            seed: termist_core::now_ms(),
+            name_from: Some(issue.words()),
+        }
+    }
+
+    /// `Enter` on an issue: the quick prompt with the issue in it, on a new worktree
+    /// named after it.
+    fn start_from_issue(&mut self, at: prs::issues::IssueRef) -> Vec<Action> {
+        let Some(project) = self.project else {
+            return vec![];
+        };
+        let Some((repo, issue)) = self.issues.get(&project).and_then(|d| {
+            let repo = d.repos.iter().find(|r| r.repo == at.repo)?;
+            Some((repo, repo.issues.iter().find(|i| i.number == at.number)?))
+        }) else {
+            return vec![];
+        };
+        let text = prs::issues::prompt(&repo.slug, issue);
+        let from = overlay::FromIssue {
+            link: termist_core::IssueLink {
+                number: issue.number,
+                url: issue.url.clone(),
+            },
+            title: issue.title.clone(),
+            repo: repo.repo,
+        };
+        // A task of its own: what it sends is not review threads.
+        self.hand_for = None;
+        let actions = self.quick_prompt_in(project, &text, None);
+        let new = self.issue_worktree(project, &from);
+        if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
+            q.new_worktree = Some(new);
+            q.issue = Some(Box::new(from));
+        }
+        actions
     }
 
     /// The branch a new worktree would get for `q` now.
@@ -2275,7 +2336,8 @@ impl App {
             .flatten()
             .filter_map(|w| w.branch.clone())
             .collect();
-        Some(crate::slug::branch(q.input.text(), &taken, new.seed))
+        let words = new.name_from.as_deref().unwrap_or(q.input.text());
+        Some(crate::slug::branch(words, &taken, new.seed))
     }
 
     /// The quick prompt for `project` with `text` in it, for its folder or a worktree.
@@ -2312,6 +2374,7 @@ impl App {
             worktree,
             new_worktree: None,
             preset: None,
+            issue: None,
         }));
         vec![
             Action::Send(ClientRequest::ListPromptHistory {
@@ -2390,8 +2453,14 @@ impl App {
             }
             KeyCode::Char('n') if ctrl => {
                 let was = q.new_worktree.take().is_some();
+                let issue = q.issue.clone();
                 if !was {
-                    match self.new_worktree() {
+                    let project = q.project;
+                    let new = match &issue {
+                        Some(issue) => Some(self.issue_worktree(project, issue)),
+                        None => self.new_worktree(),
+                    };
+                    match new {
                         Some(new) => {
                             if let Some(Overlay::QuickPrompt(q)) = self.overlays.last_mut() {
                                 q.new_worktree = Some(new);
@@ -2419,8 +2488,8 @@ impl App {
     /// A quick prompt closed without starting: its text waits for the next, unless it is
     /// blank or an earlier prompt recalled and left as it was (`↑` brings that back).
     fn keep_draft(&mut self, q: &QuickPrompt) {
-        if q.worktree.is_some() {
-            return; // words for a pull request's worktree, not a draft for `p`
+        if q.worktree.is_some() || q.issue.is_some() {
+            return; // words for a pull request's worktree or an issue, not a draft for `p`
         }
         let text = q.input.text();
         let own = !text.trim().is_empty() && !q.input.is_from_history();
@@ -2481,7 +2550,7 @@ impl App {
                 kind: SessionKind::Agent { harness },
                 cwd: q.worktree.clone().map(|(path, _)| path),
                 prompt,
-                issue: None,
+                issue: q.issue.as_ref().map(|i| i.link.url.clone()),
                 title_from: q.title_from(),
                 model: q.launch.model,
                 effort: q.launch.effort,
@@ -3495,6 +3564,7 @@ impl App {
                 }
                 Some(IssueAction::Browser(url)) => vec![Action::OpenUrl(url)],
                 Some(IssueAction::Repos) => self.open_repos(),
+                Some(IssueAction::Start(at)) => self.start_from_issue(at),
             };
         }
         let empty = ProjectPrs::default();
@@ -9444,6 +9514,96 @@ mod tests {
             [(Some(api), None)],
             "the pull request behind the issues is not read"
         );
+    }
+
+    #[test]
+    fn enter_on_an_issue_starts_a_task_on_it_in_a_worktree_named_after_it() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        with_prs(&mut app, api);
+        with_issues(&mut app, api);
+        app.on_key(k(K::Char('i')));
+        app.on_key(k(K::Enter));
+        let Some(Overlay::QuickPrompt(q)) = app.overlays.last() else {
+            panic!("the quick prompt")
+        };
+        assert_eq!(
+            q.input.text(),
+            "Work on acme/site#123: Login redirect loses the query\n\nIt breaks.\n\nhttps://github.com/acme/site/issues/123"
+        );
+        assert_eq!(
+            q.title_from().as_deref(),
+            Some("Login redirect loses the query")
+        );
+        assert_eq!(
+            app.new_branch(q).as_deref(),
+            Some("123-login-redirect-loses-the"),
+            "named after the issue, not the prompt"
+        );
+        // ^N off and on again: still the issue's.
+        app.on_key(ctrl('n'));
+        assert_eq!(quick(&app).new_worktree, None);
+        app.on_key(ctrl('n'));
+        let q = quick(&app);
+        assert_eq!(
+            app.new_branch(q).as_deref(),
+            Some("123-login-redirect-loses-the")
+        );
+        let actions = app.on_key(k(K::Enter));
+        let ticket = sent(&actions)
+            .iter()
+            .find_map(|r| match r {
+                ClientRequest::CreateWorktree { ticket, branch, .. } => {
+                    assert_eq!(branch, "123-login-redirect-loses-the");
+                    Some(*ticket)
+                }
+                _ => None,
+            })
+            .expect("a worktree first");
+        let actions = app.on_event(ServerEvent::WorktreeMade {
+            ticket,
+            path: "/w/site-worktrees/123-login-redirect-loses-the".into(),
+            branch: "123-login-redirect-loses-the".into(),
+            note: None,
+        });
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::CreateSession { issue: Some(url), title_from: Some(t), .. }
+                if url == "https://github.com/acme/site/issues/123"
+                    && t == "Login redirect loses the query"
+        )));
+        assert_eq!(app.prompt_draft, None, "an issue's words are no draft");
+    }
+
+    #[test]
+    fn an_issue_task_closed_leaves_no_draft_and_without_a_worktree_starts_in_the_folder() {
+        let (mut app, s) = app();
+        let api = s[0].project;
+        app.on_event(ServerEvent::Harnesses(vec![HarnessInfo {
+            harness: Harness::Claude,
+            available: true,
+        }]));
+        with_prs(&mut app, api);
+        with_issues(&mut app, api);
+        app.on_key(k(K::Char('i')));
+        app.on_key(k(K::Enter));
+        app.on_key(k(K::Esc));
+        assert_eq!(app.prompt_draft, None);
+        app.on_key(k(K::Enter));
+        app.on_key(ctrl('n'));
+        let actions = app.on_key(k(K::Enter));
+        assert!(sent(&actions).iter().any(|r| matches!(
+            r,
+            ClientRequest::CreateSession {
+                cwd: None,
+                issue: Some(_),
+                ..
+            }
+        )));
     }
 
     #[test]

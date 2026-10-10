@@ -326,13 +326,33 @@ pub struct QuickPrompt {
     /// The preset it was opened with (`e`): the card is named after what is typed
     /// between its words.
     pub preset: Option<termist_core::config::Preset>,
+    /// The issue it was opened on (`i`, `Enter`): the card is named after it and
+    /// keeps it.
+    pub issue: Option<Box<FromIssue>>,
+}
+
+/// The issue a new task works on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FromIssue {
+    pub link: termist_core::IssueLink,
+    pub title: String,
+    pub repo: termist_core::github::RepoId,
+}
+
+impl FromIssue {
+    /// What its worktree's branch is named from: `123 Login redirect…`.
+    pub fn words(&self) -> String {
+        format!("{} {}", self.link.number, self.title)
+    }
 }
 
 impl QuickPrompt {
     /// What the card is named after when not the whole prompt: the words typed into a
     /// preset's, or the preset's name when nothing was.
     pub fn title_from(&self) -> Option<String> {
-        let p = self.preset.as_ref()?;
+        let Some(p) = self.preset.as_ref() else {
+            return self.issue.as_ref().map(|i| i.title.clone());
+        };
         let text = self.input.text();
         // A prefix or postfix edited away leaves the rest as what was typed.
         let rest = text.strip_prefix(p.prefix.as_str()).unwrap_or(text);
@@ -352,6 +372,9 @@ pub struct NewWorktree {
     pub repo: termist_core::github::RepoId,
     pub repo_name: Option<String>,
     pub seed: u64,
+    /// What the branch is named from instead of the prompt (an issue's number and
+    /// title).
+    pub name_from: Option<String>,
 }
 
 /// Where a task starts, as `Ctrl+T` lists it.
@@ -692,6 +715,7 @@ mod tests {
             worktree: None,
             new_worktree: None,
             preset: None,
+            issue: None,
         };
         q.set_harness(Harness::Codex);
         assert_eq!(q.launch, launch(Harness::Codex, None, Some("high")));
