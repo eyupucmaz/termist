@@ -7,6 +7,7 @@
 pub mod accounts;
 pub mod files;
 pub mod gh;
+pub mod issues;
 pub mod jobs;
 pub mod poller;
 pub mod query;
@@ -64,6 +65,13 @@ pub enum Job {
         repos: Vec<Slug>,
     },
     Inbox {
+        gh: GhHandle,
+        project: ProjectId,
+        account: Account,
+        repos: Vec<Slug>,
+    },
+    /// The open issues of a project's repos read by one account.
+    Issues {
         gh: GhHandle,
         project: ProjectId,
         account: Account,
@@ -147,6 +155,12 @@ pub enum Done {
         account: String,
         ids: Vec<RepoId>,
         reply: Result<query::InboxReply, GhState>,
+    },
+    Issues {
+        project: ProjectId,
+        account: String,
+        ids: Vec<RepoId>,
+        reply: Result<query::IssuesReply, GhState>,
     },
     Counts {
         project: ProjectId,
@@ -295,6 +309,8 @@ struct Focus {
     pr: Option<PrRef>,
     /// The diff of `pr`.
     diff: bool,
+    /// The project's issues.
+    issues: bool,
 }
 
 /// A failure in a few words, for a message after "couldn't …".
@@ -358,6 +374,10 @@ pub struct GitHub {
     slow_until: HashMap<String, Instant>,
     /// `updatedAt` of each PR when it was last opened.
     seen: HashMap<(String, String, u32), String>,
+    /// Each repo's open issues as last read.
+    issues: HashMap<RepoId, issues::Read>,
+    /// One issues read per project looked at and account.
+    issue_beats: HashMap<(ProjectId, String), Beat>,
 }
 
 impl GitHub {
@@ -396,6 +416,8 @@ impl GitHub {
             asking_ends: HashSet::new(),
             slow_until: HashMap::new(),
             seen,
+            issues: HashMap::new(),
+            issue_beats: HashMap::new(),
         }
     }
 
@@ -518,6 +540,7 @@ impl GitHub {
                 .filter(|p| p.open && (failed || self.discovered.contains(&p.id)))
             {
                 fx.send(to, self.prs_event(p.id));
+                self.send_issues(p.id, to, &mut fx);
             }
         }
         fx
@@ -588,12 +611,26 @@ impl GitHub {
             }
             return fx;
         }
-        if let ClientRequest::SetPrFocus { project, pr, diff } = req {
+        if let ClientRequest::SetPrFocus {
+            project,
+            pr,
+            diff,
+            issues,
+        } = req
+        {
             // Only a client that is still known: a late request after `gone` is ignored.
             let Some(focus) = self.clients.get_mut(&client) else {
                 return fx;
             };
-            let before = std::mem::replace(focus, Focus { project, pr, diff });
+            let before = std::mem::replace(
+                focus,
+                Focus {
+                    project,
+                    pr,
+                    diff,
+                    issues,
+                },
+            );
             if let Some(p) = project
                 && before.project != Some(p)
             {
@@ -633,6 +670,8 @@ impl GitHub {
                     },
                 );
             }
+            let looked = before.project.filter(|_| before.issues);
+            self.issues_looked_at(client, looked, now, &mut fx);
             return fx;
         }
         if !self.enabled {
@@ -667,8 +706,10 @@ impl GitHub {
                 r.stored.visible = visible;
                 let project = r.stored.project;
                 self.hurry_project(project, now);
+                self.hurry_issues(project, now);
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
+                self.send_issues(project, To::All, &mut fx);
             }
             ClientRequest::SetRepoAccount { repo, account } => {
                 if let Err(e) = store.set_repo_account(repo, account.as_deref()) {
@@ -691,8 +732,10 @@ impl GitHub {
                     self.permissions.hurry(now);
                 }
                 self.hurry_project(project, now);
+                self.hurry_issues(project, now);
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
+                self.send_issues(project, To::All, &mut fx);
             }
             ClientRequest::RefreshPrs { project } => {
                 if matches!(self.auth, Auth::Failed(_)) {
@@ -700,6 +743,7 @@ impl GitHub {
                 }
                 self.look_again(project, now);
                 self.hurry_project(project, now);
+                self.hurry_issues(project, now);
                 let open: Vec<(PrRef, bool)> = self
                     .clients
                     .values()
@@ -1192,6 +1236,7 @@ impl GitHub {
             fx.jobs.push(job);
         }
         fx.jobs.extend(self.diff_jobs(gh, accounts));
+        fx.jobs.extend(self.issue_rounds(now, gh, accounts));
         fx
     }
 
@@ -1291,12 +1336,14 @@ impl GitHub {
                 self.permissions.hurry(now);
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
+                self.send_issues(project, To::All, &mut fx);
             }
             Done::Undiscovered { project } => {
                 self.discovering.remove(&project);
                 self.discovered.insert(project);
                 fx.send(To::All, self.repos_event(project));
                 fx.send(To::All, self.prs_event(project));
+                self.send_issues(project, To::All, &mut fx);
             }
             Done::Permissions(Ok(results)) => {
                 self.permissions.finish(now, true, poller::PERMISSIONS);
@@ -1323,9 +1370,16 @@ impl GitHub {
                 for project in touched {
                     fx.send(To::All, self.repos_event(project));
                     fx.send(To::All, self.prs_event(project));
+                    self.send_issues(project, To::All, &mut fx);
                 }
             }
             Done::Permissions(Err(_)) => self.permissions.finish(now, false, poller::PERMISSIONS),
+            Done::Issues {
+                project,
+                account,
+                ids,
+                reply,
+            } => fx.extend(self.issues_done(project, account, ids, reply, now)),
             Done::Counts { project, counts } => {
                 for (id, n) in counts {
                     if let Some(r) = self.repo_mut(id) {
@@ -1583,7 +1637,7 @@ impl GitHub {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::accounts::Permission::*;
     use super::gh::fake::FakeGh;
     use super::*;
@@ -1598,11 +1652,11 @@ mod tests {
     }
 
     /// The jobs never run in these tests; the handle only travels.
-    fn handle() -> GhHandle {
+    pub(super) fn handle() -> GhHandle {
         GhHandle(FakeGh::new(|_| Err(GhState::NoGh)))
     }
 
-    fn account(login: &str, active: bool) -> Account {
+    pub(super) fn account(login: &str, active: bool) -> Account {
         Account {
             login: login.into(),
             active,
@@ -1610,15 +1664,15 @@ mod tests {
         }
     }
 
-    struct World {
-        gh: GitHub,
-        store: Store,
-        projects: Vec<ProjectInfo>,
-        now: Instant,
-        client: ClientId,
+    pub(super) struct World {
+        pub(super) gh: GitHub,
+        pub(super) store: Store,
+        pub(super) projects: Vec<ProjectInfo>,
+        pub(super) now: Instant,
+        pub(super) client: ClientId,
     }
 
-    fn world(names: &[&str]) -> World {
+    pub(super) fn world(names: &[&str]) -> World {
         let store = Store::open_in_memory();
         let projects: Vec<ProjectInfo> = names.iter().map(|n| project(n)).collect();
         for p in &projects {
@@ -1634,17 +1688,17 @@ mod tests {
     }
 
     impl World {
-        fn request(&mut self, req: ClientRequest) -> Effects {
+        pub(super) fn request(&mut self, req: ClientRequest) -> Effects {
             self.gh
                 .request(self.client, req, &self.store, &self.projects, self.now)
         }
 
-        fn tick(&mut self) -> Effects {
+        pub(super) fn tick(&mut self) -> Effects {
             self.gh.tick(self.now, &self.projects)
         }
 
         /// Another client connects and turns GitHub on, as the TUI does.
-        fn join(&mut self, client: ClientId) {
+        pub(super) fn join(&mut self, client: ClientId) {
             self.gh.request(
                 client,
                 ClientRequest::SetGitHub { enabled: true },
@@ -1654,12 +1708,12 @@ mod tests {
             );
         }
 
-        fn done(&mut self, done: Done) -> Effects {
+        pub(super) fn done(&mut self, done: Done) -> Effects {
             self.gh.done(done, self.now, &self.store, &self.projects)
         }
 
         /// A client connected, GitHub on, these accounts loaded.
-        fn ready(&mut self, accounts: Vec<Account>) {
+        pub(super) fn ready(&mut self, accounts: Vec<Account>) {
             self.request(ClientRequest::SetGitHub { enabled: true });
             let fx = self.tick();
             assert!(matches!(fx.jobs.first(), Some(Job::Accounts)));
@@ -1667,7 +1721,7 @@ mod tests {
         }
 
         /// Project `i` was found to hold these repos: (folder, owner, name).
-        fn found(&mut self, i: usize, repos: &[(&str, &str, &str)]) -> Effects {
+        pub(super) fn found(&mut self, i: usize, repos: &[(&str, &str, &str)]) -> Effects {
             let p = &self.projects[i];
             let repos = repos
                 .iter()
@@ -1682,7 +1736,7 @@ mod tests {
             self.done(Done::Discovered { project, repos })
         }
 
-        fn id(&self, name: &str) -> RepoId {
+        pub(super) fn id(&self, name: &str) -> RepoId {
             self.gh
                 .repos
                 .iter()
@@ -1693,7 +1747,7 @@ mod tests {
         }
 
         /// Answers the permission question the next tick asks.
-        fn permit(&mut self, answers: &[Answer]) {
+        pub(super) fn permit(&mut self, answers: &[Answer]) {
             let fx = self.tick();
             assert!(
                 fx.jobs.iter().any(|j| matches!(j, Job::Permissions { .. })),
@@ -1716,7 +1770,7 @@ mod tests {
     }
 
     /// One answer of the permission question: a folder, then what each account sees.
-    type Answer<'a> = (&'a str, &'a [(&'a str, Option<Permission>, bool)]);
+    pub(super) type Answer<'a> = (&'a str, &'a [(&'a str, Option<Permission>, bool)]);
 
     /// The repos of the `Repos` events among `fx`: (folder, account, visible).
     fn listed(fx: &Effects) -> Vec<(String, Option<String>, bool)> {
@@ -2092,7 +2146,7 @@ mod tests {
 
     /// A work project with acme/site and acme/admin, a personal one with me/termist,
     /// each repo read by its account, nothing read yet.
-    fn two_projects() -> World {
+    pub(super) fn two_projects() -> World {
         let mut w = world(&["work", "termist"]);
         w.ready(vec![account("work", true), account("me", false)]);
         w.found(0, &[("site", "acme", "site"), ("admin", "acme", "admin")]);
@@ -2154,6 +2208,7 @@ mod tests {
             project: Some(p0),
             pr: None,
             diff: false,
+            issues: false,
         });
         w.tick();
         answer(&mut w, 0, "work", &["site", "admin"], vec![]);
@@ -2301,6 +2356,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: Some(pr),
             diff: false,
+            issues: false,
         });
         let fx = w.tick();
         assert!(
@@ -2338,6 +2394,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: false,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2360,6 +2417,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: Some(pr),
             diff: false,
+            issues: false,
         });
         w.join(ClientId(2));
         w.gh.gone(w.client);
@@ -2375,6 +2433,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: None,
             diff: false,
+            issues: false,
         });
         assert!(w.tick().jobs.is_empty());
     }
@@ -2391,6 +2450,7 @@ mod tests {
                 project: Some(w.projects[0].id),
                 pr: None,
                 diff: false,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2415,6 +2475,7 @@ mod tests {
             project: Some(w.projects[0].id),
             pr: None,
             diff: false,
+            issues: false,
         });
         w.tick();
         let ids = vec![w.id("site"), w.id("admin")];
@@ -2668,6 +2729,7 @@ mod tests {
         w.request(ClientRequest::SetPrFocus {
             project: Some(w.projects[0].id),
             pr: Some(pr),
+            issues: false,
             diff,
         });
         (w, pr)
@@ -2797,6 +2859,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: true,
+                issues: false,
             },
             &w.store,
             &w.projects,
@@ -2841,6 +2904,7 @@ mod tests {
                 project: None,
                 pr: Some(pr),
                 diff: true,
+                issues: false,
             },
             &w.store,
             &w.projects,

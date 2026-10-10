@@ -3,12 +3,14 @@
 use super::accounts::Permission;
 use serde_json::Value;
 use termist_core::github::{
-    Check, CheckState, Checks, Comment, FileChange, GhState, Mergeable, More, PrDetail, PrState,
-    PrSummary, Review, ReviewDecision, ReviewState, Side, Thread, Viewed,
+    Check, CheckState, Checks, Comment, FileChange, GhState, IssueSummary, Mergeable, More,
+    PrDetail, PrState, PrSummary, Review, ReviewDecision, ReviewState, Side, Thread, Viewed,
 };
 
 /// Open PRs read per repo; a repo with more shows `+N more`.
 pub const INBOX_LIMIT: u32 = 50;
+/// Open issues read per repo, the same way.
+pub const ISSUES_LIMIT: u32 = 50;
 
 /// What a list row and a detail head need.
 pub const PR_FIELDS: &str = "fragment PrFields on PullRequest {
@@ -65,6 +67,82 @@ pub fn inbox(repos: &[(String, String)]) -> String {
         "{PR_FIELDS}query {{\n  viewer {{ login }}\n  rateLimit {{ remaining resetAt }}\n{}}}\n",
         per_repo(repos, &body)
     )
+}
+
+/// One repo's open issues: whether it has issues at all, the ones read and how many
+/// are open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoIssueList {
+    pub enabled: bool,
+    pub issues: Vec<IssueSummary>,
+    pub total: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuesReply {
+    pub viewer: String,
+    pub rate: Option<Rate>,
+    /// In the order the repos were asked for.
+    pub repos: Vec<Result<RepoIssueList, GhState>>,
+}
+
+pub fn issues(repos: &[(String, String)]) -> String {
+    let body = format!(
+        "hasIssuesEnabled \
+         issues(states: OPEN, first: {ISSUES_LIMIT}, orderBy: {{field: UPDATED_AT, direction: DESC}}) \
+         {{ totalCount nodes {{ number title url body createdAt updatedAt author {{ login }} \
+         labels(first: 10) {{ nodes {{ name }} }} assignees(first: 10) {{ nodes {{ login }} }} \
+         comments {{ totalCount }} }} }}"
+    );
+    format!(
+        "query {{\n  viewer {{ login }}\n  rateLimit {{ remaining resetAt }}\n{}}}\n",
+        per_repo(repos, &body)
+    )
+}
+
+pub fn parse_issues(v: &Value, count: usize) -> IssuesReply {
+    let viewer = text(&v["data"]["viewer"]["login"]);
+    let repos = aliases(v, count)
+        .map(|r| {
+            if r.is_null() {
+                return Err(GhState::NoAccess);
+            }
+            let list = &r["issues"];
+            Ok(RepoIssueList {
+                enabled: r["hasIssuesEnabled"].as_bool().unwrap_or(true),
+                issues: nodes(list).filter_map(|i| issue(i, &viewer)).collect(),
+                total: list["totalCount"].as_u64().unwrap_or(0) as u32,
+            })
+        })
+        .collect();
+    IssuesReply {
+        rate: parse_rate(&v["data"]["rateLimit"]),
+        viewer,
+        repos,
+    }
+}
+
+/// An issue node; `viewer` is your login, for `assigned_you`.
+fn issue(i: &Value, viewer: &str) -> Option<IssueSummary> {
+    let names = |v: &Value, key: &str| -> Vec<String> {
+        nodes(v)
+            .filter_map(|n| n[key].as_str().map(str::to_string))
+            .collect()
+    };
+    let assignees = names(&i["assignees"], "login");
+    Some(IssueSummary {
+        number: i["number"].as_u64()? as u32,
+        title: text(&i["title"]),
+        url: text(&i["url"]),
+        body: text(&i["body"]),
+        author: i["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+        labels: names(&i["labels"], "name"),
+        assigned_you: !viewer.is_empty() && assignees.iter().any(|a| a == viewer),
+        assignees,
+        comments: i["comments"]["totalCount"].as_u64().unwrap_or(0) as u32,
+        created_at: text(&i["createdAt"]),
+        updated_at: text(&i["updatedAt"]),
+    })
 }
 
 pub fn permissions(repos: &[(String, String)]) -> String {
@@ -546,6 +624,62 @@ pub mod tests {
         assert_eq!(b.checks, Checks::None);
         assert_eq!(b.decision, None);
         assert!(!b.requested_you);
+    }
+
+    const ISSUES: &str = r#"{"data":{"viewer":{"login":"alice"},
+      "rateLimit":{"remaining":4990,"resetAt":"2026-10-02T11:00:00Z"},
+      "r0":{"hasIssuesEnabled":true,"issues":{"totalCount":3,"nodes":[
+        {"number":123,"title":"Login redirect loses the query","url":"https://github.com/acme/site/issues/123",
+         "body":"Steps:\n1. log in","createdAt":"2026-10-01T10:00:00Z","updatedAt":"2026-10-02T10:00:00Z",
+         "author":{"login":"bob"},"labels":{"nodes":[{"name":"bug"},{"name":"ui"}]},
+         "assignees":{"nodes":[{"login":"carol"},{"login":"alice"}]},"comments":{"totalCount":3}},
+        {"number":7,"title":"Docs","url":"https://github.com/acme/site/issues/7","body":"",
+         "createdAt":"2026-09-01T10:00:00Z","updatedAt":"2026-09-02T10:00:00Z","author":null,
+         "labels":{"nodes":[]},"assignees":{"nodes":[]},"comments":{"totalCount":0}}]}},
+      "r1":{"hasIssuesEnabled":false,"issues":{"totalCount":0,"nodes":[]}},
+      "r2":null}}"#;
+
+    #[test]
+    fn the_issues_query_asks_each_repo_for_its_open_issues() {
+        let q = issues(&[
+            ("acme".into(), "site".into()),
+            ("ac\"me".into(), "api".into()),
+        ]);
+        assert!(q.contains("viewer { login }"));
+        assert!(q.contains("rateLimit { remaining resetAt }"));
+        assert!(q.contains(r#"r0: repository(owner: "acme", name: "site")"#));
+        assert!(q.contains(r#"r1: repository(owner: "ac\"me", name: "api")"#));
+        assert!(q.contains("hasIssuesEnabled"));
+        assert!(q.contains(
+            "issues(states: OPEN, first: 50, orderBy: {field: UPDATED_AT, direction: DESC})"
+        ));
+        assert!(q.contains("comments { totalCount }"));
+    }
+
+    #[test]
+    fn the_issues_answer_becomes_rows() {
+        let reply = parse_issues(&json(ISSUES), 3);
+        assert_eq!(reply.viewer, "alice");
+        assert_eq!(reply.rate.map(|r| r.remaining), Some(4990));
+        let site = reply.repos[0].clone().unwrap();
+        assert!(site.enabled);
+        assert_eq!(site.total, 3);
+        let a = &site.issues[0];
+        assert_eq!(
+            (a.number, a.title.as_str(), a.author.as_str(), a.comments),
+            (123, "Login redirect loses the query", "bob", 3)
+        );
+        assert_eq!(a.url, "https://github.com/acme/site/issues/123");
+        assert_eq!(a.body, "Steps:\n1. log in");
+        assert_eq!(a.labels, ["bug", "ui"]);
+        assert_eq!(a.assignees, ["carol", "alice"]);
+        assert!(a.assigned_you);
+        let b = &site.issues[1];
+        assert_eq!((b.author.as_str(), b.comments), ("ghost", 0));
+        assert!(b.labels.is_empty() && !b.assigned_you);
+        let off = reply.repos[1].clone().unwrap();
+        assert!(!off.enabled && off.issues.is_empty());
+        assert_eq!(reply.repos[2], Err(GhState::NoAccess));
     }
 
     #[test]

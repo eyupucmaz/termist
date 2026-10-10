@@ -57,6 +57,21 @@ pub fn run(job: Job, locate: &Locate) -> Done {
                 reply,
             }
         }
+        Job::Issues {
+            gh,
+            project,
+            account,
+            repos,
+        } => {
+            let reply = gh::graphql(&*gh.0, &account.token, &query::issues(&names(&repos)))
+                .map(|v| query::parse_issues(&v, repos.len()));
+            Done::Issues {
+                project,
+                account: account.login,
+                ids: repos.into_iter().map(|(id, ..)| id).collect(),
+                reply,
+            }
+        }
         Job::Counts {
             gh,
             project,
@@ -169,6 +184,17 @@ pub fn failed(job: &Job) -> Done {
             repos,
             ..
         } => Done::Inbox {
+            project: *project,
+            account: account.login.clone(),
+            ids: repos.iter().map(|(id, ..)| *id).collect(),
+            reply: Err(why()),
+        },
+        Job::Issues {
+            project,
+            account,
+            repos,
+            ..
+        } => Done::Issues {
             project: *project,
             account: account.login.clone(),
             ids: repos.iter().map(|(id, ..)| *id).collect(),

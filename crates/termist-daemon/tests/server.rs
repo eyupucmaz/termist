@@ -103,6 +103,7 @@ async fn create(c: &mut Client, project: ProjectId, kind: SessionKind) -> Sessio
         project,
         kind,
         cwd: None,
+        issue: None,
         title_from: None,
         prompt: None,
         model: None,
@@ -819,6 +820,7 @@ async fn a_missing_agent_cli_is_an_error_not_a_crash() {
             harness: Harness::Claude,
         },
         cwd: None,
+        issue: None,
         title_from: None,
         prompt: None,
         model: None,
@@ -1347,6 +1349,7 @@ async fn model_and_effort_reach_the_cli_and_come_back_on_resume() {
             harness: Harness::Claude,
         },
         cwd: None,
+        issue: None,
         title_from: None,
         prompt: Some("fix it".into()),
         model: Some("  my model  ".into()),
@@ -1531,6 +1534,7 @@ async fn prompts_models_and_the_last_launch_are_remembered() {
             harness: Harness::Claude,
         },
         cwd: None,
+        issue: None,
         title_from: None,
         prompt: Some("fix the login redirect".into()),
         model: Some("opus".into()),
@@ -1770,6 +1774,7 @@ async fn pull_requests_come_through_gh() {
         project: Some(project),
         pr: None,
         diff: false,
+        issues: false,
     })
     .await
     .unwrap();
@@ -1849,6 +1854,7 @@ async fn a_pull_requests_diff_comes_through_gh_and_a_file_is_marked_viewed() {
         project: Some(project),
         pr: Some(pr),
         diff: true,
+        issues: false,
     })
     .await
     .unwrap();
@@ -1966,6 +1972,7 @@ async fn a_worktree_opens_beside_the_repo_and_a_session_there_knows_its_pull_req
         project,
         kind: SessionKind::Shell,
         cwd: Some(want.clone()),
+        issue: None,
         title_from: None,
         prompt: None,
         model: None,
@@ -2038,6 +2045,7 @@ async fn a_comment_goes_through_gh_and_the_pull_request_is_read_again() {
         project: Some(project),
         pr: Some(pr),
         diff: false,
+        issues: false,
     })
     .await
     .unwrap();

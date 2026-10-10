@@ -1,4 +1,6 @@
-use crate::github::{GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoPrs};
+use crate::github::{
+    GhState, PrDetail, PrDiff, PrRef, PrWrite, RepoId, RepoInfo, RepoIssues, RepoPrs,
+};
 use crate::model::{
     DiffMode, GrepMatch, Harness, HarnessInfo, LaunchOptions, LocalDiffData, ModelInfo, ReadState,
     SessionInfo, SessionKind, StateSnapshot, TermColors, WorktreeInfo,
@@ -9,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Bumped whenever a ClientRequest/ServerEvent changes shape.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClientRequest {
@@ -33,6 +35,8 @@ pub enum ClientRequest {
         /// What the card's name is made from, when not the prompt: the words typed
         /// into a preset's prompt, or the preset's name.
         title_from: Option<String>,
+        /// The issue it starts from, by its address.
+        issue: Option<String>,
         model: Option<String>,
         effort: Option<String>,
         cols: u16,
@@ -123,11 +127,13 @@ pub enum ClientRequest {
         enabled: bool,
     },
     /// What this client looks at: a project's pull requests, and maybe one of them,
-    /// and maybe its diff. The daemon reads those more often; `None`, `None` is nothing.
+    /// and maybe its diff, or the project's issues. The daemon reads those more often
+    /// (issues only then); `None`, `None` is nothing.
     SetPrFocus {
         project: Option<ProjectId>,
         pr: Option<PrRef>,
         diff: bool,
+        issues: bool,
     },
     /// Answered with `Repos`, and again when the open counts come.
     ListRepos {
@@ -305,6 +311,13 @@ pub enum ServerEvent {
         discovered: u32,
         repos: Vec<RepoPrs>,
     },
+    /// A project's open issues, repo by repo, for its visible repos; only to the
+    /// clients that look at them.
+    Issues {
+        project: ProjectId,
+        state: GhState,
+        repos: Vec<RepoIssues>,
+    },
     /// Every repo found in a project, for the repos window, and the logged-in accounts.
     Repos {
         project: ProjectId,
@@ -464,7 +477,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_protocol_is_15_since_agents_drive_termist() {
-        assert_eq!(PROTOCOL_VERSION, 15);
+    fn the_protocol_is_16_since_issues() {
+        assert_eq!(PROTOCOL_VERSION, 16);
     }
 }

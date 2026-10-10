@@ -53,6 +53,8 @@ struct NewSession {
     size: (u16, u16),
     /// The agent that asks for it (`termist spawn`).
     spawned_by: Option<SessionId>,
+    /// The issue it starts from, by its address.
+    issue: Option<String>,
 }
 
 /// A repo's worktrees as a scan found them, each with what its branch changed; `None`
@@ -103,6 +105,7 @@ pub struct Catalog(pub Harness, pub Vec<ModelInfo>);
 /// A CLI's model list is asked for again after this long.
 pub const CATALOG_FRESH: Duration = Duration::from_secs(60 * 60);
 
+#[allow(clippy::large_enum_variant)] // a request is moved once, from its connection
 pub enum Msg {
     Connected {
         client: ClientId,
@@ -1191,6 +1194,7 @@ impl Registry {
                 kind,
                 cwd,
                 prompt,
+                issue,
                 title_from,
                 model,
                 effort,
@@ -1207,6 +1211,7 @@ impl Registry {
                     effort,
                     size: (cols, rows),
                     spawned_by: None,
+                    issue,
                 };
                 if let Err(e) = self.create_session_named(new) {
                     self.send(
@@ -1971,6 +1976,7 @@ impl Registry {
             effort,
             size,
             spawned_by: None,
+            issue: None,
         })
         .map(|_| ())
     }
@@ -1988,6 +1994,7 @@ impl Registry {
             effort,
             size: (cols, rows),
             spawned_by,
+            issue,
         } = new;
         let named = match &kind {
             SessionKind::Agent { .. } => title_from
@@ -2076,6 +2083,7 @@ impl Registry {
             user_named: false,
             archived: false,
             cwd: cwd.clone(),
+            issue: issue.as_deref().and_then(termist_core::IssueLink::from_url),
             place: None,
         };
         let mut session = Session::new(info.clone(), Some(cmd), false);
@@ -2424,6 +2432,7 @@ mod tests {
             archived: false,
             cwd: p.path.clone(),
             place: None,
+            issue: None,
         }
     }
 
@@ -2910,6 +2919,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_agent_started_from_an_issue_keeps_it() {
+        let p = project();
+        let mut reg = registry_with(&p, &[]);
+        let mut rx = connect(&mut reg);
+        reg.launcher.programs.codex = "true".into();
+        let url = "https://github.com/acme/site/issues/123";
+        for issue in [Some(url), None] {
+            reg.handle(Msg::Request {
+                client: ClientId(1),
+                req: ClientRequest::CreateSession {
+                    project: p.id,
+                    kind: SessionKind::Agent {
+                        harness: Harness::Codex,
+                    },
+                    cwd: None,
+                    prompt: Some("Work on acme/site#123: Login".into()),
+                    issue: issue.map(str::to_string),
+                    title_from: Some("Login".into()),
+                    model: None,
+                    effort: None,
+                    cols: 80,
+                    rows: 24,
+                },
+            });
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ServerEvent::SessionUpdated(s)) if s.issue.as_ref().map(|i| i.number) == Some(123)
+        ));
+        let stored = reg.store.load().unwrap().1;
+        assert_eq!(
+            stored
+                .iter()
+                .map(|s| s.info.issue.as_ref().map(|i| i.url.as_str()))
+                .collect::<Vec<_>>(),
+            [Some(url), None],
+            "kept for the next start"
+        );
+        for s in &reg.sessions {
+            if let Some(cmd) = &s.cmd {
+                let _ = cmd.send(SessionCmd::Kill);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn an_agent_started_with_a_prompt_is_named_after_it() {
         let p = project();
         let mut reg = registry_with(&p, &[]);
@@ -2926,6 +2981,7 @@ mod tests {
                     kind: codex(),
                     cwd: None,
                     prompt: prompt.map(str::to_string),
+                    issue: None,
                     title_from: title_from.map(str::to_string),
                     model: None,
                     effort: None,

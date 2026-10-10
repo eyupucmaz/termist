@@ -383,6 +383,7 @@ impl Registry {
             effort,
             size: (80, 24),
             spawned_by: from,
+            issue: None,
         };
         let id = match self.create_session_named(new) {
             Ok(id) => id,
@@ -463,6 +464,7 @@ mod tests {
                 },
                 cwd: None,
                 prompt: Some("fix the login".into()),
+                issue: None,
                 title_from: None,
                 model: None,
                 effort: None,
@@ -641,6 +643,7 @@ mod tests {
                 },
                 cwd: None,
                 prompt: Some("fix the login".into()),
+                issue: None,
                 title_from: None,
                 model: None,
                 effort: None,
@@ -846,6 +849,7 @@ mod review_fixes {
                 },
                 cwd: None,
                 prompt: Some("fix the login".into()),
+                issue: None,
                 title_from: None,
                 model: None,
                 effort: None,

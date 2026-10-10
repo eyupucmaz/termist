@@ -14,9 +14,9 @@ pub mod status;
 
 pub use ids::{ProjectId, SessionId};
 pub use model::{
-    DiffMode, EFFORT_LEVELS, GUI_EDITORS, GrepMatch, Harness, HarnessInfo, LaunchOptions,
-    LocalDiffData, ModelInfo, Place, PrEnd, ProjectInfo, ReadState, SessionInfo, SessionKind, Stat,
-    StateSnapshot, TermColors, WorktreeInfo, gui_editor,
+    DiffMode, EFFORT_LEVELS, GUI_EDITORS, GrepMatch, Harness, HarnessInfo, IssueLink,
+    LaunchOptions, LocalDiffData, ModelInfo, Place, PrEnd, ProjectInfo, ReadState, SessionInfo,
+    SessionKind, Stat, StateSnapshot, TermColors, WorktreeInfo, gui_editor,
 };
 pub use protocol::{ClientRequest, PROTOCOL_VERSION, ServerEvent};
 pub use screen::{

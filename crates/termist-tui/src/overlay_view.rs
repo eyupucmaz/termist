@@ -368,6 +368,10 @@ pub fn draw(f: &mut Frame, app: &App, overlay: &Overlay, body: Rect, top: bool) 
                     None => ("new task".to_string(), None),
                 },
             };
+            let title = match &q.issue {
+                Some(i) => format!("{title} · issue #{}", i.link.number),
+                None => title,
+            };
             prompt_box_in(
                 f,
                 t,

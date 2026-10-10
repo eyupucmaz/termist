@@ -5,6 +5,8 @@ pub mod compose;
 pub mod detail_view;
 pub mod hand;
 pub mod inbox_view;
+pub mod issues;
+pub mod issues_view;
 pub mod markdown;
 pub mod timeline;
 
@@ -145,10 +147,40 @@ impl Detail {
     }
 }
 
+/// The view's two lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Section {
+    #[default]
+    Pulls,
+    Issues,
+}
+
+impl Section {
+    pub const ALL: [Section; 2] = [Section::Pulls, Section::Issues];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Pulls => "Pull requests",
+            Section::Issues => "Issues",
+        }
+    }
+
+    pub fn other(self) -> Section {
+        match self {
+            Section::Pulls => Section::Issues,
+            Section::Issues => Section::Pulls,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrView {
     /// The project the view was set up for; another tab starts it afresh.
     pub project: Option<ProjectId>,
+    /// Which list shows: the pull requests (with the one open), or the issues.
+    pub section: Section,
+    /// Defter: the Issues tab.
+    pub issues: issues::IssueList,
     pub filter: Filter,
     /// The `/` search.
     pub query: String,
@@ -182,6 +214,9 @@ pub struct PrLayout {
     /// The detail's body on screen and the line shown at its top.
     pub body: Rect,
     pub scroll: usize,
+    /// The list's section names in its title (their columns) and their row.
+    pub sections: Vec<(Section, u16, u16)>,
+    pub section_row: u16,
 }
 
 /// An item of the conversation, from its first line: what the keys can do on it.
@@ -660,6 +695,9 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
     // Reset first, so a screen that returns early never leaves a stale list rect or
     // thread anchors for the keys and the mouse.
     *app.pr_layout.borrow_mut() = PrLayout::default();
+    if view.section == Section::Issues {
+        return issues_view::draw(f, app, view, area);
+    }
     match &view.detail {
         Some(detail) => match &detail.diff {
             Some(open) => {
@@ -711,7 +749,7 @@ fn diff_shown<'a>(
         badges,
         seen: "viewed",
         failed: state != GhState::Ok,
-        waiting: inbox_view::trouble(&state)
+        waiting: inbox_view::trouble(&state, "pull requests")
             .map_or_else(|| "Reading the diff…".to_string(), |why| why.join(" ")),
         nothing: "No file to show.".to_string(),
         elsewhere: " · b browser",
@@ -719,9 +757,54 @@ fn diff_shown<'a>(
 }
 
 /// The footer while the PR view is up.
+/// `Pull requests │ Issues` for a list's title, the shown one bright; where each
+/// name lands is kept for the mouse. `area` is the list's box.
+pub fn section_title(app: &App, view: &PrView, area: Rect) -> Vec<Span<'static>> {
+    let t = &app.theme;
+    let mut spans = vec![Span::raw(" ")];
+    let mut x = area.x + 2;
+    let mut places = vec![];
+    for (i, section) in Section::ALL.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", t.dim));
+            x += 3;
+        }
+        let style = if section == view.section {
+            t.accent.add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            t.dim
+        };
+        let width = section.label().chars().count() as u16;
+        places.push((section, x, x + width));
+        spans.push(Span::styled(section.label(), style));
+        x += width;
+    }
+    spans.push(Span::raw(" "));
+    let mut layout = app.pr_layout.borrow_mut();
+    layout.sections = places;
+    layout.section_row = area.y;
+    spans
+}
+
 pub fn hint(app: &App, view: &PrView) -> String {
     use crate::keys::{Action, Context};
     let key = |action| app.keymap.key(Context::Grid, action).unwrap_or_default();
+    if view.section == Section::Issues {
+        if let Some(n) = view.issues.reading.and(view.issues.selected) {
+            return format!(
+                "#{} · j/k scroll · Space page · Enter agent · b browser · Esc list",
+                n.number
+            );
+        }
+        if view.issues.typing {
+            return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
+        }
+        return format!(
+            "issues · Enter agent · Space read · / search · f {} · Tab pull requests · m repos · b browser · {} refresh · Esc grid",
+            view.issues.filter.next().label(),
+            key(Action::RefreshGitHub)
+        );
+    }
     if view.typing {
         return "type to search · ↑/↓ choose · Enter keep · Esc clear".into();
     }
@@ -764,7 +847,7 @@ pub fn hint(app: &App, view: &PrView) -> String {
         );
     }
     format!(
-        "pull requests · Enter open · / search · f {} · m repos · w worktree · b browser · {} refresh · Esc grid",
+        "pull requests · Enter open · / search · f {} · Tab issues · m repos · w worktree · b browser · {} refresh · Esc grid",
         view.filter.next().label(),
         key(Action::RefreshGitHub)
     )

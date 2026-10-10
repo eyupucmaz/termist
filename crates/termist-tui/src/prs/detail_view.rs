@@ -46,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
         status.spans.push(Span::raw("    "));
         status.spans.push(mark);
     }
-    if let Some(why) = trouble(&state) {
+    if let Some(why) = trouble(&state, "pull requests") {
         status
             .spans
             .push(Span::styled(format!("  ⟳ {}", why.join(" ")), t.warn));
@@ -90,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &App, d: &Detail, area: Rect) {
     let mut files = vec![];
     let (lines, threads, checks) = match detail {
         None => {
-            let text = trouble(&state)
+            let text = trouble(&state, "pull requests")
                 .map(|w| w.join(" "))
                 .unwrap_or_else(|| "Reading the pull request…".into());
             (

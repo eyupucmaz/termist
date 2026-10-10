@@ -180,6 +180,7 @@ mod tests {
             archived: false,
             cwd: "/p".into(),
             place: None,
+            issue: None,
         }
     }
 
