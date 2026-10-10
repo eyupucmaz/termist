@@ -3611,6 +3611,29 @@ mod tests {
     }
 
     #[test]
+    fn space_reads_the_issue_on_the_whole_view() {
+        let mut app = issues_fixture();
+        let project = app.state.projects[0].id;
+        let long: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        app.issues.get_mut(&project).unwrap().repos[0].issues[0].body = long.join("\n\n");
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(
+            text.contains("#123 Login redirect loses the query"),
+            "{text}"
+        );
+        assert!(text.contains("acme/site · opened by bob"), "{text}");
+        assert!(text.contains("j/k scroll"), "{text}");
+        assert!(!text.contains("#7 "), "the list is gone: {text}");
+        app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        let text = screen(&render(&mut app, 80, 14));
+        assert!(text.contains("line 30"), "{text}");
+        assert!(!text.contains("acme/site · opened"), "scrolled: {text}");
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(screen(&render(&mut app, 80, 14)).contains("#7 "));
+    }
+
+    #[test]
     fn issues_without_gh_say_how_to_get_it() {
         let mut app = issues_fixture();
         let project = app.state.projects[0].id;

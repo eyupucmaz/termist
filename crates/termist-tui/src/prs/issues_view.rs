@@ -56,6 +56,11 @@ pub fn draw(f: &mut Frame, app: &App, view: &PrView, area: Rect) {
             ],
         );
     }
+    if view.issues.reading.is_some()
+        && let Some((repo, issue)) = view.issues.selection(data)
+    {
+        return draw_reading(f, app, view, repo, issue, area);
+    }
     let name = app
         .state
         .projects
@@ -309,6 +314,39 @@ pub fn body_lines(t: &Theme, issue: &IssueSummary, width: u16) -> Vec<Line<'stat
         return vec![Line::from(Span::styled("No description.", t.dim))];
     }
     render(&body, width, t)
+}
+
+/// `Space`: one issue on the whole view, scrolled.
+fn draw_reading(
+    f: &mut Frame,
+    app: &App,
+    view: &PrView,
+    repo: &RepoIssues,
+    issue: &IssueSummary,
+    area: Rect,
+) {
+    let t = &app.theme;
+    let w = area.width.saturating_sub(2) as usize;
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " {} ",
+        cut(
+            &format!("#{} {}", issue.number, issue.title),
+            w.saturating_sub(2)
+        )
+    ));
+    let inner = block.inner(area);
+    let mut lines = head_lines(t, repo, issue, w, app.now_secs());
+    lines.extend(body_lines(t, issue, inner.width));
+    let page = inner.height as usize;
+    let end = lines.len().saturating_sub(page);
+    let scroll = view.issues.reading.unwrap_or(0).min(end);
+    let shown: Vec<Line> = lines.into_iter().skip(scroll).take(page).collect();
+    f.render_widget(Paragraph::new(shown).block(block), area);
+    let mut layout = app.pr_layout.borrow_mut();
+    layout.body = inner;
+    layout.end = end;
+    layout.page = page;
+    layout.scroll = scroll;
 }
 
 fn draw_preview(f: &mut Frame, app: &App, list: &IssueList, data: &ProjectIssues, area: Rect) {

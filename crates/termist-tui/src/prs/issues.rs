@@ -1,5 +1,6 @@
 //! Defter: the Issues tab of the pull request view. A project's open issues repo by
 //! repo, as the daemon read them while the tab is open.
+use super::PrLayout;
 use crate::list_picker::matches;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use termist_core::github::{GhState, IssueSummary, RepoId, RepoIssues};
@@ -68,6 +69,8 @@ pub struct IssueList {
     pub selected: Option<IssueRef>,
     /// The selection's place among the issues: where it lands when its issue goes.
     pub index: usize,
+    /// `Space`: the selected issue read whole, scrolled this many lines.
+    pub reading: Option<usize>,
 }
 
 /// A line of the issue list.
@@ -175,6 +178,9 @@ impl IssueList {
             self.index = i;
             return;
         }
+        // The issue being read is gone (closed, or a filter): back to the list, not on
+        // to another one in its place.
+        self.reading = None;
         self.index = self.index.min(issues.len().saturating_sub(1));
         self.selected = issues.get(self.index).copied();
     }
@@ -201,8 +207,39 @@ impl IssueList {
         Some((repo, repo.issues.iter().find(|i| i.number == s.number)?))
     }
 
-    pub fn key(&mut self, key: KeyEvent, data: &ProjectIssues) -> Option<IssueAction> {
+    /// A key; `layout` says how far the issue being read scrolls, and a page.
+    pub fn key(
+        &mut self,
+        key: KeyEvent,
+        data: &ProjectIssues,
+        layout: &PrLayout,
+    ) -> Option<IssueAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(scroll) = self.reading {
+            let page = layout.page.max(1);
+            let to = |by: isize| scroll.saturating_add_signed(by).min(layout.end);
+            self.reading = Some(match key.code {
+                KeyCode::Char('j') | KeyCode::Down => to(1),
+                KeyCode::Char('k') | KeyCode::Up => to(-1),
+                KeyCode::Char('d') if ctrl => to(page as isize / 2),
+                KeyCode::Char('u') if ctrl => to(-(page as isize) / 2),
+                KeyCode::PageDown | KeyCode::Char(' ') => to(page as isize),
+                KeyCode::PageUp => to(-(page as isize)),
+                KeyCode::Home | KeyCode::Char('g') => 0,
+                KeyCode::End | KeyCode::Char('G') => layout.end,
+                KeyCode::Char('b') => {
+                    return self
+                        .selection(data)
+                        .map(|(_, i)| IssueAction::Browser(i.url.clone()));
+                }
+                KeyCode::Esc => {
+                    self.reading = None;
+                    return None;
+                }
+                _ => scroll,
+            });
+            return None;
+        }
         if self.typing {
             match key.code {
                 KeyCode::Esc => {
@@ -233,6 +270,7 @@ impl IssueList {
             KeyCode::Home | KeyCode::Char('g') => self.step(&list, isize::MIN),
             KeyCode::End | KeyCode::Char('G') => self.step(&list, isize::MAX),
             KeyCode::Char('/') => self.typing = true,
+            KeyCode::Char(' ') if self.selection(data).is_some() => self.reading = Some(0),
             KeyCode::Char('f') => {
                 self.filter = self.filter.next();
                 let list = rows(data, self);
@@ -339,42 +377,99 @@ pub(crate) mod tests {
     #[test]
     fn f_keeps_yours_and_slash_searches_titles_numbers_and_labels() {
         let data = data();
+        let layout = PrLayout::default();
         let mut list = IssueList::default();
-        list.key(key(KeyCode::Char('f')), &data);
+        list.key(key(KeyCode::Char('f')), &data, &layout);
         assert_eq!(list.filter, IssueFilter::Assigned);
         assert_eq!(numbers(&data, &list), [123]);
-        list.key(key(KeyCode::Char('f')), &data);
+        list.key(key(KeyCode::Char('f')), &data, &layout);
         assert_eq!(numbers(&data, &list), [7], "opened by you");
-        list.key(key(KeyCode::Char('f')), &data);
-        list.key(key(KeyCode::Char('/')), &data);
+        list.key(key(KeyCode::Char('f')), &data, &layout);
+        list.key(key(KeyCode::Char('/')), &data, &layout);
         for c in "docs".chars() {
-            list.key(key(KeyCode::Char(c)), &data);
+            list.key(key(KeyCode::Char(c)), &data, &layout);
         }
         assert_eq!(numbers(&data, &list), [7], "a label");
         assert_eq!(list.selected.map(|s| s.number), Some(7));
-        list.key(key(KeyCode::Esc), &data);
-        list.key(key(KeyCode::Char('/')), &data);
-        list.key(key(KeyCode::Char('1')), &data);
+        list.key(key(KeyCode::Esc), &data, &layout);
+        list.key(key(KeyCode::Char('/')), &data, &layout);
+        list.key(key(KeyCode::Char('1')), &data, &layout);
         assert_eq!(numbers(&data, &list), [123], "a number");
     }
 
     #[test]
     fn keys_move_open_the_browser_and_leave() {
         let data = data();
+        let layout = PrLayout::default();
         let mut list = IssueList::default();
         list.repair(&rows(&data, &list));
         assert_eq!(list.selected.map(|s| s.number), Some(123));
-        list.key(key(KeyCode::Char('j')), &data);
+        list.key(key(KeyCode::Char('j')), &data, &layout);
         assert_eq!(
-            list.key(key(KeyCode::Char('b')), &data),
+            list.key(key(KeyCode::Char('b')), &data, &layout),
             Some(IssueAction::Browser(
                 "https://github.com/acme/site/issues/7".into()
             ))
         );
         assert_eq!(
-            list.key(key(KeyCode::Char('m')), &data),
+            list.key(key(KeyCode::Char('m')), &data, &layout),
             Some(IssueAction::Repos)
         );
-        assert_eq!(list.key(key(KeyCode::Esc), &data), Some(IssueAction::Close));
+        assert_eq!(
+            list.key(key(KeyCode::Esc), &data, &layout),
+            Some(IssueAction::Close)
+        );
+    }
+
+    #[test]
+    fn space_reads_the_issue_and_its_keys_scroll_within_it() {
+        let data = data();
+        let layout = PrLayout {
+            end: 12,
+            page: 10,
+            ..PrLayout::default()
+        };
+        let mut list = IssueList::default();
+        list.repair(&rows(&data, &list));
+        list.key(key(KeyCode::Char(' ')), &data, &layout);
+        assert_eq!(list.reading, Some(0));
+        list.key(key(KeyCode::Char('j')), &data, &layout);
+        list.key(key(KeyCode::PageDown), &data, &layout);
+        assert_eq!(list.reading, Some(11));
+        list.key(key(KeyCode::Char('G')), &data, &layout);
+        list.key(key(KeyCode::Char('j')), &data, &layout);
+        assert_eq!(list.reading, Some(12), "not past the end");
+        list.key(key(KeyCode::Char('k')), &data, &layout);
+        assert_eq!(list.reading, Some(11));
+        assert_eq!(
+            list.selected.map(|s| s.number),
+            Some(123),
+            "j scrolls, not moves"
+        );
+        assert_eq!(
+            list.key(key(KeyCode::Char('b')), &data, &layout),
+            Some(IssueAction::Browser(
+                "https://github.com/acme/site/issues/123".into()
+            ))
+        );
+        assert_eq!(list.key(key(KeyCode::Esc), &data, &layout), None);
+        assert_eq!(list.reading, None, "Esc: back to the list");
+        assert_eq!(
+            list.key(key(KeyCode::Esc), &data, &layout),
+            Some(IssueAction::Close)
+        );
+    }
+
+    #[test]
+    fn an_issue_that_goes_while_it_is_read_leaves_the_reading() {
+        let mut data = data();
+        let layout = PrLayout::default();
+        let mut list = IssueList::default();
+        list.repair(&rows(&data, &list));
+        list.key(key(KeyCode::Char(' ')), &data, &layout);
+        data.repos[0].issues.remove(0);
+        list.repair(&rows(&data, &list));
+        assert_eq!(list.reading, None, "not another issue in its place");
+        assert_eq!(list.selected.map(|s| s.number), Some(7));
     }
 }

@@ -3486,7 +3486,8 @@ impl App {
                 .project
                 .and_then(|p| self.issues.get(&p))
                 .unwrap_or(&none);
-            return match view.issues.key(key, data) {
+            let layout = self.pr_layout.borrow().clone();
+            return match view.issues.key(key, data, &layout) {
                 None => vec![],
                 Some(IssueAction::Close) => {
                     self.view = View::Grid;
