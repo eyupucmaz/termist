@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+From an issue to a task.
+
+### Added
+
+- **Issues (`i`)**: the pull request view has a second tab, the project's open issues, repo by repo,
+  beside the one selected (`Tab` goes between them; `f` keeps those assigned to you or opened by you,
+  `/` searches). termist reads them only while you look. `Space` reads one whole.
+- **`Enter` on an issue** opens the new-task prompt with its title, description and link, on a new
+  worktree named after it (`123-login-redirect-loses-the`). The card is named after the issue, keeps it,
+  and shows its number; the issue's row shows the card. `Shift+I` opens a card's issue in the browser.
+
+### Updating
+
+This version changes how the TUI and the daemon talk, and what the daemon keeps. Run `termist update`,
+then, when your sessions can stop, `termist kill` and start `termist` again.
+
 ## 0.2.5 - 2026-10-09
 
 Agents drive termist.

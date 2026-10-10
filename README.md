@@ -145,6 +145,7 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | `.` / `,` | next / previous session that needs you, across all projects |
 | `/` | find any session |
 | `v` | the project's open pull requests and their diffs (needs the GitHub CLI) |
+| `i` | the project's open issues; `Enter` starts an agent on one |
 | click | a project tab, a card (again: type into it), the pane, a file, a thread |
 | `s` / `?` | settings / every key as it is bound now |
 | `q` | quit the TUI; the agents keep running |
@@ -173,6 +174,8 @@ with your sessions: when they can stop, run `termist kill`, then `termist` start
 | drag | select in the pane; letting go copies it to the clipboard, and a toast in the top right says so |
 | `v` / `R` | the project's pull requests (on the selected card's, if it has one) / read GitHub again |
 | `V` | the selected card's pull request in the browser |
+| `i` / `I` | the project's open issues (`Tab` goes between them and the pull requests) / the selected card's issue in the browser |
+| `Enter` / `Space` | on an issue: a new task on it, in a new worktree named after it / read it whole |
 | `d` | in a pull request: its files and their diff |
 | `w` | in a pull request: a worktree on its branch, and an agent there |
 | `Space` / `a` | in a pull request: mark review threads / hand them to an agent |
@@ -285,6 +288,15 @@ new-task prompt for an agent there. To act on review comments, mark threads with
 they go, with the lines they are about, to an agent already on that branch as a follow-up, or to a new
 one in its worktree. Cards stand in bands, one per worktree, under the branch and its pull request;
 `Shift+V` opens a card's pull request in the browser.
+
+### Issues
+
+`i` shows the project's open issues, repo by repo, beside the one selected (`Tab` goes back and forth
+with the pull requests; `f` keeps those assigned to you or opened by you, `/` searches titles, numbers
+and labels). termist reads them only while you look. `Space` reads one whole. `Enter` opens the new-task
+prompt with the issue in it, its title, description and link, on a new worktree named after it
+(`123-login-redirect-loses-the`; `^N` starts it in the folder instead). The card is named after the
+issue, keeps it, and shows its number on its edge; `Shift+I` opens it in the browser.
 
 ```toml
 [github]
