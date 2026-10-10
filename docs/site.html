@@ -173,7 +173,7 @@
   <h1 class="name">termist</h1>
   <p class="gloss">terminal istanbul</p>
   <p class="pitch">Mission control for your coding agents. Run Claude Code, Codex and OpenCode side by side, across every project, from one terminal tab.</p>
-  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.5</a>: agents drive termist (<code>termist spawn</code>, <code>worktree</code>, <code>open</code>), your agent setups, kept (<kbd>e</kbd> presets, <kbd>Ctrl</kbd>+<kbd>S</kbd> saves one, cards named after the task), tools next to your agents (<kbd>O</kbd> editor, <kbd>L</kbd> lazygit, <kbd>f</kbd>/<kbd>F</kbd> find, copy mode), what an agent changed (<kbd>g</kbd>, <kbd>Ctrl</kbd>+<kbd>r</kbd> reviewed), worktrees of their own (<kbd>Ctrl</kbd>+<kbd>N</kbd>, <kbd>W</kbd>, <kbd>X</kbd>), on top of 0.2.0's <a href="#prs">pull requests next to your agents</a>. <code>termist update</code> keeps it current.</p>
+  <p class="status-note"><a href="https://github.com/eyupucmaz/termist/releases">v0.2.6</a>: from an issue to a task (<kbd>i</kbd> issues, <kbd>Enter</kbd> starts an agent on one, <kbd>Shift</kbd>+<kbd>I</kbd> opens a card's), agents drive termist (<code>termist spawn</code>, <code>worktree</code>, <code>open</code>), your agent setups, kept (<kbd>e</kbd> presets, <kbd>Ctrl</kbd>+<kbd>S</kbd> saves one, cards named after the task), tools next to your agents (<kbd>O</kbd> editor, <kbd>L</kbd> lazygit, <kbd>f</kbd>/<kbd>F</kbd> find, copy mode), what an agent changed (<kbd>g</kbd>, <kbd>Ctrl</kbd>+<kbd>r</kbd> reviewed), worktrees of their own (<kbd>Ctrl</kbd>+<kbd>N</kbd>, <kbd>W</kbd>, <kbd>X</kbd>), on top of 0.2.0's <a href="#prs">pull requests next to your agents</a>. <code>termist update</code> keeps it current.</p>
 
   <h2 id="install">Install</h2>
   <dl class="install">
@@ -289,6 +289,7 @@
       <tr><td><kbd>r</kbd> <kbd>x</kbd></td><td>On a thread: reply, resolve</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd> <kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>In the new-task prompt: a new worktree for the task, named from the prompt / where the task starts</td></tr>
       <tr><td><kbd>W</kbd> <kbd>X</kbd></td><td>The worktrees: show, hide, remove / remove the selected one (the branch stays)</td></tr>
+      <tr><td><kbd>i</kbd> <kbd>Shift</kbd>+<kbd>I</kbd></td><td>The project's open issues (<kbd>Enter</kbd> starts an agent on one in a worktree named after it, <kbd>Space</kbd> reads it) / the card's issue in the browser</td></tr>
       <tr><td><code>termist spawn</code></td><td>What an agent runs to start another (beside it, or <code>--worktree</code> in a branch's), to move into a worktree (<code>termist worktree</code>) or to open a file (<code>termist open</code>)</td></tr>
       <tr><td><kbd>e</kbd></td><td>Your agent presets: <kbd>Enter</kbd> opens the new-task prompt with one, <kbd>r</kbd> renames, <kbd>d</kbd> deletes; <kbd>Ctrl</kbd>+<kbd>S</kbd> in that prompt saves one</td></tr>
       <tr><td><kbd>O</kbd> <kbd>L</kbd></td><td>The card's folder in your editor (a terminal one as a card) / lazygit there</td></tr>
